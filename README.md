@@ -8,6 +8,7 @@ This repository contains code and resources for exploring latent program spaces,
 - [Installation](#installation)
 - [Usage](#usage)
 - [Project Structure](#project-structure)
+- [References](#references)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -20,7 +21,7 @@ The project focuses on searching latent spaces of programs, leveraging machine l
 To set up the project, clone the repository and install the required dependencies:
 
 ```bash
-git clone https://github.com/yourusername/latent-space-search.git
+git clone https://github.com/Adell02/latent-space-search.git
 cd latent-space-search
 pip install -r requirements.txt
 ```
@@ -35,16 +36,24 @@ python demo_batch_tasks.py
 
 ## Project Structure
 
-- **re_arc/**: Contains the main modules for generating and processing tasks.
+- **re_arc/**: Contains all the information regarding the RE-ARC data generation and processing. Refer to the RE-ARC papers for more details.
   - `main.py`: Main script for task generation and evaluation.
   - `generators.py`: Functions to generate tasks with varying difficulty.
   - `dsl.py`: Domain-specific language functions for task manipulation.
-- **models/**: Contains the machine learning models used for latent space exploration.
+- **models/**: Stores the different machine learning models used for latent space exploration.
   - `initial_model.py`: Defines the architecture and training routines for the models.
-- **utils/**: Utility functions for data preparation and processing.
+- **utils/**: Contains additional utility functions for data preparation and processing.
   - `data_preparation.py`: Functions to transform and prepare data for model input.
-- **runs_re_arc/**: Directory for storing experiment runs and results.
+  - `utils.py`: Various utility functions for data manipulation and processing.
+- **runs_re_arc/**: Stores the logs for the model training.
 - **requirements.txt**: Lists the Python dependencies required for the project.
+- **Bonnet and Macfarlane - 2024 - Searching Latent Program Spaces.pdf**: The original paper for the `initial_model`.
+- **demo_batch_tasks.py**: Generates a sample of the input tasks.
+- **main.py**: Runs the training for each model and triggers results visualization.
+
+## References
+
+- Bonnet, A., & Macfarlane, J. (2024). Searching Latent Program Spaces. [Link to paper](https://doi.org/10.48550/arXiv.2302.13971)
 
 ## Contributing
 
