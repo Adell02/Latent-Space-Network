@@ -42,6 +42,9 @@ DECODER_MAX_LENGTH = 902         # For output sequence
 NUM_EPOCHS = 300
 LEARNING_RATE = 1e-4
 
+# Add beta parameter to TUNABLE SETTINGS
+BETA = 1.0  # Weighting factor for KL loss term
+
 
 ##############################
 # Define Model Components
@@ -292,66 +295,113 @@ class LatentProgramNetwork(nn.Module):
         super().__init__()
         self.latent_dim = latent_dim
         self.hidden_dim = hidden_dim
-
+        
+        # Initialize components with device awareness
         self.encoder = TransformerEncoder(input_dim, hidden_dim, num_layers, num_heads,
                                         dropout, max_length=encoder_max_length)
         self.decoder = TransformerDecoder(input_dim, hidden_dim, num_layers, num_heads, dropout)
-
+        
+        # Initialize parameters on the correct device
+        self._initialize_parameters()
+        
+    def _initialize_parameters(self):
+        """Initialize all parameters on the correct device."""
+        # Get the device of the first parameter (should be the same as the model's device)
+        device = next(self.parameters()).device
+        
+        # Move all submodules to the correct device
+        for module in self.modules():
+            if module is not self:  # Skip self to avoid recursion
+                module.to(device)
+        
+        # Verify all parameters are on the correct device
+        for name, param in self.named_parameters():
+            if param.device != device:
+                print(f"WARNING: Parameter {name} is on {param.device} but should be on {device}")
+                param.data = param.data.to(device)
+    
     def reparameterize(self, mu: torch.Tensor, log_var: torch.Tensor) -> torch.Tensor:
         std = torch.exp(0.5 * log_var)
         eps = torch.randn_like(std)
         return mu + eps * std
 
     def forward(self, input_seq: torch.Tensor, target_seq: torch.Tensor) -> Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor]:
+        # Verify inputs are on the correct device
+        device = next(self.parameters()).device
+        if input_seq.device != device:
+            input_seq = input_seq.to(device)
+        if target_seq.device != device:
+            target_seq = target_seq.to(device)
+            
         mu, log_var = self.encoder(input_seq, target_seq)
         z = self.reparameterize(mu, log_var)
         shape_logits, grid_logits = self.decoder(z, input_seq, target_seq=target_seq)
         return (shape_logits, grid_logits), mu, log_var
 
-def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Tensor, beta: float = 1.0) -> torch.Tensor:
+def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Tensor, beta: float = BETA) -> torch.Tensor:
     """
-    Compute the total loss for the model.
-
+    Compute the total loss for the model using cross-pair reconstruction.
+    
     The loss is composed of:
-      - A shape loss computed over the two shape tokens.
-      - A grid loss computed *only* over the active region of the grid, as defined by the target's shape.
-      - A KL divergence loss on the latent parameters.
-
+      - A shape loss computed over the two shape tokens
+      - A grid loss computed *only* over the active region of the grid, as defined by the target's shape
+      - A KL divergence loss on the latent parameters weighted by beta
+    
     This formulation forces 100% accuracy (i.e. a zero loss) only if the entire active output
     (all pixels in the target region) are exactly reconstructed.
     """
-    reconstruction, mu, log_var = model(input_seq, target_seq)
-    shape_logits, grid_logits = reconstruction
-
-    # Compute shape loss (for the two shape tokens):
-    shape_targets = target_seq[:, 900:902].long()
-    shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
-
-    # Compute grid loss only over the active region for each sample.
-    batch_size = target_seq.size(0)
-    grid_loss_sum = 0.0
+    # Get the device the model is on
+    device = next(model.parameters()).device
+    
+    # Ensure inputs are on the correct device
+    input_seq = input_seq.to(device)
+    target_seq = target_seq.to(device)
+    
+    batch_size = input_seq.size(0)
+    total_loss = 0.0
+    
+    # For each sample in the batch, use all other samples to reconstruct it
     for i in range(batch_size):
-        # Retrieve the target dimensions (active region) from the last two tokens.
-        tgt_rows = int(target_seq[i, 900].item())
-        tgt_cols = int(target_seq[i, 901].item())
+        # Get the target sample to reconstruct
+        target_input = input_seq[i:i+1]  # Keep batch dimension
+        target_output = target_seq[i:i+1]
+        
+        # Get all other samples in the batch
+        other_inputs = torch.cat([input_seq[:i], input_seq[i+1:]])
+        other_outputs = torch.cat([target_seq[:i], target_seq[i+1:]])
+        
+        # Encode all other samples
+        mu, log_var = model.encoder(other_inputs, other_outputs)
+        
+        # Sample from the aggregated distribution (mean of all other samples)
+        z = model.reparameterize(mu.mean(dim=0, keepdim=True), log_var.mean(dim=0, keepdim=True))
+        
+        # Decode using the target input and sampled latent
+        shape_logits, grid_logits = model.decoder(z, target_input)
+        
+        # Compute shape loss (for the two shape tokens)
+        shape_targets = target_output[:, 900:902].long()
+        shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
+        
+        # Compute grid loss only over the active region
+        tgt_rows = int(target_output[0, 900].item())
+        tgt_cols = int(target_output[0, 901].item())
         active_pixels = tgt_rows * tgt_cols
-
-        # Compute cross-entropy only over the active region.
-        # Note: grid_logits[i, :active_pixels] has shape (active_pixels, num_grid_classes)
-        #       target_seq[i, :active_pixels] has shape (active_pixels,)
-        loss_i = F.cross_entropy(grid_logits[i, :active_pixels], target_seq[i, :active_pixels].long())
-        grid_loss_sum += loss_i
-
-    grid_loss = grid_loss_sum / batch_size
-
-    # Total reconstruction loss: we want both shape and grid to be perfectly predicted.
-    reconstruction_loss = shape_loss + grid_loss
-
-    # KL divergence loss (as before).
-    kl_loss = 0.5 * torch.sum(mu.pow(2) + log_var.exp() - 1 - log_var)
-
-    total_loss = reconstruction_loss + beta * kl_loss
-    return total_loss
+        
+        # Compute cross-entropy only over the active region
+        grid_loss = F.cross_entropy(grid_logits[0, :active_pixels], target_output[0, :active_pixels].long())
+        
+        # Total reconstruction loss for this sample
+        reconstruction_loss = shape_loss + grid_loss
+        
+        # KL divergence loss (weighted by beta)
+        kl_loss = 0.5 * torch.sum(mu.pow(2) + log_var.exp() - 1 - log_var)
+        
+        # Add to total loss
+        total_loss += reconstruction_loss + beta * kl_loss
+    
+    # Average over batch
+    return total_loss / batch_size
 
 
 ##############################
@@ -369,11 +419,21 @@ def train_model(model, dataloader, optimizer, run_dir, logger):
     logger.info("Starting training batch loop...")
     total_batches = len(dataloader)
 
+    # Log GPU memory usage at start of training
+    if torch.cuda.is_available():
+        logger.info(f"Initial GPU Memory Usage: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+        logger.info(f"Initial GPU Memory Cached: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+
     for batch_idx, (input_seq, target_seq) in enumerate(dataloader):
         progress = (batch_idx + 1) / total_batches * 100
         device = next(model.parameters()).device
         input_seq = input_seq.to(device)
         target_seq = target_seq.to(device)
+
+        # Log GPU memory usage periodically
+        if torch.cuda.is_available() and (batch_idx + 1) % 10 == 0:
+            logger.info(f"Batch {batch_idx + 1} GPU Memory Usage: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+            logger.info(f"Batch {batch_idx + 1} GPU Memory Cached: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
 
         optimizer.zero_grad()
         loss = compute_loss(model, input_seq, target_seq)
@@ -426,15 +486,44 @@ def train_model(model, dataloader, optimizer, run_dir, logger):
     logger.info(f"  Final Avg Total Loss: {avg_loss:.4f}")
     logger.info("=" * 60)
 
+    # Log final GPU memory usage
+    if torch.cuda.is_available():
+        logger.info(f"Final GPU Memory Usage: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+        logger.info(f"Final GPU Memory Cached: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+
     return avg_loss
 
 def main():
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
-
+    # Check CUDA availability and force GPU usage if available
+    if not torch.cuda.is_available():
+        print("WARNING: CUDA is not available. Training will be very slow on CPU.")
+        print("Please install PyTorch with CUDA support: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118")
+        device = torch.device('cpu')
+    else:
+        print("CUDA is available. Using GPU for training.")
+        # Set default device to GPU
+        torch.cuda.set_device(0)
+        device = torch.device('cuda')
+        
+        # Print GPU information
+        print(f"GPU Device: {torch.cuda.get_device_name(0)}")
+        print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+        print(f"CUDA Version: {torch.version.cuda}")
+        
+        # Enable cuDNN benchmarking for better performance
+        torch.backends.cudnn.benchmark = True
+        # Enable TF32 for better performance on Ampere GPUs
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    
     run_dir = create_run_directory()
     logger = setup_logging(run_dir)
     logger.info(f"Starting training for ARC problem {KEY}")
+    logger.info(f"Using device: {device}")
+    if torch.cuda.is_available():
+        logger.info(f"GPU Device: {torch.cuda.get_device_name(0)}")
+        logger.info(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+        logger.info(f"CUDA Version: {torch.version.cuda}")
     print("Run directory created:", run_dir)
 
     logger.info("Generating and preparing data...")
@@ -451,6 +540,16 @@ def main():
     model = LatentProgramNetwork().to(device)
     optimizer = Adam(model.parameters(), lr=LEARNING_RATE)
     print("Model and optimizer initialized.")
+
+    # Verify model is on GPU
+    if torch.cuda.is_available():
+        print("Verifying model is on GPU...")
+        print(f"Model device: {next(model.parameters()).device}")
+        print(f"Model is on GPU: {next(model.parameters()).is_cuda}")
+        if not next(model.parameters()).is_cuda:
+            print("WARNING: Model is not on GPU despite CUDA being available!")
+            print("Please check your PyTorch installation and CUDA setup.")
+            return
 
     count_model_parameters(model)
     print("Model parameter count completed.")
