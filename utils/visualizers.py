@@ -7,6 +7,7 @@ from tabulate import tabulate
 import os
 import torch
 from sklearn.manifold import TSNE
+import pickle
 
 ##############################
 # VISUALIZERS FOR DATA
@@ -289,6 +290,12 @@ def plot_reconstructions(results):
         common_cols = min(out_cols, recon_cols)
         error_region_target = target_grid[:common_rows, :common_cols]
         error_region_recon = recon_grid[:common_rows, :common_cols]
+        if error_region_target.shape != error_region_recon.shape:
+            # pad the smaller one with zeros
+            if error_region_target.shape[0] < error_region_recon.shape[0]:
+                error_region_target = np.pad(error_region_target, ((0, 0), (0, error_region_recon.shape[1] - error_region_target.shape[1])))
+            else:
+                error_region_recon = np.pad(error_region_recon, ((0, 0), (0, error_region_target.shape[1] - error_region_recon.shape[1])))
         error_map = np.abs(error_region_target - error_region_recon)
         axs[3].imshow(error_map, cmap='hot')
         axs[3].set_title('Error Map')
@@ -297,6 +304,8 @@ def plot_reconstructions(results):
         plt.suptitle(f'Sample {i+1}', fontsize=18)
         plt.tight_layout()
         plt.show()
+
+
 
 def visualize_all_results(results):
     """Plot all visualizations for the results."""
@@ -311,3 +320,93 @@ def visualize_all_results(results):
 
     print("\nPlotting reconstructions...")
     plot_reconstructions(results)
+
+
+def plot_evaluation_results(results):
+    """
+    Plot evaluation metrics and reconstructions for each key.
+    
+    Args:
+        results: Dictionary containing evaluation results for each key
+    """
+    # Plot metrics
+    fig, axs = plt.subplots(2, 3, figsize=(15, 10))
+    axs = axs.flatten()
+    
+    # Define metrics to plot
+    metrics = [
+        'support_loss', 'query_loss',  # Loss metrics
+        'shape_accuracy', 'grid_accuracy',  # Accuracy metrics
+        'overall_accuracy', 'sample_exact_accuracy'  # Additional metrics
+    ]
+    
+    # Plot each metric
+    for i, metric in enumerate(metrics):
+        values = []
+        keys = []
+        for key in results:
+            if 'metrics' in results[key] and metric in results[key]['metrics']:
+                values.append(results[key]['metrics'][metric])
+                keys.append(key)
+        
+        axs[i].bar(keys, values)
+        axs[i].set_title(f'{metric.replace("_", " ").title()}')
+        axs[i].set_xticklabels(keys, rotation=45)
+        
+        # Set y-axis limits for accuracy metrics
+        if 'accuracy' in metric:
+            axs[i].set_ylim(0, 1)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # Print detailed metrics for each key
+    print("\nDetailed Evaluation Results:")
+    for key in results:
+        if 'metrics' in results[key]:
+            print(f"\nKey {key}:")
+            metrics = results[key]['metrics']
+            print(f"  Support Loss: {metrics['support_loss']:.4f}")
+            print(f"  Query Loss: {metrics['query_loss']:.4f}")
+            print(f"  Shape Accuracy: {metrics['shape_accuracy']:.4f}")
+            print(f"  Grid Accuracy: {metrics['grid_accuracy']:.4f}")
+            print(f"  Overall Accuracy: {metrics['overall_accuracy']:.4f}")
+            print(f"  Sample Exact Accuracy: {metrics['sample_exact_accuracy']:.4f}")
+    
+    # Plot reconstructions for each key
+    for key in results:
+        if 'reconstruction_results' in results[key] and len(results[key]['reconstruction_results']) > 0:
+            print(f"\nPlotting reconstructions for Key {key}:")
+            # Plot first 2 reconstructions
+            plot_reconstructions(results[key]['reconstruction_results'])
+
+def visualize_stored_results(run_dir):
+    """
+    Load and visualize results from a previous run.
+    
+    Args:
+        run_dir: Directory containing the stored results
+    """
+    # Load training results
+    results_file = os.path.join(run_dir, 'results.pkl')
+    if not os.path.exists(results_file):
+        raise FileNotFoundError(f"No results file found in {run_dir}")
+    
+    with open(results_file, 'rb') as f:
+        results = pickle.load(f)
+    
+    # Visualize training results
+    print("\nVisualizing training results...")
+    #visualize_all_results(results)
+    
+    # Try to load and visualize evaluation results
+    eval_file = os.path.join(run_dir, 'evaluation_results.pkl')
+    if os.path.exists(eval_file):
+        print("\nVisualizing evaluation results...")
+        with open(eval_file, 'rb') as f:
+            eval_results = pickle.load(f)
+        
+        # Plot evaluation metrics and reconstructions
+        plot_evaluation_results(eval_results)
+    else:
+        print("\nNo evaluation results found in the run directory.")

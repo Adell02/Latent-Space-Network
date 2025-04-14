@@ -33,33 +33,10 @@ def transform_grid_to_sequence(grid):
     return sequence
 
 
-def prepare_input_output_pair(input_grids,output_grids):
-    """
-    Prepare an input-output pair for the encoder as described.
-    Total sequence length will be 1805 (902 + 902 + 1 CLS token)
-
-    Args:
-        input_grid: 2D numpy array for input
-        output_grid: 2D numpy array for output
-    Returns:
-        full_sequence: Combined sequence for encoder input
-    """ 
-    full_sequences = []
-
-    for idx in range(len(input_grids)):
-        # Assuming that each generated example is a dictionary with keys 'input' and 'output'
-        input_grid = input_grids[idx]
-        output_grid = output_grids[idx]
-
-        # Transform the grids into sequences (e.g., padded grid flattened + shape info)
-        input_seq = transform_grid_to_sequence(input_grid)
-        output_seq = transform_grid_to_sequence(output_grid)
-
-        # Add CLS token (represented as -1 here, you can change this as needed)
-        cls_token = np.array([-1])
-        
-        full_sequence = np.concatenate([input_seq, output_seq, cls_token])
-        full_sequences.append(full_sequence)
-
-
-    return np.array(full_sequences)
+def prepare_input_output_pair(input_grid, output_grid):
+    """Prepare an input-output pair for the encoder."""
+    input_seq = transform_grid_to_sequence(np.array(input_grid))
+    output_seq = transform_grid_to_sequence(np.array(output_grid))
+    cls_token = np.array([-1])
+    full_sequence = np.concatenate([input_seq, output_seq, cls_token])
+    return full_sequence

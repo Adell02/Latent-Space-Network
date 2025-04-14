@@ -1,64 +1,119 @@
-# Latent Space Search
+# Latent Space Network
 
-This repository contains code and resources for exploring latent program spaces, as described in the paper "Searching Latent Program Spaces" by Bonnet and Macfarlane (2024).
+This repository contains the implementation of a Latent Program Network for solving ARC (Abstraction and Reasoning Corpus) tasks. The model learns to represent and solve visual reasoning tasks in a latent space.
 
-## Table of Contents
+## Repository Structure
 
-- [Introduction](#introduction)
-- [Installation](#installation)
-- [Usage](#usage)
-- [Project Structure](#project-structure)
-- [References](#references)
-- [Contributing](#contributing)
-- [License](#license)
-
-## Introduction
-
-The project focuses on searching latent spaces of programs, leveraging machine learning models to generate, evaluate, and refine program structures. The goal is to explore how latent spaces can be used to discover novel program solutions.
-
-## Installation
-
-To set up the project, clone the repository and install the required dependencies:
-
-```bash
-git clone https://github.com/Adell02/latent-space-search.git
-cd latent-space-search
-pip install -r requirements.txt
 ```
+Latent-Space-Network/
+├── models/                 # Model architecture definitions
+│   └── base_model.py      # Main model implementation
+├── utils/                 # Utility functions
+│   ├── model_utils.py     # Model loading, saving, and evaluation
+│   ├── visualizers.py     # Visualization tools
+│   ├── data_preparation.py # Data processing utilities
+│   └── latent_functions.py # Latent space operations
+├── re_arc/               # ARC task processing
+├── runs_re_arc/          # Directory for storing training runs
+├── main.py              # Main script for training and evaluation
+├── requirements.txt     # Python dependencies
+└── requirements_win.txt # Windows-specific dependencies
+```
+
+## Setup
+
+1. **Create a virtual environment** (recommended):
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
+
+2. **Install dependencies**:
+   - For Linux/Mac:
+     ```bash
+     pip install -r requirements.txt
+     ```
+   - For Windows:
+     ```bash
+     pip install -r requirements_win.txt
+     ```
+
+3. **Verify PyTorch installation**:
+   ```bash
+   python -c "import torch; print(torch.cuda.is_available())"
+   ```
 
 ## Usage
 
-The main functionality of the project is encapsulated in the `re_arc` module, which includes various generators and verifiers for program tasks. You can run the demo script to see the project in action:
+The `main.py` script provides several modes of operation:
 
+### Training
 ```bash
-python demo_batch_tasks.py
+python main.py --mode train
 ```
 
-## Project Structure
+### Evaluation
+```bash
+python main.py --mode eval --run_dir <run_directory> --keys <problem_keys> --n_values <number_of_examples>
+```
 
-- **re_arc/**: Contains all the information regarding the RE-ARC data generation and processing. Refer to the RE-ARC papers for more details.
-  - `main.py`: Main script for task generation and evaluation.
-  - `generators.py`: Functions to generate tasks with varying difficulty.
-  - `dsl.py`: Domain-specific language functions for task manipulation.
-- **models/**: Stores the different machine learning models used for latent space exploration.
-  - `initial_model.py`: Defines the architecture and training routines for the models.
-- **utils/**: Contains additional utility functions for data preparation and processing.
-  - `data_preparation.py`: Functions to transform and prepare data for model input.
-  - `utils.py`: Various utility functions for data manipulation and processing.
-- **runs_re_arc/**: Stores the logs for the model training.
-- **requirements.txt**: Lists the Python dependencies required for the project.
-- **Bonnet and Macfarlane - 2024 - Searching Latent Program Spaces.pdf**: The original paper for the `initial_model`.
-- **demo_batch_tasks.py**: Generates a sample of the input tasks.
-- **main.py**: Runs the training for each model and triggers results visualization.
+### Visualization
+```bash
+python main.py --mode visualize --run_dir <run_directory>
+```
 
-## References
+### Combined Operations
+```bash
+python main.py --mode all --run_dir <run_directory>
+```
 
-- Bonnet, A., & Macfarlane, J. (2024). Searching Latent Program Spaces. [Link to paper](https://doi.org/10.48550/arXiv.2302.13971)
+### Command Line Arguments
 
-## Contributing
+- `--mode`: Operation mode (train/eval/visualize/all)
+- `--run_dir`: Directory containing model checkpoints (required for eval/visualize)
+- `--keys`: Problem keys for evaluation (default: ['017c7c7b','00d62c1b','007bbfb7'])
+- `--n_values`: Number of examples for evaluation (default: 100)
+- `--epoch`: Specific epoch to load for evaluation (default: 49)
 
-Contributions are welcome! Please fork the repository and submit a pull request with your changes. Ensure that your code adheres to the project's coding standards and includes appropriate tests.
+## Example Usage
 
-## License
+1. **Train a new model**:
+   ```bash
+   python main.py --mode train
+   ```
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for more details.
+2. **Evaluate on specific problems**:
+   ```bash
+   python main.py --mode eval --run_dir original_w_gradient_ascent --keys 017c7c7b 00d62c1b --n_values 50
+   ```
+
+3. **Visualize results**:
+   ```bash
+   python main.py --mode visualize --run_dir original_w_gradient_ascent
+   ```
+
+## Output
+
+- Training results are saved in the `runs_re_arc` directory
+- Each run creates a new directory with:
+  - Model checkpoints
+  - Training metrics
+  - Evaluation results
+  - Visualizations
+
+## Notes
+
+- The model uses CUDA if available, falling back to CPU otherwise
+- Training progress and metrics are logged to the console
+- Visualization includes:
+  - Training loss curves
+  - Latent space analysis
+  - Reconstruction examples
+  - Evaluation metrics
+
+## Requirements
+
+- Python 3.8+
+- PyTorch 2.6.0+
+- CUDA-capable GPU (recommended)
+- See requirements.txt for full dependency list

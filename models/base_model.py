@@ -5,13 +5,18 @@ import torch.nn.functional as F
 from torch.optim import Adam
 import sys
 from typing import Tuple, List
+import pickle
 
 # add the parent directory to the path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils.model_utils import *
+from utils.model_utils import (
+    set_seed, create_run_directory, setup_logging, prepare_dataloader,
+    save_checkpoint, save_results, count_model_parameters, evaluate_model
+)
 from re_arc.main import generate_and_process_tasks
-from utils.visualizers import visualize_sequence_reconstruction
+
+from utils.latent_functions import optimize_latent_z
 
 
 set_seed(42)
@@ -39,11 +44,21 @@ ENCODER_MAX_LENGTH = 1805        # For full sequence (input + output + CLS)
 DECODER_MAX_LENGTH = 902         # For output sequence
 
 # Training Settings
-NUM_EPOCHS = 300
+NUM_EPOCHS = 150
 LEARNING_RATE = 1e-4
 
 # Add beta parameter to TUNABLE SETTINGS
 BETA = 1.0  # Weighting factor for KL loss term
+
+# Latent Optimization Settings (for inference and optionally during training)
+OPTIMIZE_Z = True               # Set to True to run latent optimization
+OPTIMIZE_Z_NUM_STEPS = 25       # Number of gradient steps to optimize z
+OPTIMIZE_Z_LR = 0.5             # Learning rate for latent z optimization
+
+# Latent Optimization Settings (for inference and optionally during training)
+OPTIMIZE_Z_INFERENCE = True               # Set to True to run latent optimization
+OPTIMIZE_Z_INFERENCE_NUM_STEPS = 100       # Number of gradient steps to optimize z
+OPTIMIZE_Z_INFERENCE_LR = 0.5             # Learning rate for latent z optimization
 
 
 ##############################
@@ -299,26 +314,7 @@ class LatentProgramNetwork(nn.Module):
         # Initialize components with device awareness
         self.encoder = TransformerEncoder(input_dim, hidden_dim, num_layers, num_heads,
                                         dropout, max_length=encoder_max_length)
-        self.decoder = TransformerDecoder(input_dim, hidden_dim, num_layers, num_heads, dropout)
-        
-        # Initialize parameters on the correct device
-        self._initialize_parameters()
-        
-    def _initialize_parameters(self):
-        """Initialize all parameters on the correct device."""
-        # Get the device of the first parameter (should be the same as the model's device)
-        device = next(self.parameters()).device
-        
-        # Move all submodules to the correct device
-        for module in self.modules():
-            if module is not self:  # Skip self to avoid recursion
-                module.to(device)
-        
-        # Verify all parameters are on the correct device
-        for name, param in self.named_parameters():
-            if param.device != device:
-                print(f"WARNING: Parameter {name} is on {param.device} but should be on {device}")
-                param.data = param.data.to(device)
+        self.decoder = TransformerDecoder(input_dim, hidden_dim, num_layers, num_heads, dropout)        
     
     def reparameterize(self, mu: torch.Tensor, log_var: torch.Tensor) -> torch.Tensor:
         std = torch.exp(0.5 * log_var)
@@ -326,13 +322,6 @@ class LatentProgramNetwork(nn.Module):
         return mu + eps * std
 
     def forward(self, input_seq: torch.Tensor, target_seq: torch.Tensor) -> Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor]:
-        # Verify inputs are on the correct device
-        device = next(self.parameters()).device
-        if input_seq.device != device:
-            input_seq = input_seq.to(device)
-        if target_seq.device != device:
-            target_seq = target_seq.to(device)
-            
         mu, log_var = self.encoder(input_seq, target_seq)
         z = self.reparameterize(mu, log_var)
         shape_logits, grid_logits = self.decoder(z, input_seq, target_seq=target_seq)
@@ -350,6 +339,19 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
     This formulation forces 100% accuracy (i.e. a zero loss) only if the entire active output
     (all pixels in the target region) are exactly reconstructed.
     """
+    if OPTIMIZE_Z:
+        reconstruction, mu, log_var = model(input_seq, target_seq)
+        shape_logits, grid_logits = reconstruction
+        grid_targets = target_seq[:, :900].long()
+        shape_targets = target_seq[:, 900:902].long()
+        shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
+        
+        grid_loss = F.cross_entropy(grid_logits.reshape(-1, 10), grid_targets.reshape(-1), ignore_index=-1)
+        reconstruction_loss = shape_loss + grid_loss
+        kl_loss = 0.5 * torch.sum(mu.pow(2) + log_var.exp() - 1 - log_var)
+        total_loss = reconstruction_loss + beta * kl_loss
+        return total_loss
+
     # Get the device the model is on
     device = next(model.parameters()).device
     
@@ -419,21 +421,11 @@ def train_model(model, dataloader, optimizer, run_dir, logger):
     logger.info("Starting training batch loop...")
     total_batches = len(dataloader)
 
-    # Log GPU memory usage at start of training
-    if torch.cuda.is_available():
-        logger.info(f"Initial GPU Memory Usage: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
-        logger.info(f"Initial GPU Memory Cached: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
-
     for batch_idx, (input_seq, target_seq) in enumerate(dataloader):
         progress = (batch_idx + 1) / total_batches * 100
         device = next(model.parameters()).device
         input_seq = input_seq.to(device)
         target_seq = target_seq.to(device)
-
-        # Log GPU memory usage periodically
-        if torch.cuda.is_available() and (batch_idx + 1) % 10 == 0:
-            logger.info(f"Batch {batch_idx + 1} GPU Memory Usage: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
-            logger.info(f"Batch {batch_idx + 1} GPU Memory Cached: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
 
         optimizer.zero_grad()
         loss = compute_loss(model, input_seq, target_seq)
@@ -486,44 +478,57 @@ def train_model(model, dataloader, optimizer, run_dir, logger):
     logger.info(f"  Final Avg Total Loss: {avg_loss:.4f}")
     logger.info("=" * 60)
 
-    # Log final GPU memory usage
-    if torch.cuda.is_available():
-        logger.info(f"Final GPU Memory Usage: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
-        logger.info(f"Final GPU Memory Cached: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
-
     return avg_loss
 
-def main():
-    # Check CUDA availability and force GPU usage if available
-    if not torch.cuda.is_available():
-        print("WARNING: CUDA is not available. Training will be very slow on CPU.")
-        print("Please install PyTorch with CUDA support: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118")
-        device = torch.device('cpu')
-    else:
-        print("CUDA is available. Using GPU for training.")
-        # Set default device to GPU
-        torch.cuda.set_device(0)
-        device = torch.device('cuda')
-        
-        # Print GPU information
-        print(f"GPU Device: {torch.cuda.get_device_name(0)}")
-        print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
-        print(f"CUDA Version: {torch.version.cuda}")
-        
-        # Enable cuDNN benchmarking for better performance
-        torch.backends.cudnn.benchmark = True
-        # Enable TF32 for better performance on Ampere GPUs
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
+
+##############################
+# Run Inference
+##############################
+
+def evaluate_model_on_new_data(model, keys, n_values, device='cuda'):
+    """
+    Generate new data and evaluate the model on it.
     
+    Args:
+        model: The trained model
+        keys: List of problem keys
+        n_values: List of numbers of examples to generate
+        device: Device to run evaluation on
+    
+    Returns:
+        dict: Dictionary containing evaluation results for each key and n
+    """
+    results = {}
+    
+    for key in keys:
+        results[key] = {}
+        print(f"\nEvaluating key {key} with {n_values} examples...")
+        
+        # Generate new data
+        _, _, _, input_sequences, output_sequences = generate_and_process_tasks(key, n)
+        test_dataloader = prepare_dataloader(input_sequences, output_sequences, BATCH_SIZE)
+
+        # Evaluate overall performance
+        metrics = evaluate_model(model, test_dataloader, device=device)
+
+        results[key] = metrics
+        results[key]['reconstruction_results'] = {
+            'input_sequences': input_sequences,
+            'output_sequences': output_sequences,
+            'reconstructions': results[key]['reconstruction_results']['reconstructions']
+        }
+
+    return results
+
+
+
+def main_training():
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+
     run_dir = create_run_directory()
     logger = setup_logging(run_dir)
     logger.info(f"Starting training for ARC problem {KEY}")
-    logger.info(f"Using device: {device}")
-    if torch.cuda.is_available():
-        logger.info(f"GPU Device: {torch.cuda.get_device_name(0)}")
-        logger.info(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
-        logger.info(f"CUDA Version: {torch.version.cuda}")
     print("Run directory created:", run_dir)
 
     logger.info("Generating and preparing data...")
@@ -540,16 +545,6 @@ def main():
     model = LatentProgramNetwork().to(device)
     optimizer = Adam(model.parameters(), lr=LEARNING_RATE)
     print("Model and optimizer initialized.")
-
-    # Verify model is on GPU
-    if torch.cuda.is_available():
-        print("Verifying model is on GPU...")
-        print(f"Model device: {next(model.parameters()).device}")
-        print(f"Model is on GPU: {next(model.parameters()).is_cuda}")
-        if not next(model.parameters()).is_cuda:
-            print("WARNING: Model is not on GPU despite CUDA being available!")
-            print("Please check your PyTorch installation and CUDA setup.")
-            return
 
     count_model_parameters(model)
     print("Model parameter count completed.")
@@ -588,39 +583,40 @@ def main():
         sample_exact_correct = 0  # Count of samples that exactly match the output.
         total_samples = 0
 
-        with torch.no_grad():
-            for batch_input, batch_target in dataloader:
-                total_samples += batch_input.size(0)
-                batch_input = batch_input.to(device)
-                batch_target = batch_target.to(device)
+        # We now leave the no_grad block for the latent optimization step.
+        for batch_input, batch_target in dataloader:
+            total_samples += batch_input.size(0)
+            batch_input = batch_input.to(device)
+            batch_target = batch_target.to(device)
+
+            # Optimize z with gradients enabled:
+            if OPTIMIZE_Z:
+                z = None
+                with torch.enable_grad():
+                    z = optimize_latent_z(model, batch_input, batch_target,
+                                          num_steps=OPTIMIZE_Z_NUM_STEPS, lr=OPTIMIZE_Z_LR)
+            else:
                 mu, log_var = model.encoder(batch_input, batch_target)
                 z = model.reparameterize(mu, log_var)
+
+            # Now, perform decoding with no_grad.
+            with torch.no_grad():
                 shape_logits, grid_logits = model.decoder(z, batch_target, target_seq=batch_target)
-
-                # Get predictions for shape tokens and grid tokens.
-                shape_pred = shape_logits.argmax(dim=-1)  # shape: (batch_size, 2)
-                grid_pred = grid_logits.argmax(dim=-1)      # shape: (batch_size, 900)
-
-                # Target shape and grid tokens.
+                shape_pred = shape_logits.argmax(dim=-1)  # (batch_size, 2)
+                grid_pred = grid_logits.argmax(dim=-1)      # (batch_size, 900)
                 shape_tgt = batch_target[:, 900:902].long()
                 grid_tgt = batch_target[:, :900].long()
 
-                # Shape accuracy (2 tokens per sample).
-                epoch_shape_correct += (shape_pred == shape_tgt).sum().item()
-                epoch_shape_tokens += shape_tgt.numel()
-
-                # For each sample, use the target shape to define the active region.
-                for i in range(batch_input.size(0)):
-                    tgt_rows = int(batch_target[i, 900].item())
-                    tgt_cols = int(batch_target[i, 901].item())
-                    active_pixels = tgt_rows * tgt_cols
-                    # Pixel-wise: only evaluate over the target's active region.
-                    epoch_grid_correct += (grid_pred[i, :active_pixels] == grid_tgt[i, :active_pixels]).sum().item()
-                    epoch_grid_tokens += active_pixels
-
-                    # Sample-level exact match: Only count if the entire active region matches.
-                    if torch.all(shape_pred[i] == shape_tgt[i]) and torch.all(grid_pred[i, :active_pixels] == grid_tgt[i, :active_pixels]):
-                        sample_exact_correct += 1
+            epoch_shape_correct += (shape_pred == shape_tgt).sum().item()
+            epoch_shape_tokens += shape_tgt.numel()
+            for i in range(batch_input.size(0)):
+                tgt_rows = int(batch_target[i, 900].item())
+                tgt_cols = int(batch_target[i, 901].item())
+                active_pixels = tgt_rows * tgt_cols
+                epoch_grid_correct += (grid_pred[i, :active_pixels] == grid_tgt[i, :active_pixels]).sum().item()
+                epoch_grid_tokens += active_pixels
+                if torch.all(shape_pred[i] == shape_tgt[i]) and torch.all(grid_pred[i, :active_pixels] == grid_tgt[i, :active_pixels]):
+                    sample_exact_correct += 1
 
         epoch_shape_accuracy = epoch_shape_correct / epoch_shape_tokens if epoch_shape_tokens > 0 else 0.0
         epoch_grid_accuracy = epoch_grid_correct / epoch_grid_tokens if epoch_grid_tokens > 0 else 0.0
@@ -654,7 +650,11 @@ def main():
             batch_input = batch_input.to(device)
             batch_target = batch_target.to(device)
             mu, log_var = model.encoder(batch_input, batch_target)
-            z = model.reparameterize(mu, log_var)
+            if OPTIMIZE_Z:
+                with torch.enable_grad():
+                    z = optimize_latent_z(model, batch_input, batch_target, num_steps=OPTIMIZE_Z_NUM_STEPS, lr=OPTIMIZE_Z_LR)
+            else:
+                z = model.reparameterize(mu, log_var)
             shape_logits, grid_logits = model.decoder(z, batch_target, target_seq=batch_target)
             results['latent_mus'].append(mu.cpu())
             results['latent_log_vars'].append(log_var.cpu())
@@ -665,9 +665,3 @@ def main():
     save_results(results, run_dir)
     print("Results saved in:", run_dir)
     return results, model
-
-
-if __name__ == "__main__":
-    print("Starting training...")
-    results, model = main()
-    print("Training complete. Results saved in the run directory.")

@@ -1,57 +1,128 @@
-# Initial Model: Latent Program Network
+# Latent Program Network (LPN)
 
-## Overview
-The model is designed to process sequences and is built using a Transformer architecture. It consists of an encoder and a decoder, both of which are crucial for handling sequence-to-sequence tasks. The model is likely used for tasks involving sequence reconstruction or transformation, given the presence of sequence visualization utilities.
+This directory contains the implementation of the Latent Program Network, a neural architecture designed for solving visual reasoning tasks through program synthesis in a latent space.
 
-## Key Components
+## Mathematical Foundations
 
-1. **Transformer Encoder**:
-   - **Purpose**: Encodes the input sequence into a latent representation.
-   - **Parameters**:
-     - `input_dim`: Dimensionality of the input.
-     - `hidden_dim`: Dimensionality of the hidden states.
-     - `num_layers`: Number of layers in the encoder.
-     - `num_heads`: Number of attention heads.
-     - `dropout`: Dropout rate for regularization.
-     - `max_length`: Maximum length of the input sequence.
+### 1. Architecture Overview
 
-2. **Transformer Decoder**:
-   - **Purpose**: Decodes the latent representation back into a sequence.
-   - **Parameters**:
-     - `output_dim`: Dimensionality of the output.
-     - `hidden_dim`, `num_layers`, `num_heads`, `dropout`: Similar to the encoder.
+The LPN consists of three main components:
 
-3. **Latent Program Network**:
-   - **Purpose**: Integrates the encoder and decoder, managing the latent space.
-   - **Parameters**:
-     - `latent_dim`: Dimensionality of the latent space.
-     - Other parameters are similar to those in the encoder and decoder.
+1. **Encoder**: Maps input-output pairs to a latent program space
+2. **Latent Optimization**: Refines the latent program to better explain the data
+3. **Decoder**: Executes the latent program to generate outputs
 
-4. **Training Settings**:
-   - **Epochs**: 300
-   - **Learning Rate**: 1e-4
-   - **Batch Size**: 128
+### 2. Core Mathematical Formulation
 
-## Visual Representation (Plain Text)
+#### 2.1 Encoder
+The encoder learns a variational approximation of the posterior distribution over programs:
 
-```
-+---------------------+
-|  TransformerEncoder |
-|---------------------|
-| Input Sequence      |
-| -> Latent Space     |
-+---------------------+
-         |
-         v
-+---------------------+
-|  TransformerDecoder |
-|---------------------|
-| Latent Space        |
-| -> Output Sequence  |
-+---------------------+
+```math
+q_\phi(z|x, y) = \mathcal{N}(\mu_\phi(x,y), \Sigma_\phi(x,y))
 ```
 
-## Additional Details
-- **Data Handling**: The model uses a batch size of 128 and processes sequences with a maximum length of 902.
-- **Optimization**: The Adam optimizer is used for training.
-- **Utilities**: The model includes utilities for sequence visualization and task generation.
+where:
+- $z$ is the latent program representation
+- $\phi$ are the encoder parameters
+- $\mu_\phi$ and $\Sigma_\phi$ are neural networks that output the mean and covariance of the distribution
+
+#### 2.2 Decoder
+The decoder models the probability distribution of outputs given inputs and latent programs:
+
+```math
+p_\theta(y|x, z)
+```
+
+where:
+- $\theta$ are the decoder parameters
+- The decoder directly predicts output pixels without using a domain-specific language
+
+#### 2.3 Latent Optimization
+Given $n$ input-output pairs $\{(x_i, y_i)\}_{i=1 \dots n}$, the optimization process finds $z'$ that maximizes:
+
+```math
+z' \in \arg \max_z \sum_{i=1}^n \log p_\theta(y_i|x_i, z)
+```
+
+### 3. Training Objective
+
+The model is trained using a combination of reconstruction loss and KL divergence:
+
+```math
+\mathcal{L_{\text{total}}}(\phi, \theta) = \mathcal{L_{\text{rec}}}(\phi, \theta) + \beta \mathcal{L_{\text{KL}}}(\phi)
+```
+
+where:
+
+#### 3.1 Reconstruction Loss
+```math
+\mathcal{L_{\text{rec}}}(\phi, \theta) = \sum_{i=1}^n -\log p_\theta(y_i | x_i, z_i')
+```
+
+#### 3.2 KL Divergence Loss
+```math
+\mathcal{L_{\text{KL}}}(\phi) = \sum_{i=1}^n D_{\text{KL}} \left( q_\phi(z | x_i, y_i) \parallel \mathcal{N}(0, I) \right)
+```
+
+### 4. Latent Optimization Methods
+
+#### 4.1 Gradient Ascent
+The primary optimization method uses gradient ascent in the latent space:
+
+```math
+z_0' = \frac{1}{n} \sum_{i=1}^n z_i
+```
+```math
+z_k' = z_{k-1}' + \alpha \cdot \nabla_z \sum_{i=1}^n \log p_\theta(y_i|x_i, z)|_{z=z_{k-1}'}
+```
+
+where:
+- $\alpha$ is the learning rate
+- $K$ is the number of optimization steps
+- The gradient is computed through the decoder network
+
+### 5. Implementation Details
+
+The implementation in `base_model.py` includes:
+
+1. **TransformerEncoder**: Processes input sequences to generate latent distributions
+2. **TransformerDecoder**: Generates outputs from latent programs and inputs
+3. **LatentProgramNetwork**: Combines encoder and decoder with optimization
+
+Key hyperparameters:
+- `LATENT_DIM`: Dimensionality of the latent space
+- `HIDDEN_DIM`: Size of hidden layers
+- `NUM_LAYERS`: Number of transformer layers
+- `NUM_HEADS`: Number of attention heads
+- `OPTIMIZE_Z_NUM_STEPS`: Number of gradient steps for latent optimization
+- `OPTIMIZE_Z_LR`: Learning rate for latent optimization
+
+### 6. Usage Example
+
+```python
+from models.base_model import LatentProgramNetwork
+
+# Initialize model
+model = LatentProgramNetwork(
+    input_dim=1,
+    latent_dim=256,
+    hidden_dim=256,
+    num_layers=6,
+    num_heads=8
+)
+
+# Training
+results, model = main_training()
+
+# Evaluation
+eval_results = evaluate_model_on_new_data(
+    model,
+    keys=['017c7c7b', '00d62c1b'],
+    n_values=100
+)
+```
+
+## References
+
+1. Bonnet, A., & Macfarlane, J. (2024). Searching Latent Program Spaces.
+2. Kingma, D. P., & Welling, M. (2013). Auto-Encoding Variational Bayes.
