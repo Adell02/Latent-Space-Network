@@ -87,9 +87,9 @@ python main.py --mode all --run_dir <run_directory>
    python main.py --mode eval --run_dir original_w_gradient_ascent --keys 017c7c7b 00d62c1b --n_values 50
    ```
 
-3. **Visualize results**:
+3. **Evaluate and visualize results**:
    ```bash
-   python main.py --mode visualize --run_dir original_w_gradient_ascent
+   python main.py --mode eval visualize --run_dir original_w_gradient_ascent
    ```
 
 ## Output

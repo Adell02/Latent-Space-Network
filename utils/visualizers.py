@@ -397,7 +397,7 @@ def visualize_stored_results(run_dir):
     
     # Visualize training results
     print("\nVisualizing training results...")
-    #visualize_all_results(results)
+    visualize_all_results(results)
     
     # Try to load and visualize evaluation results
     eval_file = os.path.join(run_dir, 'evaluation_results.pkl')

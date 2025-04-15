@@ -19,16 +19,15 @@ from re_arc.main import generate_and_process_tasks
 from utils.latent_functions import optimize_latent_z
 
 
-set_seed(42)
-
 #########################################
 # TUNABLE SETTINGS
 #########################################
 
 # Data and Run Settings
 KEY = "00d62c1b"                # Key to the problem #017c7c7b 00d62c1b 007bbfb7
-n = 2                           # Number of generated examples to train per batch
+n = 10                           # Number of generated examples to train per batch
 RUN_BASE_DIR = "runs_re_arc"    # Base directory to save run outputs
+TRAINING_SEED = 42
 
 # DataLoader Settings
 BATCH_SIZE = 128
@@ -44,7 +43,7 @@ ENCODER_MAX_LENGTH = 1805        # For full sequence (input + output + CLS)
 DECODER_MAX_LENGTH = 902         # For output sequence
 
 # Training Settings
-NUM_EPOCHS = 150
+NUM_EPOCHS = 300
 LEARNING_RATE = 1e-4
 
 # Add beta parameter to TUNABLE SETTINGS
@@ -57,9 +56,11 @@ OPTIMIZE_Z_LR = 0.5             # Learning rate for latent z optimization
 
 # Latent Optimization Settings (for inference and optionally during training)
 OPTIMIZE_Z_INFERENCE = True               # Set to True to run latent optimization
-OPTIMIZE_Z_INFERENCE_NUM_STEPS = 100       # Number of gradient steps to optimize z
+OPTIMIZE_Z_INFERENCE_NUM_STEPS = 25       # Number of gradient steps to optimize z
 OPTIMIZE_Z_INFERENCE_LR = 0.5             # Learning rate for latent z optimization
 
+
+set_seed(TRAINING_SEED)
 
 ##############################
 # Define Model Components
@@ -485,7 +486,7 @@ def train_model(model, dataloader, optimizer, run_dir, logger):
 # Run Inference
 ##############################
 
-def evaluate_model_on_new_data(model, keys, n_values, device='cuda'):
+def evaluate_model_on_new_data(model, keys, n_values, seed, device='cuda'):
     """
     Generate new data and evaluate the model on it.
     
@@ -498,6 +499,8 @@ def evaluate_model_on_new_data(model, keys, n_values, device='cuda'):
     Returns:
         dict: Dictionary containing evaluation results for each key and n
     """
+
+    set_seed(seed)
     results = {}
     
     for key in keys:
@@ -505,7 +508,7 @@ def evaluate_model_on_new_data(model, keys, n_values, device='cuda'):
         print(f"\nEvaluating key {key} with {n_values} examples...")
         
         # Generate new data
-        _, _, _, input_sequences, output_sequences = generate_and_process_tasks(key, n)
+        _, _, _, input_sequences, output_sequences = generate_and_process_tasks(key, n_values)
         test_dataloader = prepare_dataloader(input_sequences, output_sequences, BATCH_SIZE)
 
         # Evaluate overall performance
