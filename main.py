@@ -13,7 +13,7 @@ DEFAULT_RUN_DIR = 'original_w_gradient_ascent'
 
 DEFAULT_KEYS = ["00d62c1b"]#['017c7c7b','00d62c1b','007bbfb7']
 DEFAULT_N_VALUES = 2
-DEFAULT_EPOCH = 49
+DEFAULT_EPOCH = 299
 
 EVAL_SEED = 42
 
