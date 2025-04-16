@@ -25,16 +25,16 @@ from utils.latent_functions import optimize_latent_z
 
 # Data and Run Settings
 KEY = "00d62c1b"                # Key to the problem #017c7c7b 00d62c1b 007bbfb7
-n = 5                           # Number of generated examples to train per batch
+n = 50                           # Number of generated examples to train per batch
 RUN_BASE_DIR = "runs_re_arc"    # Base directory to save run outputs
 TRAINING_SEED = 42
 
 # DataLoader Settings
-BATCH_SIZE = 128
+BATCH_SIZE = 16
 
 # Model Architecture Settings
 LATENT_DIM = 64                 # Dimensionality of the latent space
-HIDDEN_DIM = 256                 # Dimensionality of embeddings / hidden states
+HIDDEN_DIM = 64                 # Dimensionality of embeddings / hidden states
 NUM_LAYERS = 6                   # Number of transformer layers (encoder and decoder)
 NUM_HEADS = 8                    # Number of attention heads
 DROPOUT = 0.1                    # Dropout rate
@@ -43,7 +43,7 @@ ENCODER_MAX_LENGTH = 1805        # For full sequence (input + output + CLS)
 DECODER_MAX_LENGTH = 902         # For output sequence
 
 # Training Settings
-NUM_EPOCHS = 300
+NUM_EPOCHS = 100
 LEARNING_RATE = 1e-4
 
 # Add beta parameter to TUNABLE SETTINGS
@@ -56,7 +56,7 @@ OPTIMIZE_Z_LR = 0.5             # Learning rate for latent z optimization
 
 # Latent Optimization Settings (for inference and optionally during training)
 OPTIMIZE_Z_INFERENCE = True               # Set to True to run latent optimization
-OPTIMIZE_Z_INFERENCE_NUM_STEPS = 1000       # Number of gradient steps to optimize z
+OPTIMIZE_Z_INFERENCE_NUM_STEPS = 100       # Number of gradient steps to optimize z
 OPTIMIZE_Z_INFERENCE_LR = 0.5             # Learning rate for latent z optimization
 
 
@@ -532,7 +532,7 @@ def main_training(file_store_name):
             if OPTIMIZE_Z:
                 z = None
                 with torch.enable_grad():
-                    z = optimize_latent_z(model, batch_input, batch_target,
+                    z,_ = optimize_latent_z(model, batch_input, batch_target,
                                           num_steps=OPTIMIZE_Z_NUM_STEPS, lr=OPTIMIZE_Z_LR)
             else:
                 mu, log_var = model.encoder(batch_input, batch_target)
@@ -591,7 +591,8 @@ def main_training(file_store_name):
             mu, log_var = model.encoder(batch_input, batch_target)
             if OPTIMIZE_Z:
                 with torch.enable_grad():
-                    z = optimize_latent_z(model, batch_input, batch_target, num_steps=OPTIMIZE_Z_NUM_STEPS, lr=OPTIMIZE_Z_LR)
+                    z,losses_gradient_ascent = optimize_latent_z(model, batch_input, batch_target, num_steps=OPTIMIZE_Z_NUM_STEPS, lr=OPTIMIZE_Z_LR)
+                    results['losses_gradient_ascent'].append(losses_gradient_ascent)
             else:
                 z = model.reparameterize(mu, log_var)
             shape_logits, grid_logits = model.decoder(z, batch_target, target_seq=batch_target)
@@ -599,7 +600,6 @@ def main_training(file_store_name):
             results['latent_log_vars'].append(log_var.cpu())
             results['latent_zs'].append(z.cpu())            
             results['reconstructions'].append((shape_logits.cpu(), grid_logits.cpu()))
-
             print(f"Final evaluation: Processed batch {batch_idx}")
 
     save_results(results, run_dir)

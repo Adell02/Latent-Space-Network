@@ -206,6 +206,9 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
     query_losses = []
     support_reconstructions = []
     query_reconstructions = []
+    z_optimization_logs = []
+
+
     for batch_input, batch_target in samples_dataloader:
         batch_input = batch_input.to(device)
         batch_target = batch_target.to(device)
@@ -213,13 +216,14 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
 
         # Optimize z using only the support example
         with torch.enable_grad():
-            z = optimize_latent_z(
+            z,losses_gradient_ascent = optimize_latent_z(
                 model,
                 batch_input,
                 batch_target,
                 num_steps=OPTIMIZE_Z_INFERENCE_NUM_STEPS,
                 lr=OPTIMIZE_Z_INFERENCE_LR
             )
+            z_optimization_logs.append(losses_gradient_ascent)
             
             # Compute support loss
             support_loss = compute_loss(model, batch_input, batch_target)
@@ -283,6 +287,7 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
             'grid_accuracy': grid_correct / grid_tokens if grid_tokens > 0 else 0.0,
             'overall_accuracy': (shape_correct + grid_correct) / (shape_tokens + grid_tokens) if (shape_tokens + grid_tokens) > 0 else 0.0,
             'sample_exact_accuracy': sample_exact_correct / total_samples if total_samples > 0 else 0.0,
+            'losses_gradient_ascent': z_optimization_logs,
         },
         'reconstruction_results': {
             'support_reconstructions': support_reconstructions,

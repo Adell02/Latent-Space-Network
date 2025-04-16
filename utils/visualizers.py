@@ -233,7 +233,23 @@ def plot_epoch_accuracies(results):
     plt.tight_layout()
     plt.show()
 
+def plot_z_optimization_losses(results):
+    """Plot z optimization losses over steps."""
+    losses = results['losses_gradient_ascent']
+    plt.figure(figsize=(10, 6))
+    for i in range(len(losses)):    
+        plt.plot(losses[i], marker='o', linestyle='-', label="Sample {}".format(i))        
+    plt.title("Z Optimization Losses Over Steps", fontsize=16)
+    plt.xlabel("Step", fontsize=14)
+    plt.ylabel("Loss", fontsize=14)
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+
 def plot_reconstructions(results):
+    from main import DEFAULT_VISUALIZE_N_VALUES
     """Plot grid reconstructions from results along with an error map."""
     # Extract sequences and reconstructions.
     input_seqs = results['input_sequences']
@@ -252,7 +268,7 @@ def plot_reconstructions(results):
     shape_recons = torch.cat(shape_logits_list, dim=0).cpu().numpy()  # Shape: (N, 2)
     grid_recons = torch.cat(grid_logits_list, dim=0).cpu().numpy()    # Shape: (N, 900)
 
-    num_samples = min(5, len(shape_recons))
+    num_samples = min(DEFAULT_VISUALIZE_N_VALUES, len(shape_recons))
     for i in range(num_samples):
         # Create 4 subplots: Input, Target, Reconstruction, Error Map
         fig, axs = plt.subplots(1, 4, figsize=(24, 6))
@@ -304,7 +320,7 @@ def plot_reconstructions(results):
 
 def visualize_all_results(results):
     """Plot all visualizations for the results."""
-    print("Plotting training progress and latent space...")
+    print("\nPlotting training progress and latent space...")
     plot_training_and_latent(results)
 
     print("\nPlotting latent space analysis...")
@@ -312,6 +328,10 @@ def visualize_all_results(results):
 
     print("\nPlotting epoch accuracies over time...")
     plot_epoch_accuracies(results)
+
+    if 'losses_gradient_ascent' in results:
+        print("\nPlotting z optimization losses...")
+        plot_z_optimization_losses(results)
 
     print("\nPlotting reconstructions...")
     plot_reconstructions(results)
@@ -367,9 +387,11 @@ def plot_evaluation_results(results):
             print(f"  Grid Accuracy: {metrics['grid_accuracy']:.4f}")
             print(f"  Overall Accuracy: {metrics['overall_accuracy']:.4f}")
             print(f"  Sample Exact Accuracy: {metrics['sample_exact_accuracy']:.4f}")
-    
 
-    for key in results:
+            if 'losses_gradient_ascent' in results[key]['metrics']:
+                print(f"\nPlotting z optimization losses")
+                plot_z_optimization_losses(results[key]['metrics'])        
+
         if 'reconstruction_results' in results[key]:
             print(f"\nPlotting support reconstructions")
             aux = {
@@ -387,63 +409,6 @@ def plot_evaluation_results(results):
             }
             plot_reconstructions(aux)
 
-    return
-
-    # Plot reconstructions for each key
-    for key in results:
-        if 'reconstruction_results' in results[key]:
-            print(f"\nPlotting reconstructions for Key {key}:")
-            recon_results = results[key]['reconstruction_results']
-            
-            # Create a 2x2 grid for sample and query visualizations
-            fig, axs = plt.subplots(2, 2, figsize=(12, 12))
-            
-            # Plot sample input and output
-            sample_input = recon_results['input_samples_sequences'][0].reshape(30, 30)
-            sample_output = recon_results['output_samples_sequences'][0].reshape(30, 30)
-            
-            axs[0, 0].imshow(sample_input, cmap='viridis')
-            axs[0, 0].set_title('Sample Input')
-            axs[0, 0].axis('off')
-            
-            axs[0, 1].imshow(sample_output, cmap='viridis')
-            axs[0, 1].set_title('Sample Output')
-            axs[0, 1].axis('off')
-            
-            # Plot query input, reconstruction, and error map
-            query_input = recon_results['input_queries_sequences'][0].reshape(30, 30)
-            query_output = recon_results['output_queries_sequences'][0].reshape(30, 30)
-            
-            # Get reconstruction from the first query
-            shape_logits, grid_logits = recon_results['reconstructions'][0]
-            pred_shape = shape_logits.argmax(dim=-1)
-            pred_grid = grid_logits.argmax(dim=-1)
-            
-            # Reshape prediction to match grid size
-            pred_grid = pred_grid.reshape(30, 30)
-            
-            # Calculate error map
-            error_map = np.abs(query_output - pred_grid.numpy())
-            
-            axs[1, 0].imshow(query_input, cmap='viridis')
-            axs[1, 0].set_title('Query Input')
-            axs[1, 0].axis('off')
-            
-            axs[1, 1].imshow(pred_grid, cmap='viridis')
-            axs[1, 1].set_title('Query Reconstruction')
-            axs[1, 1].axis('off')
-            
-            plt.tight_layout()
-            plt.show()
-            
-            # Plot error map separately
-            plt.figure(figsize=(6, 6))
-            plt.imshow(error_map, cmap='hot')
-            plt.colorbar(label='Error Magnitude')
-            plt.title('Reconstruction Error Map')
-            plt.axis('off')
-            plt.tight_layout()
-            plt.show()
 
 def visualize_stored_results(run_dir):
     """
@@ -462,7 +427,7 @@ def visualize_stored_results(run_dir):
     
     # Visualize training results
     print("\nVisualizing training results...")
-    #visualize_all_results(results)
+    visualize_all_results(results)
     
     # Try to load and visualize evaluation results
     eval_file = os.path.join(run_dir, 'evaluation_results.pkl')
