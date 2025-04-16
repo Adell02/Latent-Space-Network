@@ -68,4 +68,4 @@ def optimize_latent_z(lpn, input_seq, target_seq, num_steps=None, lr=None):
     print(f"Loss improvement: {losses[0] - losses[-1]:.4f}")
     print(f"Total Z change magnitude: {final_z_change:.4f}")
 
-    return z.detach()
+    return z.mean(dim=0, keepdim=True)

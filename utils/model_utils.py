@@ -37,9 +37,12 @@ def count_model_parameters(model: nn.Module) -> None:
 # Create a Unique Run Directory
 ##############################
 RUN_BASE_DIR = "runs_re_arc"    # Base directory to save run outputs
-def create_run_directory(base_dir=RUN_BASE_DIR):
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = os.path.join(base_dir, f"run_{timestamp}")
+def create_run_directory(file_store_name=None,base_dir=RUN_BASE_DIR):
+    if file_store_name is None:
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_dir = os.path.join(base_dir, f"run_{timestamp}")
+    else:
+        run_dir = os.path.join(base_dir, file_store_name)
     os.makedirs(run_dir, exist_ok=True)
     return run_dir
 
@@ -84,7 +87,7 @@ def prepare_dataloader(input_seqs, output_seqs, batch_size):
     output_tensor = torch.FloatTensor(output_seqs)
 
     dataset = TensorDataset(input_tensor, output_tensor)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     return dataloader
 
 
@@ -177,7 +180,7 @@ def load_model(run_dir, epoch=None, device='cuda'):
     return model, optimizer, epoch, loss
 
 
-def evaluate_model(model, dataloader, device='cuda'):
+def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda'):
     """
     Evaluate model performance on a dataloader.
     
@@ -201,62 +204,72 @@ def evaluate_model(model, dataloader, device='cuda'):
     # Track losses
     support_losses = []
     query_losses = []
-    reconstructions = []
-    
-    for batch_input, batch_target in dataloader:
+    support_reconstructions = []
+    query_reconstructions = []
+    for batch_input, batch_target in samples_dataloader:
         batch_input = batch_input.to(device)
         batch_target = batch_target.to(device)
         batch_size = batch_input.size(0)
-
-        # Split support (first sample) and query (rest)
-        support_input = batch_input[0:1]
-        support_target = batch_target[0:1]
-        query_input = batch_input[1:]
-        query_target = batch_target[1:]
 
         # Optimize z using only the support example
         with torch.enable_grad():
             z = optimize_latent_z(
                 model,
-                support_input,
-                support_target,
+                batch_input,
+                batch_target,
                 num_steps=OPTIMIZE_Z_INFERENCE_NUM_STEPS,
                 lr=OPTIMIZE_Z_INFERENCE_LR
             )
             
             # Compute support loss
-            support_loss = compute_loss(model, support_input, support_target)
+            support_loss = compute_loss(model, batch_input, batch_target)
             support_losses.append(support_loss.item())
 
+        with torch.no_grad():
+            z_support = z.expand(batch_input.size(0), -1)
+            shape_logits, grid_logits = model.decoder(z_support, batch_input, target_seq=batch_target)
+            support_reconstructions.append((
+                shape_logits.cpu(),
+                grid_logits.cpu()
+            ))
+
+
+    for batch_input, batch_target in queries_dataloader:
+        batch_input = batch_input.to(device)
+        batch_target = batch_target.to(device)
+        batch_size = batch_input.size(0)
         # Decode query examples using the same z
         with torch.no_grad():
-            z_query = z.expand(query_input.size(0), -1)
-            shape_logits, grid_logits = model.decoder(z_query, query_input, target_seq=query_target)
+            z_query = z.expand(batch_input.size(0), -1)
+            shape_logits, grid_logits = model.decoder(z_query, batch_input, target_seq=batch_target)
             
             # Compute query loss
-            query_loss = compute_loss(model, query_input, query_target)
+            query_loss = compute_loss(model, batch_input, batch_target)
             query_losses.append(query_loss.item())
             
-            reconstructions.append((shape_logits.cpu(), grid_logits.cpu()))
+            query_reconstructions.append((
+                shape_logits.cpu(),
+                grid_logits.cpu()
+            ))
 
             shape_pred = shape_logits.argmax(dim=-1)
             grid_pred = grid_logits.argmax(dim=-1)
-            shape_tgt = query_target[:, 900:902].long()
-            grid_tgt = query_target[:, :900].long()
+            shape_tgt = batch_target[:, 900:902].long()
+            grid_tgt = batch_target[:, :900].long()
 
             shape_correct += (shape_pred == shape_tgt).sum().item()
             shape_tokens += shape_tgt.numel()
 
-            for i in range(query_input.size(0)):
-                tgt_rows = int(query_target[i, 900].item())
-                tgt_cols = int(query_target[i, 901].item())
+            for i in range(batch_input.size(0)):
+                tgt_rows = int(batch_target[i, 900].item())
+                tgt_cols = int(batch_target[i, 901].item())
                 active_pixels = tgt_rows * tgt_cols
                 grid_correct += (grid_pred[i, :active_pixels] == grid_tgt[i, :active_pixels]).sum().item()
                 grid_tokens += active_pixels
                 if torch.all(shape_pred[i] == shape_tgt[i]) and torch.all(grid_pred[i, :active_pixels] == grid_tgt[i, :active_pixels]):
                     sample_exact_correct += 1
 
-            total_samples += query_input.size(0)
+            total_samples += batch_input.size(0)
 
     # Compute average losses
     avg_support_loss = sum(support_losses) / len(support_losses) if support_losses else 0.0
@@ -272,7 +285,8 @@ def evaluate_model(model, dataloader, device='cuda'):
             'sample_exact_accuracy': sample_exact_correct / total_samples if total_samples > 0 else 0.0,
         },
         'reconstruction_results': {
-            'reconstructions': reconstructions,
+            'support_reconstructions': support_reconstructions,
+            'query_reconstructions': query_reconstructions,
         }
     }
 

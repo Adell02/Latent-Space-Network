@@ -290,12 +290,6 @@ def plot_reconstructions(results):
         common_cols = min(out_cols, recon_cols)
         error_region_target = target_grid[:common_rows, :common_cols]
         error_region_recon = recon_grid[:common_rows, :common_cols]
-        if error_region_target.shape != error_region_recon.shape:
-            # pad the smaller one with zeros
-            if error_region_target.shape[0] < error_region_recon.shape[0]:
-                error_region_target = np.pad(error_region_target, ((0, 0), (0, error_region_recon.shape[1] - error_region_target.shape[1])))
-            else:
-                error_region_recon = np.pad(error_region_recon, ((0, 0), (0, error_region_target.shape[1] - error_region_recon.shape[1])))
         error_map = np.abs(error_region_target - error_region_recon)
         axs[3].imshow(error_map, cmap='hot')
         axs[3].set_title('Error Map')
@@ -304,6 +298,7 @@ def plot_reconstructions(results):
         plt.suptitle(f'Sample {i+1}', fontsize=18)
         plt.tight_layout()
         plt.show()
+
 
 
 
@@ -373,12 +368,82 @@ def plot_evaluation_results(results):
             print(f"  Overall Accuracy: {metrics['overall_accuracy']:.4f}")
             print(f"  Sample Exact Accuracy: {metrics['sample_exact_accuracy']:.4f}")
     
+
+    for key in results:
+        if 'reconstruction_results' in results[key]:
+            print(f"\nPlotting support reconstructions")
+            aux = {
+                'input_sequences': results[key]['reconstruction_results']['input_samples_sequences'],
+                'output_sequences': results[key]['reconstruction_results']['output_samples_sequences'],
+                'reconstructions': results[key]['reconstruction_results']['support_reconstructions'],
+            }
+            plot_reconstructions(aux)
+
+            print(f"\nPlotting query reconstructions")
+            aux = {
+                'input_sequences': results[key]['reconstruction_results']['input_queries_sequences'],
+                'output_sequences': results[key]['reconstruction_results']['output_queries_sequences'],
+                'reconstructions': results[key]['reconstruction_results']['query_reconstructions'],
+            }
+            plot_reconstructions(aux)
+
+    return
+
     # Plot reconstructions for each key
     for key in results:
-        if 'reconstruction_results' in results[key] and len(results[key]['reconstruction_results']) > 0:
+        if 'reconstruction_results' in results[key]:
             print(f"\nPlotting reconstructions for Key {key}:")
-            # Plot first 2 reconstructions
-            plot_reconstructions(results[key]['reconstruction_results'])
+            recon_results = results[key]['reconstruction_results']
+            
+            # Create a 2x2 grid for sample and query visualizations
+            fig, axs = plt.subplots(2, 2, figsize=(12, 12))
+            
+            # Plot sample input and output
+            sample_input = recon_results['input_samples_sequences'][0].reshape(30, 30)
+            sample_output = recon_results['output_samples_sequences'][0].reshape(30, 30)
+            
+            axs[0, 0].imshow(sample_input, cmap='viridis')
+            axs[0, 0].set_title('Sample Input')
+            axs[0, 0].axis('off')
+            
+            axs[0, 1].imshow(sample_output, cmap='viridis')
+            axs[0, 1].set_title('Sample Output')
+            axs[0, 1].axis('off')
+            
+            # Plot query input, reconstruction, and error map
+            query_input = recon_results['input_queries_sequences'][0].reshape(30, 30)
+            query_output = recon_results['output_queries_sequences'][0].reshape(30, 30)
+            
+            # Get reconstruction from the first query
+            shape_logits, grid_logits = recon_results['reconstructions'][0]
+            pred_shape = shape_logits.argmax(dim=-1)
+            pred_grid = grid_logits.argmax(dim=-1)
+            
+            # Reshape prediction to match grid size
+            pred_grid = pred_grid.reshape(30, 30)
+            
+            # Calculate error map
+            error_map = np.abs(query_output - pred_grid.numpy())
+            
+            axs[1, 0].imshow(query_input, cmap='viridis')
+            axs[1, 0].set_title('Query Input')
+            axs[1, 0].axis('off')
+            
+            axs[1, 1].imshow(pred_grid, cmap='viridis')
+            axs[1, 1].set_title('Query Reconstruction')
+            axs[1, 1].axis('off')
+            
+            plt.tight_layout()
+            plt.show()
+            
+            # Plot error map separately
+            plt.figure(figsize=(6, 6))
+            plt.imshow(error_map, cmap='hot')
+            plt.colorbar(label='Error Magnitude')
+            plt.title('Reconstruction Error Map')
+            plt.axis('off')
+            plt.tight_layout()
+            plt.show()
 
 def visualize_stored_results(run_dir):
     """
@@ -397,7 +462,7 @@ def visualize_stored_results(run_dir):
     
     # Visualize training results
     print("\nVisualizing training results...")
-    visualize_all_results(results)
+    #visualize_all_results(results)
     
     # Try to load and visualize evaluation results
     eval_file = os.path.join(run_dir, 'evaluation_results.pkl')

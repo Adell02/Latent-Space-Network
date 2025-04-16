@@ -49,47 +49,49 @@ The `main.py` script provides several modes of operation:
 
 ### Training
 ```bash
-python main.py --mode train
+python main.py --mode train --file_name <run_directory>
 ```
 
 ### Evaluation
 ```bash
-python main.py --mode eval --run_dir <run_directory> --keys <problem_keys> --n_values <number_of_examples>
+python main.py --mode eval --file_name <run_directory> --keys <problem_keys> --n_eval_samples <number_of_samples> --n_eval_queries <number_of_queries> --epoch <epoch_number>
 ```
 
 ### Visualization
 ```bash
-python main.py --mode visualize --run_dir <run_directory>
+python main.py --mode visualize --file_name <run_directory> --visualize_n_values <number_of_values>
 ```
 
 ### Combined Operations
 ```bash
-python main.py --mode all --run_dir <run_directory>
+python main.py --mode all --file_name <run_directory> --keys <problem_keys> --n_eval_samples <number_of_samples> --n_eval_queries <number_of_queries> --epoch <epoch_number> --visualize_n_values <number_of_values>
 ```
 
 ### Command Line Arguments
 
-- `--mode`: Operation mode (train/eval/visualize/all)
-- `--run_dir`: Directory containing model checkpoints (required for eval/visualize)
-- `--keys`: Problem keys for evaluation (default: ['017c7c7b','00d62c1b','007bbfb7'])
-- `--n_values`: Number of examples for evaluation (default: 100)
-- `--epoch`: Specific epoch to load for evaluation (default: 49)
+- `--mode`: Operation mode (train/eval/visualize/all) or combination of modes
+- `--file_name`: Directory for storing/containing model checkpoints and results (required)
+- `--keys`: Problem keys for evaluation (space-separated, default: ["00d62c1b"])
+- `--n_eval_samples`: Number of input-output pairs for Z optimization during evaluation (default: 8)
+- `--n_eval_queries`: Number of queries for inference (default: 1)
+- `--epoch`: Specific epoch to load for evaluation (default: 299)
+- `--visualize_n_values`: Number of input-output pairs for visualization (default: 2)
 
 ## Example Usage
 
 1. **Train a new model**:
    ```bash
-   python main.py --mode train
+   python main.py --mode train --file_name my_training_run
    ```
 
 2. **Evaluate on specific problems**:
    ```bash
-   python main.py --mode eval --run_dir original_w_gradient_ascent --keys 017c7c7b 00d62c1b --n_values 50
+   python main.py --mode eval --file_name my_training_run --keys 00d62c1b 017c7c7b --n_eval_samples 8 --n_eval_queries 1 --epoch 299
    ```
 
 3. **Evaluate and visualize results**:
    ```bash
-   python main.py --mode eval visualize --run_dir original_w_gradient_ascent
+   python main.py --mode eval visualize --file_name my_training_run --keys 00d62c1b --n_eval_samples 8 --n_eval_queries 1 --epoch 299 --visualize_n_values 2
    ```
 
 ## Output

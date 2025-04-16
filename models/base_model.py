@@ -25,7 +25,7 @@ from utils.latent_functions import optimize_latent_z
 
 # Data and Run Settings
 KEY = "00d62c1b"                # Key to the problem #017c7c7b 00d62c1b 007bbfb7
-n = 10                           # Number of generated examples to train per batch
+n = 5                           # Number of generated examples to train per batch
 RUN_BASE_DIR = "runs_re_arc"    # Base directory to save run outputs
 TRAINING_SEED = 42
 
@@ -33,7 +33,7 @@ TRAINING_SEED = 42
 BATCH_SIZE = 128
 
 # Model Architecture Settings
-LATENT_DIM = 256                 # Dimensionality of the latent space
+LATENT_DIM = 64                 # Dimensionality of the latent space
 HIDDEN_DIM = 256                 # Dimensionality of embeddings / hidden states
 NUM_LAYERS = 6                   # Number of transformer layers (encoder and decoder)
 NUM_HEADS = 8                    # Number of attention heads
@@ -50,13 +50,13 @@ LEARNING_RATE = 1e-4
 BETA = 1.0  # Weighting factor for KL loss term
 
 # Latent Optimization Settings (for inference and optionally during training)
-OPTIMIZE_Z = True               # Set to True to run latent optimization
-OPTIMIZE_Z_NUM_STEPS = 25       # Number of gradient steps to optimize z
+OPTIMIZE_Z = False               # Set to True to run latent optimization
+OPTIMIZE_Z_NUM_STEPS = 5       # Number of gradient steps to optimize z
 OPTIMIZE_Z_LR = 0.5             # Learning rate for latent z optimization
 
 # Latent Optimization Settings (for inference and optionally during training)
 OPTIMIZE_Z_INFERENCE = True               # Set to True to run latent optimization
-OPTIMIZE_Z_INFERENCE_NUM_STEPS = 25       # Number of gradient steps to optimize z
+OPTIMIZE_Z_INFERENCE_NUM_STEPS = 1000       # Number of gradient steps to optimize z
 OPTIMIZE_Z_INFERENCE_LR = 0.5             # Learning rate for latent z optimization
 
 
@@ -340,71 +340,49 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
     This formulation forces 100% accuracy (i.e. a zero loss) only if the entire active output
     (all pixels in the target region) are exactly reconstructed.
     """
+
+    reconstruction, mu, log_var = model(input_seq, target_seq)
+    shape_logits, grid_logits = reconstruction
+
+    # Compute shape loss (for the two shape tokens):
+    shape_targets = target_seq[:, 900:902].long()
+    shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
+
+
     if OPTIMIZE_Z:
-        reconstruction, mu, log_var = model(input_seq, target_seq)
-        shape_logits, grid_logits = reconstruction
-        grid_targets = target_seq[:, :900].long()
-        shape_targets = target_seq[:, 900:902].long()
-        shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
-        
+        grid_targets = target_seq[:, :900].long()               
         grid_loss = F.cross_entropy(grid_logits.reshape(-1, 10), grid_targets.reshape(-1), ignore_index=-1)
         reconstruction_loss = shape_loss + grid_loss
         kl_loss = 0.5 * torch.sum(mu.pow(2) + log_var.exp() - 1 - log_var)
         total_loss = reconstruction_loss + beta * kl_loss
         return total_loss
 
-    # Get the device the model is on
-    device = next(model.parameters()).device
     
-    # Ensure inputs are on the correct device
-    input_seq = input_seq.to(device)
-    target_seq = target_seq.to(device)
-    
-    batch_size = input_seq.size(0)
-    total_loss = 0.0
-    
-    # For each sample in the batch, use all other samples to reconstruct it
+    # Compute grid loss only over the active region for each sample.
+    batch_size = target_seq.size(0)
+    grid_loss_sum = 0.0
     for i in range(batch_size):
-        # Get the target sample to reconstruct
-        target_input = input_seq[i:i+1]  # Keep batch dimension
-        target_output = target_seq[i:i+1]
-        
-        # Get all other samples in the batch
-        other_inputs = torch.cat([input_seq[:i], input_seq[i+1:]])
-        other_outputs = torch.cat([target_seq[:i], target_seq[i+1:]])
-        
-        # Encode all other samples
-        mu, log_var = model.encoder(other_inputs, other_outputs)
-        
-        # Sample from the aggregated distribution (mean of all other samples)
-        z = model.reparameterize(mu.mean(dim=0, keepdim=True), log_var.mean(dim=0, keepdim=True))
-        
-        # Decode using the target input and sampled latent
-        shape_logits, grid_logits = model.decoder(z, target_input)
-        
-        # Compute shape loss (for the two shape tokens)
-        shape_targets = target_output[:, 900:902].long()
-        shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
-        
-        # Compute grid loss only over the active region
-        tgt_rows = int(target_output[0, 900].item())
-        tgt_cols = int(target_output[0, 901].item())
+        # Retrieve the target dimensions (active region) from the last two tokens.
+        tgt_rows = int(target_seq[i, 900].item())
+        tgt_cols = int(target_seq[i, 901].item())
         active_pixels = tgt_rows * tgt_cols
-        
-        # Compute cross-entropy only over the active region
-        grid_loss = F.cross_entropy(grid_logits[0, :active_pixels], target_output[0, :active_pixels].long())
-        
-        # Total reconstruction loss for this sample
-        reconstruction_loss = shape_loss + grid_loss
-        
-        # KL divergence loss (weighted by beta)
-        kl_loss = 0.5 * torch.sum(mu.pow(2) + log_var.exp() - 1 - log_var)
-        
-        # Add to total loss
-        total_loss += reconstruction_loss + beta * kl_loss
-    
-    # Average over batch
-    return total_loss / batch_size
+
+        # Compute cross-entropy only over the active region.
+        # Note: grid_logits[i, :active_pixels] has shape (active_pixels, num_grid_classes)
+        #       target_seq[i, :active_pixels] has shape (active_pixels,)
+        loss_i = F.cross_entropy(grid_logits[i, :active_pixels], target_seq[i, :active_pixels].long())
+        grid_loss_sum += loss_i
+
+    grid_loss = grid_loss_sum / batch_size
+
+    # Total reconstruction loss: we want both shape and grid to be perfectly predicted.
+    reconstruction_loss = shape_loss + grid_loss
+
+    # KL divergence loss (as before).
+    kl_loss = 0.5 * torch.sum(mu.pow(2) + log_var.exp() - 1 - log_var)
+
+    total_loss = reconstruction_loss + beta * kl_loss
+    return total_loss
 
 
 ##############################
@@ -482,54 +460,12 @@ def train_model(model, dataloader, optimizer, run_dir, logger):
     return avg_loss
 
 
-##############################
-# Run Inference
-##############################
 
-def evaluate_model_on_new_data(model, keys, n_values, seed, device='cuda'):
-    """
-    Generate new data and evaluate the model on it.
-    
-    Args:
-        model: The trained model
-        keys: List of problem keys
-        n_values: List of numbers of examples to generate
-        device: Device to run evaluation on
-    
-    Returns:
-        dict: Dictionary containing evaluation results for each key and n
-    """
-
-    set_seed(seed)
-    results = {}
-    
-    for key in keys:
-        results[key] = {}
-        print(f"\nEvaluating key {key} with {n_values} examples...")
-        
-        # Generate new data
-        _, _, _, input_sequences, output_sequences = generate_and_process_tasks(key, n_values)
-        test_dataloader = prepare_dataloader(input_sequences, output_sequences, BATCH_SIZE)
-
-        # Evaluate overall performance
-        metrics = evaluate_model(model, test_dataloader, device=device)
-
-        results[key] = metrics
-        results[key]['reconstruction_results'] = {
-            'input_sequences': input_sequences,
-            'output_sequences': output_sequences,
-            'reconstructions': results[key]['reconstruction_results']['reconstructions']
-        }
-
-    return results
-
-
-
-def main_training():
+def main_training(file_store_name):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    run_dir = create_run_directory()
+    run_dir = create_run_directory(file_store_name)
     logger = setup_logging(run_dir)
     logger.info(f"Starting training for ARC problem {KEY}")
     print("Run directory created:", run_dir)
@@ -661,10 +597,61 @@ def main_training():
             shape_logits, grid_logits = model.decoder(z, batch_target, target_seq=batch_target)
             results['latent_mus'].append(mu.cpu())
             results['latent_log_vars'].append(log_var.cpu())
-            results['latent_zs'].append(z.cpu())
+            results['latent_zs'].append(z.cpu())            
             results['reconstructions'].append((shape_logits.cpu(), grid_logits.cpu()))
+
             print(f"Final evaluation: Processed batch {batch_idx}")
 
     save_results(results, run_dir)
     print("Results saved in:", run_dir)
     return results, model
+
+
+##############################
+# Run Inference
+##############################
+
+def main_test(model, keys, n_samples, n_queries, seed, device='cuda'):
+    """
+    Generate new data and evaluate the model on it.
+    
+    Args:
+        model: The trained model
+        keys: List of problem keys
+        n_samples: List of numbers of input-output pairs to generate
+        n_queries: List of numbers of queries to do inference
+        device: Device to run evaluation on
+    
+    Returns:
+        dict: Dictionary containing evaluation results for each key and n_samples   
+    """
+
+    set_seed(seed)
+    results = {}
+    
+    for key in keys:
+        results[key] = {}
+        print(f"\nEvaluating key {key} with {n_samples} samples and {n_queries} queries...")
+        
+        # Generate new data
+        _, _, _, input_samples_sequences, output_samples_sequences = generate_and_process_tasks(key, n_samples)
+        samples_dataloader = prepare_dataloader(input_samples_sequences, output_samples_sequences, BATCH_SIZE)
+
+        # Generate queries
+        _, _, _, input_queries_sequences, output_queries_sequences = generate_and_process_tasks(key, n_queries)
+        queries_dataloader = prepare_dataloader(input_queries_sequences, output_queries_sequences, BATCH_SIZE)
+
+        # Evaluate overall performance
+        metrics = evaluate_model(model, samples_dataloader, queries_dataloader, device=device)
+
+        results[key] = metrics
+        results[key]['reconstruction_results'] = {
+            'input_samples_sequences': input_samples_sequences,
+            'output_samples_sequences': output_samples_sequences,
+            'input_queries_sequences': input_queries_sequences,
+            'output_queries_sequences': output_queries_sequences,
+            'support_reconstructions': results[key]['reconstruction_results']['support_reconstructions'],
+            'query_reconstructions': results[key]['reconstruction_results']['query_reconstructions']
+        }
+
+    return results
