@@ -410,6 +410,61 @@ def plot_evaluation_results(results):
             plot_reconstructions(aux)
 
 
+def plot_run_summary(results, run_dir):
+    """
+    Plot a summary of the run parameters and final accuracy achieved.
+    
+    Args:
+        results: Dictionary containing training results
+        run_dir: Directory containing the run information
+    """
+    # Create figure with two subplots
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    
+    # Get final accuracy metrics from the last epoch
+    final_accuracies = results['epoch_accuracies'][-1]
+    
+    # Plot accuracy metrics as a bar chart
+    metrics = ['Shape Accuracy', 'Grid Accuracy', 'Overall Accuracy', 'Sample Exact Accuracy']
+    values = [
+        final_accuracies['shape_accuracy'],
+        final_accuracies['grid_accuracy'],
+        final_accuracies['overall_accuracy'],
+        final_accuracies['sample_exact_accuracy']
+    ]
+    
+    bars = ax1.bar(metrics, values)
+    ax1.set_ylim(0, 1)
+    ax1.set_title('Final Accuracy Metrics', fontsize=12)
+    ax1.set_xticklabels(metrics, rotation=45, ha='right')
+    
+    # Add value labels on top of bars
+    for bar in bars:
+        height = bar.get_height()
+        ax1.text(bar.get_x() + bar.get_width()/2., height,
+                f'{height:.3f}',
+                ha='center', va='bottom')
+    
+    # Plot training loss over epochs
+    losses = np.array(results['epoch_losses'])
+    epochs = range(1, len(losses) + 1)
+    ax2.plot(epochs, losses, 'b-', label='Training Loss')
+    ax2.set_xlabel('Epoch')
+    ax2.set_ylabel('Loss')
+    ax2.set_title('Training Loss Over Time', fontsize=12)
+    ax2.grid(True)
+    
+    # Add final loss value annotation
+    final_loss = losses[-1]
+    ax2.annotate(f'Final Loss: {final_loss:.4f}',
+                xy=(len(epochs), final_loss),
+                xytext=(len(epochs)-5, final_loss*1.2),
+                arrowprops=dict(facecolor='black', shrink=0.05))
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(run_dir, 'run_summary.png'))
+    plt.close()
+
 def visualize_stored_results(run_dir):
     """
     Load and visualize results from a previous run.
@@ -424,6 +479,10 @@ def visualize_stored_results(run_dir):
     
     with open(results_file, 'rb') as f:
         results = pickle.load(f)
+    
+    # Plot run summary first
+    print("\nPlotting run summary...")
+    plot_run_summary(results, run_dir)
     
     # Visualize training results
     print("\nVisualizing training results...")
