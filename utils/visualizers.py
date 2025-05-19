@@ -410,61 +410,6 @@ def plot_evaluation_results(results):
             plot_reconstructions(aux)
 
 
-def plot_run_summary(results, run_dir):
-    """
-    Plot a summary of the run parameters and final accuracy achieved.
-    
-    Args:
-        results: Dictionary containing training results
-        run_dir: Directory containing the run information
-    """
-    # Create figure with two subplots
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-    
-    # Get final accuracy metrics from the last epoch
-    final_accuracies = results['epoch_accuracies'][-1]
-    
-    # Plot accuracy metrics as a bar chart
-    metrics = ['Shape Accuracy', 'Grid Accuracy', 'Overall Accuracy', 'Sample Exact Accuracy']
-    values = [
-        final_accuracies['shape_accuracy'],
-        final_accuracies['grid_accuracy'],
-        final_accuracies['overall_accuracy'],
-        final_accuracies['sample_exact_accuracy']
-    ]
-    
-    bars = ax1.bar(metrics, values)
-    ax1.set_ylim(0, 1)
-    ax1.set_title('Final Accuracy Metrics', fontsize=12)
-    ax1.set_xticklabels(metrics, rotation=45, ha='right')
-    
-    # Add value labels on top of bars
-    for bar in bars:
-        height = bar.get_height()
-        ax1.text(bar.get_x() + bar.get_width()/2., height,
-                f'{height:.3f}',
-                ha='center', va='bottom')
-    
-    # Plot training loss over epochs
-    losses = np.array(results['epoch_losses'])
-    epochs = range(1, len(losses) + 1)
-    ax2.plot(epochs, losses, 'b-', label='Training Loss')
-    ax2.set_xlabel('Epoch')
-    ax2.set_ylabel('Loss')
-    ax2.set_title('Training Loss Over Time', fontsize=12)
-    ax2.grid(True)
-    
-    # Add final loss value annotation
-    final_loss = losses[-1]
-    ax2.annotate(f'Final Loss: {final_loss:.4f}',
-                xy=(len(epochs), final_loss),
-                xytext=(len(epochs)-5, final_loss*1.2),
-                arrowprops=dict(facecolor='black', shrink=0.05))
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(run_dir, 'run_summary.png'))
-    plt.close()
-
 def visualize_stored_results(run_dir):
     """
     Load and visualize results from a previous run.
@@ -480,9 +425,56 @@ def visualize_stored_results(run_dir):
     with open(results_file, 'rb') as f:
         results = pickle.load(f)
     
-    # Plot run summary first
-    print("\nPlotting run summary...")
-    plot_run_summary(results, run_dir)
+    # Load model parameters
+    params_file = os.path.join(run_dir, 'model_params.pkl')
+    if os.path.exists(params_file):
+        with open(params_file, 'rb') as f:
+            model_params = pickle.load(f)
+    else:
+        # If no params file exists, create a default one with current values
+        from models.base_model import (
+            KEY, TRAINING_SEED, LATENT_DIM, HIDDEN_DIM, NUM_LAYERS, NUM_HEADS,
+            DROPOUT, MAX_LENGTH, ENCODER_MAX_LENGTH, DECODER_MAX_LENGTH,
+            BATCH_SIZE, NUM_EPOCHS, LEARNING_RATE, BETA, n,
+            OPTIMIZE_Z, OPTIMIZE_Z_NUM_STEPS, OPTIMIZE_Z_LR,
+            OPTIMIZE_Z_INFERENCE, OPTIMIZE_Z_INFERENCE_NUM_STEPS, OPTIMIZE_Z_INFERENCE_LR
+        )
+        from main import (
+            EVAL_SEED, DEFAULT_EVAL_KEYS, DEFAULT_EVAL_N_SAMPLES,
+            DEFAULT_EVAL_N_QUERIES, DEFAULT_EVAL_EPOCH
+        )
+        model_params = {
+            'KEY': KEY,
+            'TRAINING_SEED': TRAINING_SEED,
+            'EVAL_SEED': EVAL_SEED,
+            'LATENT_DIM': LATENT_DIM,
+            'HIDDEN_DIM': HIDDEN_DIM,
+            'NUM_LAYERS': NUM_LAYERS,
+            'NUM_HEADS': NUM_HEADS,
+            'DROPOUT': DROPOUT,
+            'MAX_LENGTH': MAX_LENGTH,
+            'ENCODER_MAX_LENGTH': ENCODER_MAX_LENGTH,
+            'DECODER_MAX_LENGTH': DECODER_MAX_LENGTH,
+            'BATCH_SIZE': BATCH_SIZE,
+            'NUM_EPOCHS': NUM_EPOCHS,
+            'LEARNING_RATE': LEARNING_RATE,
+            'BETA': BETA,
+            'n': n,
+            'OPTIMIZE_Z': OPTIMIZE_Z,
+            'OPTIMIZE_Z_NUM_STEPS': OPTIMIZE_Z_NUM_STEPS,
+            'OPTIMIZE_Z_LR': OPTIMIZE_Z_LR,
+            'OPTIMIZE_Z_INFERENCE': OPTIMIZE_Z_INFERENCE,
+            'OPTIMIZE_Z_INFERENCE_NUM_STEPS': OPTIMIZE_Z_INFERENCE_NUM_STEPS,
+            'OPTIMIZE_Z_INFERENCE_LR': OPTIMIZE_Z_INFERENCE_LR,
+            'DEFAULT_EVAL_KEYS': DEFAULT_EVAL_KEYS,
+            'DEFAULT_EVAL_N_SAMPLES': DEFAULT_EVAL_N_SAMPLES,
+            'DEFAULT_EVAL_N_QUERIES': DEFAULT_EVAL_N_QUERIES,
+            'DEFAULT_EVAL_EPOCH': DEFAULT_EVAL_EPOCH
+        }
+    
+    # Plot model summary first
+    print("\nPlotting model summary...")
+    plot_model_summary(results, model_params)
     
     # Visualize training results
     print("\nVisualizing training results...")
@@ -499,3 +491,91 @@ def visualize_stored_results(run_dir):
         plot_evaluation_results(eval_results)
     else:
         print("\nNo evaluation results found in the run directory.")
+
+def plot_model_summary(results, model_params):
+    """
+    Plot a summary of model parameters and results.
+    
+    Args:
+        results: Dictionary containing training and evaluation results
+        model_params: Dictionary containing model parameters from base_model.py and main.py
+    """
+    # Create figure with two subplots
+    fig = plt.figure(figsize=(15, 10))
+    
+    # Create text box with model parameters
+    param_text = "Model Parameters:\n\n"
+    param_text += f"Key: {model_params['KEY']}\n"
+    param_text += f"Training Seed: {model_params['TRAINING_SEED']}\n"
+    param_text += f"Evaluation Seed: {model_params['EVAL_SEED']}\n\n"
+    
+    param_text += "Architecture:\n"
+    param_text += f"Latent Dimension: {model_params['LATENT_DIM']}\n"
+    param_text += f"Hidden Dimension: {model_params['HIDDEN_DIM']}\n"
+    param_text += f"Number of Layers: {model_params['NUM_LAYERS']}\n"
+    param_text += f"Number of Heads: {model_params['NUM_HEADS']}\n"
+    param_text += f"Dropout: {model_params['DROPOUT']}\n"
+    param_text += f"Max Length: {model_params['MAX_LENGTH']}\n"
+    param_text += f"Encoder Max Length: {model_params['ENCODER_MAX_LENGTH']}\n"
+    param_text += f"Decoder Max Length: {model_params['DECODER_MAX_LENGTH']}\n\n"
+    
+    param_text += "Training Settings:\n"
+    param_text += f"Batch Size: {model_params['BATCH_SIZE']}\n"
+    param_text += f"Number of Epochs: {model_params['NUM_EPOCHS']}\n"
+    param_text += f"Learning Rate: {model_params['LEARNING_RATE']}\n"
+    param_text += f"Beta (KL Loss): {model_params['BETA']}\n"
+    param_text += f"Training Examples per Batch: {model_params['n']}\n\n"
+    
+    param_text += "Latent Optimization:\n"
+    param_text += f"Training Optimization: {model_params['OPTIMIZE_Z']}\n"
+    param_text += f"Training Steps: {model_params['OPTIMIZE_Z_NUM_STEPS']}\n"
+    param_text += f"Training LR: {model_params['OPTIMIZE_Z_LR']}\n"
+    param_text += f"Inference Optimization: {model_params['OPTIMIZE_Z_INFERENCE']}\n"
+    param_text += f"Inference Steps: {model_params['OPTIMIZE_Z_INFERENCE_NUM_STEPS']}\n"
+    param_text += f"Inference LR: {model_params['OPTIMIZE_Z_INFERENCE_LR']}\n\n"
+    
+    param_text += "Evaluation Settings:\n"
+    param_text += f"Eval Keys: {model_params['DEFAULT_EVAL_KEYS']}\n"
+    param_text += f"Eval Samples: {model_params['DEFAULT_EVAL_N_SAMPLES']}\n"
+    param_text += f"Eval Queries: {model_params['DEFAULT_EVAL_N_QUERIES']}\n"
+    param_text += f"Eval Epoch: {model_params['DEFAULT_EVAL_EPOCH']}\n"
+    
+    # Add parameters text box
+    plt.subplot(1, 2, 1)
+    plt.text(0.05, 0.95, param_text, transform=plt.gca().transAxes,
+             verticalalignment='top', fontfamily='monospace', fontsize=10)
+    plt.axis('off')
+    
+    # Add results summary
+    plt.subplot(1, 2, 2)
+    results_text = "Results Summary:\n\n"
+    
+    # Training results
+    if 'epoch_accuracies' in results:
+        last_epoch = results['epoch_accuracies'][-1]
+        results_text += "Training Results (Last Epoch):\n"
+        results_text += f"Shape Accuracy: {last_epoch['shape_accuracy']:.4f}\n"
+        results_text += f"Grid Accuracy: {last_epoch['grid_accuracy']:.4f}\n"
+        results_text += f"Overall Accuracy: {last_epoch['overall_accuracy']:.4f}\n"
+        results_text += f"Sample Exact Accuracy: {last_epoch['sample_exact_accuracy']:.4f}\n\n"
+    
+    # Evaluation results
+    if 'evaluation_results' in results:
+        results_text += "Evaluation Results:\n"
+        for key in results['evaluation_results']:
+            metrics = results['evaluation_results'][key]['metrics']
+            results_text += f"\nKey {key}:\n"
+            results_text += f"Support Loss: {metrics['support_loss']:.4f}\n"
+            results_text += f"Query Loss: {metrics['query_loss']:.4f}\n"
+            results_text += f"Shape Accuracy: {metrics['shape_accuracy']:.4f}\n"
+            results_text += f"Grid Accuracy: {metrics['grid_accuracy']:.4f}\n"
+            results_text += f"Overall Accuracy: {metrics['overall_accuracy']:.4f}\n"
+            results_text += f"Sample Exact Accuracy: {metrics['sample_exact_accuracy']:.4f}\n"
+    
+    plt.text(0.05, 0.95, results_text, transform=plt.gca().transAxes,
+             verticalalignment='top', fontfamily='monospace', fontsize=10)
+    plt.axis('off')
+    
+    plt.suptitle('Model Summary and Results', fontsize=16, y=0.95)
+    plt.tight_layout()
+    plt.show()

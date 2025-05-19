@@ -105,12 +105,74 @@ def save_checkpoint(model, optimizer, epoch, loss, run_dir):
 
 
 ##############################
+# Save Model Parameters
+##############################
+def save_model_params(run_dir):
+    """
+    Save model parameters to a pickle file.
+    
+    Args:
+        run_dir: Directory to save parameters in
+    """
+    from models.base_model import (
+        KEY, TRAINING_SEED, LATENT_DIM, HIDDEN_DIM, NUM_LAYERS, NUM_HEADS,
+        DROPOUT, MAX_LENGTH, ENCODER_MAX_LENGTH, DECODER_MAX_LENGTH,
+        BATCH_SIZE, NUM_EPOCHS, LEARNING_RATE, BETA, n,
+        OPTIMIZE_Z, OPTIMIZE_Z_NUM_STEPS, OPTIMIZE_Z_LR,
+        OPTIMIZE_Z_INFERENCE, OPTIMIZE_Z_INFERENCE_NUM_STEPS, OPTIMIZE_Z_INFERENCE_LR
+    )
+    from main import (
+        EVAL_SEED, DEFAULT_EVAL_KEYS, DEFAULT_EVAL_N_SAMPLES,
+        DEFAULT_EVAL_N_QUERIES, DEFAULT_EVAL_EPOCH
+    )
+    
+    model_params = {
+        'KEY': KEY,
+        'TRAINING_SEED': TRAINING_SEED,
+        'EVAL_SEED': EVAL_SEED,
+        'LATENT_DIM': LATENT_DIM,
+        'HIDDEN_DIM': HIDDEN_DIM,
+        'NUM_LAYERS': NUM_LAYERS,
+        'NUM_HEADS': NUM_HEADS,
+        'DROPOUT': DROPOUT,
+        'MAX_LENGTH': MAX_LENGTH,
+        'ENCODER_MAX_LENGTH': ENCODER_MAX_LENGTH,
+        'DECODER_MAX_LENGTH': DECODER_MAX_LENGTH,
+        'BATCH_SIZE': BATCH_SIZE,
+        'NUM_EPOCHS': NUM_EPOCHS,
+        'LEARNING_RATE': LEARNING_RATE,
+        'BETA': BETA,
+        'n': n,
+        'OPTIMIZE_Z': OPTIMIZE_Z,
+        'OPTIMIZE_Z_NUM_STEPS': OPTIMIZE_Z_NUM_STEPS,
+        'OPTIMIZE_Z_LR': OPTIMIZE_Z_LR,
+        'OPTIMIZE_Z_INFERENCE': OPTIMIZE_Z_INFERENCE,
+        'OPTIMIZE_Z_INFERENCE_NUM_STEPS': OPTIMIZE_Z_INFERENCE_NUM_STEPS,
+        'OPTIMIZE_Z_INFERENCE_LR': OPTIMIZE_Z_INFERENCE_LR,
+        'DEFAULT_EVAL_KEYS': DEFAULT_EVAL_KEYS,
+        'DEFAULT_EVAL_N_SAMPLES': DEFAULT_EVAL_N_SAMPLES,
+        'DEFAULT_EVAL_N_QUERIES': DEFAULT_EVAL_N_QUERIES,
+        'DEFAULT_EVAL_EPOCH': DEFAULT_EVAL_EPOCH
+    }
+    
+    params_file = os.path.join(run_dir, 'model_params.pkl')
+    with open(params_file, 'wb') as f:
+        pickle.dump(model_params, f)
+    print(f"Model parameters saved to {params_file}")
+
+
+##############################
 # Save Results
 ##############################  
 def save_results(results, run_dir):
+    """Save results to a pickle file."""
     results_file = os.path.join(run_dir, 'results.pkl')
     with open(results_file, 'wb') as f:
         pickle.dump(results, f)
+    print(f"Results saved to {results_file}")
+    
+    # Also save model parameters
+    save_model_params(run_dir)
 
 
 ##############################
@@ -309,6 +371,9 @@ def save_evaluation_results(results, run_dir):
     with open(results_file, 'wb') as f:
         pickle.dump(results, f)
     print(f"Evaluation results saved to {results_file}")
+    
+    # Also save model parameters
+    save_model_params(run_dir)
 
 def load_evaluation_results(run_dir):
     """

@@ -25,7 +25,7 @@ from utils.latent_functions import optimize_latent_z
 
 # Data and Run Settings
 KEY = "00d62c1b"                # Key to the problem #017c7c7b 00d62c1b 007bbfb7
-n = 50                           # Number of generated examples to train per batch
+n = 10                           # Number of generated examples to train per batch
 RUN_BASE_DIR = "runs_re_arc"    # Base directory to save run outputs
 TRAINING_SEED = 42
 
