@@ -7,17 +7,22 @@ from utils.model_utils import (
     save_evaluation_results
 )
 from utils.visualizers import visualize_stored_results
+from utils.settings_manager import settings
 
-BASE_DIR = 'runs_re_arc'
+# Get settings from settings manager
+data_settings = settings.get_data_settings()
+evaluation_settings = settings.get_evaluation_settings()
 
-DEFAULT_EVAL_KEYS = ["00d62c1b"]#['017c7c7b','00d62c1b','007bbfb7']
-DEFAULT_EVAL_N_SAMPLES = 10
-DEFAULT_EVAL_N_QUERIES = 2 
-DEFAULT_EVAL_EPOCH = 299
+BASE_DIR = data_settings['run_base_dir']
 
-DEFAULT_VISUALIZE_N_VALUES = 2
+DEFAULT_EVAL_KEYS = evaluation_settings['eval_keys']
+DEFAULT_EVAL_N_SAMPLES = evaluation_settings['eval_n_samples']
+DEFAULT_EVAL_N_QUERIES = evaluation_settings['eval_n_queries']
+DEFAULT_EVAL_EPOCH = evaluation_settings['eval_epoch']
 
-EVAL_SEED = 1
+DEFAULT_VISUALIZE_N_VALUES = evaluation_settings['visualize_n_values']
+
+EVAL_SEED = data_settings['eval_seed']
 
 
 def parse_args():

@@ -6,6 +6,7 @@ from torch.optim import Adam
 import sys
 from typing import Tuple, List
 import pickle
+import numpy as np
 
 # add the parent directory to the path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -15,50 +16,48 @@ from utils.model_utils import (
     save_checkpoint, save_results, count_model_parameters, evaluate_model
 )
 from re_arc.main import generate_and_process_tasks
-
-from utils.latent_functions import optimize_latent_z
+from utils.latent_functions import optimize_latent_z, get_optimized_z
+from utils.settings_manager import settings
 
 
 #########################################
 # TUNABLE SETTINGS
 #########################################
 
-# Data and Run Settings
-KEY = "00d62c1b"                # Key to the problem #017c7c7b 00d62c1b 007bbfb7
-n = 10                           # Number of generated examples to train per batch
-RUN_BASE_DIR = "runs_re_arc"    # Base directory to save run outputs
-TRAINING_SEED = 42
+# Get settings from settings manager
+data_settings = settings.get_data_settings()
+model_architecture = settings.get_model_architecture()
+training_settings = settings.get_training_settings()
+latent_optimization = settings.get_latent_optimization()
 
-# DataLoader Settings
-BATCH_SIZE = 16
+# Data settings
+KEY = data_settings['key']
+TRAINING_SEED = data_settings['training_seed']
+n = data_settings['n']
 
-# Model Architecture Settings
-LATENT_DIM = 64                 # Dimensionality of the latent space
-HIDDEN_DIM = 64                 # Dimensionality of embeddings / hidden states
-NUM_LAYERS = 6                   # Number of transformer layers (encoder and decoder)
-NUM_HEADS = 8                    # Number of attention heads
-DROPOUT = 0.1                    # Dropout rate
-MAX_LENGTH = 902                 # Length of each sequence (900 grid values + 2 shape values)
-ENCODER_MAX_LENGTH = 1805        # For full sequence (input + output + CLS)
-DECODER_MAX_LENGTH = 902         # For output sequence
+# Model architecture settings
+LATENT_DIM = model_architecture['latent_dim']
+HIDDEN_DIM = model_architecture['hidden_dim']
+NUM_LAYERS = model_architecture['num_layers']
+NUM_HEADS = model_architecture['num_heads']
+DROPOUT = model_architecture['dropout']
+MAX_LENGTH = model_architecture['max_length']
+ENCODER_MAX_LENGTH = model_architecture['encoder_max_length']
+DECODER_MAX_LENGTH = model_architecture['decoder_max_length']
 
-# Training Settings
-NUM_EPOCHS = 100
-LEARNING_RATE = 1e-4
+# Training settings
+BATCH_SIZE = training_settings['batch_size']
+NUM_EPOCHS = training_settings['num_epochs']
+LEARNING_RATE = training_settings['learning_rate']
+BETA = training_settings['beta']
 
-# Add beta parameter to TUNABLE SETTINGS
-BETA = 1.0  # Weighting factor for KL loss term
-
-# Latent Optimization Settings (for inference and optionally during training)
-OPTIMIZE_Z = False               # Set to True to run latent optimization
-OPTIMIZE_Z_NUM_STEPS = 5       # Number of gradient steps to optimize z
-OPTIMIZE_Z_LR = 0.5             # Learning rate for latent z optimization
-
-# Latent Optimization Settings (for inference and optionally during training)
-OPTIMIZE_Z_INFERENCE = True               # Set to True to run latent optimization
-OPTIMIZE_Z_INFERENCE_NUM_STEPS = 100       # Number of gradient steps to optimize z
-OPTIMIZE_Z_INFERENCE_LR = 0.5             # Learning rate for latent z optimization
-
+# Latent optimization settings
+OPTIMIZE_Z = latent_optimization['training']['enabled']
+OPTIMIZE_Z_NUM_STEPS = latent_optimization['training']['num_steps']
+OPTIMIZE_Z_LR = latent_optimization['training']['learning_rate']
+OPTIMIZE_Z_INFERENCE = latent_optimization['inference']['enabled']
+OPTIMIZE_Z_INFERENCE_NUM_STEPS = latent_optimization['inference']['num_steps']
+OPTIMIZE_Z_INFERENCE_LR = latent_optimization['inference']['learning_rate']
 
 set_seed(TRAINING_SEED)
 
@@ -251,58 +250,22 @@ class TransformerDecoder(nn.Module):
         device = input_seq.device
         memory = self.prepare_input_memory(z, input_seq)
 
-        if target_seq is not None:
-            # ----- Teacher Forcing Mode -----
-            tgt_grid = target_seq[:, :900].long()
-            tgt_shape = target_seq[:, 900:902].long()
-            grid_emb = self.output_grid_embedding(tgt_grid)
-            shape_emb = self.output_shape_embedding(tgt_shape)
-            pos_i = torch.arange(30, device=device).view(1, -1, 1).repeat(batch_size, 1, 30)
-            pos_j = torch.arange(30, device=device).view(1, 1, -1).repeat(batch_size, 30, 1)
-            pos_emb_grid = (self.row_embedding(pos_i) + self.col_embedding(pos_j)).view(batch_size, 900, -1)
-            grid_emb = grid_emb + pos_emb_grid
-            teacher_tgt = torch.cat([grid_emb, shape_emb], dim=1)  # [B, 902, hidden_dim]
+        # ----- Teacher Forcing Mode -----
+        tgt_grid = target_seq[:, :900].long()
+        tgt_shape = target_seq[:, 900:902].long()
+        grid_emb = self.output_grid_embedding(tgt_grid)
+        shape_emb = self.output_shape_embedding(tgt_shape)
+        pos_i = torch.arange(30, device=device).view(1, -1, 1).repeat(batch_size, 1, 30)
+        pos_j = torch.arange(30, device=device).view(1, 1, -1).repeat(batch_size, 30, 1)
+        pos_emb_grid = (self.row_embedding(pos_i) + self.col_embedding(pos_j)).view(batch_size, 900, -1)
+        grid_emb = grid_emb + pos_emb_grid
+        teacher_tgt = torch.cat([grid_emb, shape_emb], dim=1)  # [B, 902, hidden_dim]
 
-            decoder_output = self.transformer_decoder(tgt=teacher_tgt, memory=memory)
-            decoder_output = self.layer_norm(decoder_output)
-            grid_logits = self.grid_output(decoder_output[:, :900])
-            shape_logits = self.shape_output(decoder_output[:, 900:902])
-            return shape_logits, grid_logits
-        else:
-            # ----- Autoregressive Mode (Fallback) -----
-            current_output = self.start_token_embedding.repeat(batch_size, 1, 1)
-            shape_logits_list = []
-            for i in range(2):
-                tgt_mask = self.create_causal_mask(current_output.size(1), device)
-                decoder_output = self.transformer_decoder(tgt=current_output, memory=memory, tgt_mask=tgt_mask)
-                decoder_output = self.layer_norm(decoder_output[:, -1:])
-                shape_logit = self.shape_output(decoder_output)
-                shape_logits_list.append(shape_logit)
-                next_token = shape_logit.argmax(dim=-1)
-                token_embedding = self.output_shape_embedding(next_token)
-                current_output = torch.cat([current_output, token_embedding], dim=1)
-            shape_logits = torch.cat(shape_logits_list, dim=1)
-            grid_logits_list = []
-            chunk_size = 30
-            for chunk_start in range(0, 900, chunk_size):
-                chunk_predictions = []
-                for i in range(chunk_start, chunk_start + chunk_size):
-                    curr_row = i // 30
-                    curr_col = i % 30
-                    tgt_mask = self.create_causal_mask(current_output.size(1), device)
-                    decoder_output = self.transformer_decoder(tgt=current_output, memory=memory, tgt_mask=tgt_mask)
-                    decoder_output = self.layer_norm(decoder_output[:, -1:])
-                    grid_logit = self.grid_output(decoder_output)
-                    chunk_predictions.append(grid_logit)
-                    next_token = grid_logit.argmax(dim=-1)
-                    token_embedding = self.output_grid_embedding(next_token)
-                    pos_embedding = self.get_position_embedding(curr_row, curr_col, device)
-                    token_embedding = token_embedding + pos_embedding
-                    current_output = torch.cat([current_output, token_embedding], dim=1)
-                chunk_logits = torch.cat(chunk_predictions, dim=1)
-                grid_logits_list.append(chunk_logits)
-            grid_logits = torch.cat(grid_logits_list, dim=1)
-            return shape_logits, grid_logits
+        decoder_output = self.transformer_decoder(tgt=teacher_tgt, memory=memory)
+        decoder_output = self.layer_norm(decoder_output)
+        grid_logits = self.grid_output(decoder_output[:, :900])
+        shape_logits = self.shape_output(decoder_output[:, 900:902])
+        return shape_logits, grid_logits
 
 class LatentProgramNetwork(nn.Module):
     def __init__(self, input_dim: int = 1, latent_dim: int = LATENT_DIM, hidden_dim: int = HIDDEN_DIM,
@@ -497,7 +460,8 @@ def main_training(file_store_name):
         'latent_log_vars': [],
         'latent_zs': [],
         'input_sequences': input_sequences,
-        'output_sequences': output_sequences
+        'output_sequences': output_sequences,
+        'losses_gradient_ascent': []  # Store optimization losses
     }
 
     print("Starting training loop...")
@@ -528,12 +492,11 @@ def main_training(file_store_name):
             batch_input = batch_input.to(device)
             batch_target = batch_target.to(device)
 
-            # Optimize z with gradients enabled:
+            # Use the appropriate latent optimization method
             if OPTIMIZE_Z:
-                z = None
-                with torch.enable_grad():
-                    z,_ = optimize_latent_z(model, batch_input, batch_target,
-                                          num_steps=OPTIMIZE_Z_NUM_STEPS, lr=OPTIMIZE_Z_LR)
+                z, losses = get_optimized_z(model, batch_input, batch_target)
+                if losses is not None:
+                    results['losses_gradient_ascent'].append(losses)
             else:
                 mu, log_var = model.encoder(batch_input, batch_target)
                 z = model.reparameterize(mu, log_var)
@@ -590,11 +553,12 @@ def main_training(file_store_name):
             batch_target = batch_target.to(device)
             mu, log_var = model.encoder(batch_input, batch_target)
             if OPTIMIZE_Z:
-                with torch.enable_grad():
-                    z,losses_gradient_ascent = optimize_latent_z(model, batch_input, batch_target, num_steps=OPTIMIZE_Z_NUM_STEPS, lr=OPTIMIZE_Z_LR)
-                    results['losses_gradient_ascent'].append(losses_gradient_ascent)
+                z, losses = get_optimized_z(model, batch_input, batch_target)
+                if losses is not None:
+                    results['losses_gradient_ascent'].append(losses)
             else:
                 z = model.reparameterize(mu, log_var)
+                
             shape_logits, grid_logits = model.decoder(z, batch_target, target_seq=batch_target)
             results['latent_mus'].append(mu.cpu())
             results['latent_log_vars'].append(log_var.cpu())

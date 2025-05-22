@@ -8,6 +8,11 @@ import os
 import torch
 from sklearn.manifold import TSNE
 import pickle
+from utils.settings_manager import settings
+
+# Get settings from settings manager
+evaluation_settings = settings.get_evaluation_settings()
+DEFAULT_VISUALIZE_N_VALUES = evaluation_settings['visualize_n_values']
 
 ##############################
 # VISUALIZERS FOR DATA
@@ -249,7 +254,6 @@ def plot_z_optimization_losses(results):
 
 
 def plot_reconstructions(results):
-    from main import DEFAULT_VISUALIZE_N_VALUES
     """Plot grid reconstructions from results along with an error map."""
     # Extract sequences and reconstructions.
     input_seqs = results['input_sequences']

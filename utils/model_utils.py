@@ -114,51 +114,51 @@ def save_model_params(run_dir):
     Args:
         run_dir: Directory to save parameters in
     """
-    from models.base_model import (
-        KEY, TRAINING_SEED, LATENT_DIM, HIDDEN_DIM, NUM_LAYERS, NUM_HEADS,
-        DROPOUT, MAX_LENGTH, ENCODER_MAX_LENGTH, DECODER_MAX_LENGTH,
-        BATCH_SIZE, NUM_EPOCHS, LEARNING_RATE, BETA, n,
-        OPTIMIZE_Z, OPTIMIZE_Z_NUM_STEPS, OPTIMIZE_Z_LR,
-        OPTIMIZE_Z_INFERENCE, OPTIMIZE_Z_INFERENCE_NUM_STEPS, OPTIMIZE_Z_INFERENCE_LR
-    )
-    from main import (
-        EVAL_SEED, DEFAULT_EVAL_KEYS, DEFAULT_EVAL_N_SAMPLES,
-        DEFAULT_EVAL_N_QUERIES, DEFAULT_EVAL_EPOCH
-    )
+    from utils.settings_manager import settings
+    
+    # Get all settings
+    data_settings = settings.get_data_settings()
+    model_architecture = settings.get_model_architecture()
+    training_settings = settings.get_training_settings()
+    latent_optimization = settings.get_latent_optimization()
+    evaluation_settings = settings.get_evaluation_settings()
     
     model_params = {
-        'KEY': KEY,
-        'TRAINING_SEED': TRAINING_SEED,
-        'EVAL_SEED': EVAL_SEED,
-        'LATENT_DIM': LATENT_DIM,
-        'HIDDEN_DIM': HIDDEN_DIM,
-        'NUM_LAYERS': NUM_LAYERS,
-        'NUM_HEADS': NUM_HEADS,
-        'DROPOUT': DROPOUT,
-        'MAX_LENGTH': MAX_LENGTH,
-        'ENCODER_MAX_LENGTH': ENCODER_MAX_LENGTH,
-        'DECODER_MAX_LENGTH': DECODER_MAX_LENGTH,
-        'BATCH_SIZE': BATCH_SIZE,
-        'NUM_EPOCHS': NUM_EPOCHS,
-        'LEARNING_RATE': LEARNING_RATE,
-        'BETA': BETA,
-        'n': n,
-        'OPTIMIZE_Z': OPTIMIZE_Z,
-        'OPTIMIZE_Z_NUM_STEPS': OPTIMIZE_Z_NUM_STEPS,
-        'OPTIMIZE_Z_LR': OPTIMIZE_Z_LR,
-        'OPTIMIZE_Z_INFERENCE': OPTIMIZE_Z_INFERENCE,
-        'OPTIMIZE_Z_INFERENCE_NUM_STEPS': OPTIMIZE_Z_INFERENCE_NUM_STEPS,
-        'OPTIMIZE_Z_INFERENCE_LR': OPTIMIZE_Z_INFERENCE_LR,
-        'DEFAULT_EVAL_KEYS': DEFAULT_EVAL_KEYS,
-        'DEFAULT_EVAL_N_SAMPLES': DEFAULT_EVAL_N_SAMPLES,
-        'DEFAULT_EVAL_N_QUERIES': DEFAULT_EVAL_N_QUERIES,
-        'DEFAULT_EVAL_EPOCH': DEFAULT_EVAL_EPOCH
+        'KEY': data_settings['key'],
+        'TRAINING_SEED': data_settings['training_seed'],
+        'EVAL_SEED': data_settings['eval_seed'],
+        'LATENT_DIM': model_architecture['latent_dim'],
+        'HIDDEN_DIM': model_architecture['hidden_dim'],
+        'NUM_LAYERS': model_architecture['num_layers'],
+        'NUM_HEADS': model_architecture['num_heads'],
+        'DROPOUT': model_architecture['dropout'],
+        'MAX_LENGTH': model_architecture['max_length'],
+        'ENCODER_MAX_LENGTH': model_architecture['encoder_max_length'],
+        'DECODER_MAX_LENGTH': model_architecture['decoder_max_length'],
+        'BATCH_SIZE': training_settings['batch_size'],
+        'NUM_EPOCHS': training_settings['num_epochs'],
+        'LEARNING_RATE': training_settings['learning_rate'],
+        'BETA': training_settings['beta'],
+        'n': data_settings['n'],
+        'OPTIMIZE_Z': latent_optimization['training']['enabled'],
+        'OPTIMIZE_Z_NUM_STEPS': latent_optimization['training']['num_steps'],
+        'OPTIMIZE_Z_LR': latent_optimization['training']['learning_rate'],
+        'OPTIMIZE_Z_INFERENCE': latent_optimization['inference']['enabled'],
+        'OPTIMIZE_Z_INFERENCE_NUM_STEPS': latent_optimization['inference']['num_steps'],
+        'OPTIMIZE_Z_INFERENCE_LR': latent_optimization['inference']['learning_rate'],
+        'DEFAULT_EVAL_KEYS': evaluation_settings['eval_keys'],
+        'DEFAULT_EVAL_N_SAMPLES': evaluation_settings['eval_n_samples'],
+        'DEFAULT_EVAL_N_QUERIES': evaluation_settings['eval_n_queries'],
+        'DEFAULT_EVAL_EPOCH': evaluation_settings['eval_epoch']
     }
     
     params_file = os.path.join(run_dir, 'model_params.pkl')
     with open(params_file, 'wb') as f:
         pickle.dump(model_params, f)
     print(f"Model parameters saved to {params_file}")
+    
+    # Also save the settings JSON file
+    settings.save_settings(run_dir)
 
 
 ##############################
