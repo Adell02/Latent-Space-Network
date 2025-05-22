@@ -531,12 +531,35 @@ def plot_model_summary(results, model_params):
     param_text += f"Training Examples per Batch: {model_params['n']}\n\n"
     
     param_text += "Latent Optimization:\n"
-    param_text += f"Training Optimization: {model_params['OPTIMIZE_Z']}\n"
-    param_text += f"Training Steps: {model_params['OPTIMIZE_Z_NUM_STEPS']}\n"
-    param_text += f"Training LR: {model_params['OPTIMIZE_Z_LR']}\n"
-    param_text += f"Inference Optimization: {model_params['OPTIMIZE_Z_INFERENCE']}\n"
-    param_text += f"Inference Steps: {model_params['OPTIMIZE_Z_INFERENCE_NUM_STEPS']}\n"
-    param_text += f"Inference LR: {model_params['OPTIMIZE_Z_INFERENCE_LR']}\n\n"
+    
+    # Get method if available, otherwise default to "gradient"
+    optimization_method = model_params.get('OPTIMIZATION_METHOD', 'gradient')
+    param_text += f"Optimization Method: {optimization_method}\n\n"
+    
+    param_text += "Training Optimization:\n"
+    param_text += f"  Enabled: {model_params['OPTIMIZE_Z']}\n"
+    param_text += f"  Steps: {model_params['OPTIMIZE_Z_NUM_STEPS']}\n"
+    param_text += f"  Learning Rate: {model_params['OPTIMIZE_Z_LR']}\n\n"
+    
+    param_text += "Inference Optimization:\n"
+    param_text += f"  Enabled: {model_params['OPTIMIZE_Z_INFERENCE']}\n"
+    param_text += f"  Steps: {model_params['OPTIMIZE_Z_INFERENCE_NUM_STEPS']}\n"
+    param_text += f"  Learning Rate: {model_params['OPTIMIZE_Z_INFERENCE_LR']}\n\n"
+    
+    # Add evolutionary parameters if available
+    if 'EVOLUTIONARY_POPULATION_SIZE' in model_params:
+        param_text += "Evolutionary Settings:\n"
+        param_text += f"  Population Size: {model_params.get('EVOLUTIONARY_POPULATION_SIZE', 'N/A')}\n"
+        param_text += f"  Number of Generations: {model_params.get('EVOLUTIONARY_NUM_GENERATIONS', 'N/A')}\n"
+        param_text += f"  Mutation Std: {model_params.get('EVOLUTIONARY_MUTATION_STD', 'N/A')}\n\n"
+    
+    # Add Voronoi parameters if available
+    if 'VORONOI_POPULATION_SIZE' in model_params:
+        param_text += "Voronoi Search Settings:\n"
+        param_text += f"  Population Size: {model_params.get('VORONOI_POPULATION_SIZE', 'N/A')}\n"
+        param_text += f"  Number of Generations: {model_params.get('VORONOI_NUM_GENERATIONS', 'N/A')}\n"
+        param_text += f"  Diversity Weight: {model_params.get('VORONOI_DIVERSITY_WEIGHT', 'N/A')}\n"
+        param_text += f"  Mutation Std: {model_params.get('VORONOI_MUTATION_STD', 'N/A')}\n\n"
     
     param_text += "Evaluation Settings:\n"
     param_text += f"Eval Keys: {model_params['DEFAULT_EVAL_KEYS']}\n"

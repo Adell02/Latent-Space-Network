@@ -123,6 +123,7 @@ def save_model_params(run_dir):
     latent_optimization = settings.get_latent_optimization()
     evaluation_settings = settings.get_evaluation_settings()
     
+    # Basic model parameters
     model_params = {
         'KEY': data_settings['key'],
         'TRAINING_SEED': data_settings['training_seed'],
@@ -135,7 +136,7 @@ def save_model_params(run_dir):
         'MAX_LENGTH': model_architecture['max_length'],
         'ENCODER_MAX_LENGTH': model_architecture['encoder_max_length'],
         'DECODER_MAX_LENGTH': model_architecture['decoder_max_length'],
-        'BATCH_SIZE': training_settings['batch_size'],
+        'BATCH_SIZE': training_settings.get('batch_size', 16),
         'NUM_EPOCHS': training_settings['num_epochs'],
         'LEARNING_RATE': training_settings['learning_rate'],
         'BETA': training_settings['beta'],
@@ -151,6 +152,25 @@ def save_model_params(run_dir):
         'DEFAULT_EVAL_N_QUERIES': evaluation_settings['eval_n_queries'],
         'DEFAULT_EVAL_EPOCH': evaluation_settings['eval_epoch']
     }
+    
+    # Add optimization method
+    if 'method' in latent_optimization:
+        model_params['OPTIMIZATION_METHOD'] = latent_optimization['method']
+    
+    # Add evolutionary parameters if available
+    if 'evolutionary' in latent_optimization:
+        evolutionary = latent_optimization['evolutionary']
+        model_params['EVOLUTIONARY_POPULATION_SIZE'] = evolutionary.get('population_size', 20)
+        model_params['EVOLUTIONARY_NUM_GENERATIONS'] = evolutionary.get('num_generations', 15)
+        model_params['EVOLUTIONARY_MUTATION_STD'] = evolutionary.get('mutation_std', 0.1)
+    
+    # Add voronoi parameters if available
+    if 'voronoi' in latent_optimization:
+        voronoi = latent_optimization['voronoi']
+        model_params['VORONOI_POPULATION_SIZE'] = voronoi.get('population_size', 20)
+        model_params['VORONOI_NUM_GENERATIONS'] = voronoi.get('num_generations', 15)
+        model_params['VORONOI_DIVERSITY_WEIGHT'] = voronoi.get('diversity_weight', 0.5)
+        model_params['VORONOI_MUTATION_STD'] = voronoi.get('mutation_std', 0.1)
     
     params_file = os.path.join(run_dir, 'model_params.pkl')
     with open(params_file, 'wb') as f:

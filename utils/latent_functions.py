@@ -10,6 +10,7 @@ def optimize_latent_z(lpn, input_seq, target_seq, num_steps=None, lr=None):
     """
     Optimize latent z via gradient descent with logging to verify optimization.
     """
+    print(f"\n\nOptimizing latent z with {num_steps} steps and learning rate {lr}\n\n")
     # Use settings if parameters are not provided
     if num_steps is None:
         num_steps = latent_optimization['training']['num_steps']
@@ -85,6 +86,7 @@ def evolutionary_optimize_latent_z(lpn, input_seq, target_seq, population_size=N
     """
     Optimize latent z using an evolutionary algorithm.
     """
+    print(f"\n\nEvolving latent z with {num_generations} generations and mutation std {mutation_std}\n\n")
     # Use settings if parameters are not provided
     evolutionary_settings = latent_optimization['evolutionary']
     if population_size is None:
@@ -148,6 +150,7 @@ def voronoi_optimize_latent_z(lpn, input_seq, target_seq, population_size=None,
     diversity score (approximated by the candidate's distance to its nearest neighbor in the population).
     We then select candidates that balance a low loss with high diversity.
     """
+    print(f"\n\nVoronoi-inspired optimizing latent z with {num_generations} generations and mutation std {mutation_std}\n\n")
     # Use settings if parameters are not provided
     voronoi_settings = latent_optimization['voronoi']
     if population_size is None:
