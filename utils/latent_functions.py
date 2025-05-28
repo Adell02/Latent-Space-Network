@@ -227,24 +227,51 @@ def voronoi_optimize_latent_z(lpn, input_seq, target_seq, population_size=None,
 ##############################
 # Helper: Choose Optimization Method
 ##############################
-def get_optimized_z(lpn, input_seq, target_seq):
+def get_optimized_z(lpn, input_seq, target_seq, num_steps=None, lr=None, context='training'):
     """
     Returns an optimized latent z using either gradient-based, evolutionary, or Voronoi-inspired search,
     depending on the optimization method setting.
+    
+    Args:
+        lpn: The model
+        input_seq: Input sequence tensor
+        target_seq: Target sequence tensor
+        num_steps: Number of optimization steps (overrides settings if provided)
+        lr: Learning rate (overrides settings if provided)
+        context: 'training' or 'inference' - determines which settings to use as defaults
     """
     optimization_method = latent_optimization.get('method', 'gradient')
     
-    if latent_optimization['training']['enabled'] or latent_optimization['inference']['enabled']:
+    # Determine which settings to use based on context
+    if context == 'inference':
+        enabled = latent_optimization['inference']['enabled']
+        default_num_steps = latent_optimization['inference']['num_steps']
+        default_lr = latent_optimization['inference']['learning_rate']
+    else:  # training context
+        enabled = latent_optimization['training']['enabled']
+        default_num_steps = latent_optimization['training']['num_steps']
+        default_lr = latent_optimization['training']['learning_rate']
+    
+    # Use provided parameters or fall back to context-appropriate defaults
+    final_num_steps = num_steps if num_steps is not None else default_num_steps
+    final_lr = lr if lr is not None else default_lr
+    
+    if enabled:
         if optimization_method == "gradient":
             with torch.enable_grad():
-                return optimize_latent_z(lpn, input_seq, target_seq)
+                return optimize_latent_z(lpn, input_seq, target_seq, 
+                                       num_steps=final_num_steps, lr=final_lr)
         elif optimization_method == "evolutionary":
+            # For evolutionary and voronoi, we don't use num_steps/lr but their own parameters
+            # However, we could map num_steps to num_generations if needed
             return evolutionary_optimize_latent_z(lpn, input_seq, target_seq)
         elif optimization_method == "voronoi":
             return voronoi_optimize_latent_z(lpn, input_seq, target_seq)
         else:
+            # Unknown method, fall back to basic sampling
             mu, log_var = lpn.encoder(input_seq, target_seq)
             return lpn.reparameterize(mu, log_var), None
     else:
+        # Optimization disabled, just use basic sampling
         mu, log_var = lpn.encoder(input_seq, target_seq)
         return lpn.reparameterize(mu, log_var), None

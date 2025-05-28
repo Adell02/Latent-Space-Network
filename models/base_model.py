@@ -594,13 +594,9 @@ def main_training(file_store_name):
 
             # Use the appropriate latent optimization method for inference
             if OPTIMIZE_Z_INFERENCE: # Check inference specific flag
-                # Pass inference specific num_steps and lr
+                # Pass context='inference' to use inference-specific parameters
                 z_eval, losses_eval = get_optimized_z(model, batch_input_eval, batch_target_eval, 
-                                                      num_steps=OPTIMIZE_Z_INFERENCE_NUM_STEPS, 
-                                                      lr=OPTIMIZE_Z_INFERENCE_LR,
-                                                      # Add a context flag if get_optimized_z needs to know it's inference
-                                                      # context='inference' # if get_optimized_z signature is updated
-                                                      )
+                                                      context='inference')
                 if losses_eval is not None and isinstance(results.get('losses_gradient_ascent'), list) : # Check if list before append
                     results['losses_gradient_ascent'].append(losses_eval) # This might grow very large
             else:
@@ -674,8 +670,7 @@ def main_training(file_store_name):
         # Consistent z retrieval for final eval
         if OPTIMIZE_Z_INFERENCE:
             z, losses = get_optimized_z(model, batch_input, batch_target, 
-                                        num_steps=OPTIMIZE_Z_INFERENCE_NUM_STEPS, 
-                                        lr=OPTIMIZE_Z_INFERENCE_LR)
+                                        context='inference')
             # if losses is not None and isinstance(results.get('losses_gradient_ascent'), list):
             #    results['losses_gradient_ascent'].append(losses) # Decide if needed for final eval too
         else:

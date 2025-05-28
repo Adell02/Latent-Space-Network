@@ -335,8 +335,8 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
     Returns:
         dict: Dictionary containing evaluation metrics and visualizations
     """
-    from models.base_model import OPTIMIZE_Z_INFERENCE_NUM_STEPS, OPTIMIZE_Z_INFERENCE_LR, compute_loss
-    from utils.latent_functions import optimize_latent_z
+    from models.base_model import compute_loss
+    from utils.latent_functions import get_optimized_z
 
     model.eval()
     shape_correct, shape_tokens = 0, 0
@@ -357,20 +357,18 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
         batch_target = batch_target.to(device)
         batch_size = batch_input.size(0)
 
-        # Optimize z using only the support example
-        with torch.enable_grad():
-            z,losses_gradient_ascent = optimize_latent_z(
-                model,
-                batch_input,
-                batch_target,
-                num_steps=OPTIMIZE_Z_INFERENCE_NUM_STEPS,
-                lr=OPTIMIZE_Z_INFERENCE_LR
-            )
-            z_optimization_logs.append(losses_gradient_ascent)
-            
-            # Compute support loss
-            support_loss = compute_loss(model, batch_input, batch_target)
-            support_losses.append(support_loss.item())
+        # Optimize z using only the support example - use inference context
+        z, losses_gradient_ascent = get_optimized_z(
+            model,
+            batch_input,
+            batch_target,
+            context='inference'
+        )
+        z_optimization_logs.append(losses_gradient_ascent)
+        
+        # Compute support loss
+        support_loss = compute_loss(model, batch_input, batch_target)
+        support_losses.append(support_loss.item())
 
         with torch.no_grad():
             z_support = z.expand(batch_input.size(0), -1)
