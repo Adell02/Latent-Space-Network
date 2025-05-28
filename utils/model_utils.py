@@ -11,6 +11,7 @@ import pickle
 from sklearn.manifold import TSNE
 from sklearn.cluster import KMeans
 import matplotlib.pyplot as plt
+import json
 
 
 ##############################
@@ -80,14 +81,36 @@ def setup_logging(run_dir):
 ##############################
 # Prepare DataLoader
 ##############################
-def prepare_dataloader(input_seqs, output_seqs, batch_size):
-    """Prepare DataLoader for training"""
-    # Convert to PyTorch tensors (using FloatTensor here; adjust if needed)
-    input_tensor = torch.FloatTensor(input_seqs)
-    output_tensor = torch.FloatTensor(output_seqs)
+def prepare_dataloader(input_seqs, output_seqs, batch_size, shuffle=True):
+    # Convert lists of numpy arrays to a single numpy array first, then to tensor
+    if isinstance(input_seqs, list) and len(input_seqs) > 0 and isinstance(input_seqs[0], np.ndarray):
+        try:
+            # Ensure all sequences are of the same length before stacking, pad if necessary
+            # For ARC, lengths should be consistent after processing (e.g., 902)
+            max_len_input = max(len(s) for s in input_seqs) if input_seqs else 0
+            max_len_output = max(len(s) for s in output_seqs) if output_seqs else 0
+            
+            # This padding assumes sequences are 1D. If they are multi-dimensional, adjust padding.
+            # For ARC, this should be fine as they are flattened.
+            padded_input_seqs = [np.pad(s, (0, max_len_input - len(s)), 'constant') if len(s) < max_len_input else s for s in input_seqs]
+            padded_output_seqs = [np.pad(s, (0, max_len_output - len(s)), 'constant') if len(s) < max_len_output else s for s in output_seqs]
+
+            input_tensor = torch.tensor(np.array(padded_input_seqs), dtype=torch.float32)
+            output_tensor = torch.tensor(np.array(padded_output_seqs), dtype=torch.float32)
+        except Exception as e:
+            print(f"Warning: Could not convert input/output sequences with np.array. Error: {e}. Falling back to slow method.")
+            input_tensor = torch.FloatTensor(input_seqs) 
+            output_tensor = torch.FloatTensor(output_seqs)
+    elif isinstance(input_seqs, torch.Tensor) and isinstance(output_seqs, torch.Tensor):
+        input_tensor = input_seqs.float()
+        output_tensor = output_seqs.float()
+    else: 
+        print("Warning: Input sequences type not explicitly handled for optimized tensor conversion. Using slow torch.FloatTensor.")
+        input_tensor = torch.FloatTensor(input_seqs)
+        output_tensor = torch.FloatTensor(output_seqs)
 
     dataset = TensorDataset(input_tensor, output_tensor)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
     return dataloader
 
 
@@ -182,16 +205,54 @@ def save_model_params(run_dir):
 
 
 ##############################
+# Save Training JSON
+##############################
+def save_training_json(results, run_dir):
+    """
+    Save training results in a JSON format for better accessibility and readability.
+    
+    Args:
+        results: Dictionary containing training results (should have tensors converted to lists/numbers)
+        run_dir: Directory to save the JSON file
+    """
+    # Ensure all numpy arrays or tensors are converted to lists for JSON serialization
+    # The main_training loop should already do this for items like 'input_sequences', 'latent_mus', etc.
+    # Here we make a deep copy to safely attempt conversions for any missed items.
+    results_copy = json.loads(json.dumps(results, default=lambda o: '' )) # basic attempt to make it serializable
+                                                                       # a more robust solution would iterate and convert np/torch types
+
+    json_file = os.path.join(run_dir, 'training_results.json')
+    try:
+        with open(json_file, 'w') as f:
+            json.dump(results_copy, f, indent=4)
+        print(f"Training results (JSON) saved to {json_file}")
+    except TypeError as e:
+        print(f"Error saving results to JSON: {e}. Some elements might not be serializable.")
+        # Fallback: save problematic keys separately or log them
+        problematic_keys = []
+        for key, value in results.items():
+            try:
+                json.dumps(value)
+            except TypeError:
+                problematic_keys.append(key)
+        print(f"Problematic keys for JSON serialization: {problematic_keys}")
+        # Optionally, save a simplified version or just the serializable parts
+
+
+##############################
 # Save Results
 ##############################  
 def save_results(results, run_dir):
-    """Save results to a pickle file."""
-    results_file = os.path.join(run_dir, 'results.pkl')
-    with open(results_file, 'wb') as f:
+    """Save results to a pickle file and a JSON file."""
+    results_file_pkl = os.path.join(run_dir, 'results.pkl')
+    with open(results_file_pkl, 'wb') as f:
         pickle.dump(results, f)
-    print(f"Results saved to {results_file}")
+    print(f"Results (pickle) saved to {results_file_pkl}")
     
-    # Also save model parameters
+    # Save as JSON
+    save_training_json(results, run_dir) # Call the new JSON saving function
+    
+    # Also save model parameters (this already saves settings.json)
     save_model_params(run_dir)
 
 

@@ -1,37 +1,52 @@
 {
     "data_settings": {
-        "key": "00d62c1b",
+        "training_keys": [
+            "00d62c1b", 
+            "1cf80156", 
+            "25d8a9c8", 
+            "0a938d79", 
+            "74dd1130"
+        ],
         "training_seed": 42,
         "eval_seed": 1,
-        "n": 2,
+        "n": 20,
         "run_base_dir": "runs_re_arc"
     },
     "model_architecture": {
-        "latent_dim": 4,
-        "hidden_dim": 32,
-        "num_layers": 6,
+        "latent_dim": 128,
+        "hidden_dim": 256,
+        "num_layers": 4,
         "num_heads": 8,
-        "dropout": 0.1,
+        "dropout": 0.15,
         "max_length": 902,
         "encoder_max_length": 1805,
-        "decoder_max_length": 902
+        "decoder_max_length": 902,
+        "use_gradient_checkpointing": true
     },
     "training_settings": {
-        "num_epochs": 100,
-        "batch_size": 32,
+        "num_epochs": 300,
+        "batch_size": 8,
+        "gradient_accumulation_steps": 2,
         "learning_rate": 0.0001,
-        "beta": 1.0
+        "optimizer_weight_decay": 1e-5,
+        "beta": 0.1,
+        "use_mixed_precision": true,
+        "learning_rate_scheduler": {
+            "type": "cosine",
+            "warmup_epochs": 20,
+            "lr_min": 1e-6
+        }
     },
     "latent_optimization": {
         "training": {
             "enabled": false,
             "num_steps": 5,
-            "learning_rate": 0.5
+            "learning_rate": 0.1
         },
         "inference": {
             "enabled": true,
-            "num_steps": 100,
-            "learning_rate": 0.5
+            "num_steps": 50,
+            "learning_rate": 0.1
         },
         "method": "gradient",
         "evolutionary": {
@@ -47,7 +62,7 @@
         }
     },
     "evaluation_settings": {
-        "eval_keys": ["00d62c1b"],
+        "eval_keys": ["00d62c1b", "1cf80156"],
         "eval_n_samples": 10,
         "eval_n_queries": 2,
         "eval_epoch": 299,

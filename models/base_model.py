@@ -7,6 +7,7 @@ import sys
 from typing import Tuple, List
 import pickle
 import numpy as np
+import json
 
 # add the parent directory to the path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -31,9 +32,12 @@ training_settings = settings.get_training_settings()
 latent_optimization = settings.get_latent_optimization()
 
 # Data settings
-KEY = data_settings['key']
+TRAINING_KEYS = data_settings.get('training_keys', [data_settings.get('key', None)])
+if TRAINING_KEYS is None or not TRAINING_KEYS[0]:
+    raise ValueError("No training keys specified in data_settings.")
+
 TRAINING_SEED = data_settings['training_seed']
-n = data_settings['n']
+N_EXAMPLES_PER_TASK = data_settings['n']
 
 # Model architecture settings
 LATENT_DIM = model_architecture['latent_dim']
@@ -88,8 +92,11 @@ class TransformerEncoder(nn.Module):
             norm_first=True
         )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        for mod in self.transformer_encoder.layers:
-            mod.use_checkpoint = True  # Enables gradient checkpointing
+        
+        # Enable gradient checkpointing if specified in settings
+        if model_architecture.get('use_gradient_checkpointing', False):
+            for mod in self.transformer_encoder.layers:
+                mod.use_checkpoint = True  # Enables gradient checkpointing
 
         # Output projections for latent distribution
         self.layer_norm = nn.LayerNorm(hidden_dim)
@@ -198,8 +205,11 @@ class TransformerDecoder(nn.Module):
             norm_first=True
         )
         self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
-        for mod in self.transformer_decoder.layers:
-            mod.use_checkpoint = True
+        
+        # Enable gradient checkpointing if specified in settings
+        if model_architecture.get('use_gradient_checkpointing', False):
+            for mod in self.transformer_decoder.layers:
+                mod.use_checkpoint = True
 
         # Output projections: one for shape tokens and one for grid tokens
         self.shape_output = nn.Linear(hidden_dim, 31)  # For shape values (indices 0-30)
@@ -291,60 +301,40 @@ class LatentProgramNetwork(nn.Module):
         shape_logits, grid_logits = self.decoder(z, input_seq, target_seq=target_seq)
         return (shape_logits, grid_logits), mu, log_var
 
-def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Tensor, beta: float = BETA) -> torch.Tensor:
-    """
-    Compute the total loss for the model using cross-pair reconstruction.
-    
-    The loss is composed of:
-      - A shape loss computed over the two shape tokens
-      - A grid loss computed *only* over the active region of the grid, as defined by the target's shape
-      - A KL divergence loss on the latent parameters weighted by beta
-    
-    This formulation forces 100% accuracy (i.e. a zero loss) only if the entire active output
-    (all pixels in the target region) are exactly reconstructed.
-    """
-
+def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Tensor, beta: float = BETA, return_components: bool = False) -> torch.Tensor:
     reconstruction, mu, log_var = model(input_seq, target_seq)
     shape_logits, grid_logits = reconstruction
 
-    # Compute shape loss (for the two shape tokens):
     shape_targets = target_seq[:, 900:902].long()
     shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
-
-
-    if OPTIMIZE_Z:
-        grid_targets = target_seq[:, :900].long()               
-        grid_loss = F.cross_entropy(grid_logits.reshape(-1, 10), grid_targets.reshape(-1), ignore_index=-1)
-        reconstruction_loss = shape_loss + grid_loss
-        kl_loss = 0.5 * torch.sum(mu.pow(2) + log_var.exp() - 1 - log_var)
-        total_loss = reconstruction_loss + beta * kl_loss
-        return total_loss
-
     
-    # Compute grid loss only over the active region for each sample.
     batch_size = target_seq.size(0)
     grid_loss_sum = 0.0
+    active_elements_count = 0 # Keep track of total active pixels across batch for correct averaging
     for i in range(batch_size):
         # Retrieve the target dimensions (active region) from the last two tokens.
         tgt_rows = int(target_seq[i, 900].item())
         tgt_cols = int(target_seq[i, 901].item())
         active_pixels = tgt_rows * tgt_cols
 
-        # Compute cross-entropy only over the active region.
-        # Note: grid_logits[i, :active_pixels] has shape (active_pixels, num_grid_classes)
-        #       target_seq[i, :active_pixels] has shape (active_pixels,)
-        loss_i = F.cross_entropy(grid_logits[i, :active_pixels], target_seq[i, :active_pixels].long())
-        grid_loss_sum += loss_i
+        if active_pixels > 0:
+            # Compute cross-entropy only over the active region. Sum losses for each sample.
+            loss_i = F.cross_entropy(grid_logits[i, :active_pixels], target_seq[i, :active_pixels].long(), reduction='sum')
+            grid_loss_sum += loss_i
+            active_elements_count += active_pixels
 
-    grid_loss = grid_loss_sum / batch_size
+    # Average grid loss over all active pixels in the batch
+    grid_loss = grid_loss_sum / active_elements_count if active_elements_count > 0 else torch.tensor(0.0, device=input_seq.device)
 
-    # Total reconstruction loss: we want both shape and grid to be perfectly predicted.
     reconstruction_loss = shape_loss + grid_loss
 
-    # KL divergence loss (as before).
-    kl_loss = 0.5 * torch.sum(mu.pow(2) + log_var.exp() - 1 - log_var)
+    # KL divergence loss, normalized by batch size for consistency
+    kl_loss = 0.5 * torch.sum(mu.pow(2) + log_var.exp() - 1 - log_var) / mu.size(0) 
 
     total_loss = reconstruction_loss + beta * kl_loss
+    
+    if return_components:
+        return total_loss, shape_loss, grid_loss, kl_loss
     return total_loss
 
 
@@ -352,128 +342,237 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
 # Main Training Function
 ##############################
 
-def train_model(model, dataloader, optimizer, run_dir, logger):
+def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed_precision, gradient_accumulation_steps, current_epoch_num, total_epochs):
     model.train()
-    total_loss = 0
-    shape_loss_sum = 0
-    grid_loss_sum = 0
-    kl_loss_sum = 0
+    epoch_total_loss = 0
+    epoch_shape_loss_sum = 0
+    epoch_grid_loss_sum = 0
+    epoch_kl_loss_sum = 0
+    
+    optimizer.zero_grad() # Ensure gradients are zeroed at the start of accumulation cycle / epoch
 
     logger.info("-" * 60)
-    logger.info("Starting training batch loop...")
+    logger.info(f"Starting training batch loop for Epoch {current_epoch_num}/{total_epochs}...")
     total_batches = len(dataloader)
 
     for batch_idx, (input_seq, target_seq) in enumerate(dataloader):
-        progress = (batch_idx + 1) / total_batches * 100
         device = next(model.parameters()).device
         input_seq = input_seq.to(device)
         target_seq = target_seq.to(device)
 
-        optimizer.zero_grad()
-        loss = compute_loss(model, input_seq, target_seq)
-        loss.backward()
-        optimizer.step()
+        with torch.cuda.amp.autocast(enabled=use_mixed_precision):
+            # Pass beta from global settings (or training_settings directly)
+            loss, shape_loss_comp, grid_loss_comp, kl_loss_comp = compute_loss(model, input_seq, target_seq, beta=BETA, return_components=True)
+            loss = loss / gradient_accumulation_steps
+        
+        scaler.scale(loss).backward()
 
-        total_loss += loss.item()
+        if (batch_idx + 1) % gradient_accumulation_steps == 0 or (batch_idx + 1) == total_batches:
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
+        
+        epoch_total_loss += loss.item() * gradient_accumulation_steps # Unscale for logging
+        epoch_shape_loss_sum += shape_loss_comp.item()
+        epoch_grid_loss_sum += grid_loss_comp.item()
+        epoch_kl_loss_sum += kl_loss_comp.item()
+        
+        progress = (batch_idx + 1) / total_batches * 100
+        # Log less frequently if accumulating gradients
+        log_frequency = gradient_accumulation_steps * 5 
+        if (batch_idx + 1) % log_frequency == 0 or (batch_idx + 1) == total_batches:
+            # Log individual unscaled losses for the current batch/step
+            logger.info(f"Epoch [{current_epoch_num}/{total_epochs}] Batch [{batch_idx + 1}/{total_batches}] ({progress:.1f}%)")
+            logger.info(f"  Step Loss: {loss.item() * gradient_accumulation_steps:.4f} (Shape: {shape_loss_comp.item():.4f}, Grid: {grid_loss_comp.item():.4f}, KL: {kl_loss_comp.item():.4f})")
 
-        # Compute individual losses for logging purposes
-        shape_logits, grid_logits = model.decoder(model.reparameterize(*model.encoder(input_seq, target_seq)), input_seq, target_seq=target_seq)
-        grid_targets = target_seq[:, :900].long()
-        shape_targets = target_seq[:, 900:902].long()
-        shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
-        grid_loss = F.cross_entropy(grid_logits.reshape(-1, 10), grid_targets.reshape(-1), ignore_index=-1)
-        reconstruction_loss = shape_loss + grid_loss
-        mu, log_var = model.encoder(input_seq, target_seq)
-        kl_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp())
 
-        shape_loss_sum += shape_loss.item()
-        grid_loss_sum += grid_loss.item()
-        kl_loss_sum += kl_loss.item()
-
-        logger.info(f"Batch [{batch_idx + 1}/{total_batches}] ({progress:.1f}%)")
-        logger.info(f"  Shape Loss: {shape_loss.item():.4f}")
-        logger.info(f"  Grid Loss: {grid_loss.item():.4f}")
-        logger.info(f"  KL Loss: {kl_loss.item():.4f}")
-        logger.info(f"  Total Loss: {loss.item():.4f}")
-
-        if (batch_idx + 1) % 5 == 0:
-            avg_loss = total_loss / (batch_idx + 1)
-            avg_shape_loss = shape_loss_sum / (batch_idx + 1)
-            avg_grid_loss = grid_loss_sum / (batch_idx + 1)
-            avg_kl_loss = kl_loss_sum / (batch_idx + 1)
-            logger.info("\nRunning Averages:")
-            logger.info(f"  Avg Shape Loss: {avg_shape_loss:.4f}")
-            logger.info(f"  Avg Grid Loss: {avg_grid_loss:.4f}")
-            logger.info(f"  Avg KL Loss: {avg_kl_loss:.4f}")
-            logger.info(f"  Avg Total Loss: {avg_loss:.4f}\n")
-
-    avg_loss = total_loss / total_batches
-    avg_shape_loss = shape_loss_sum / total_batches
-    avg_grid_loss = grid_loss_sum / total_batches
-    avg_kl_loss = kl_loss_sum / total_batches
-
+    avg_loss_for_epoch = epoch_total_loss / total_batches
+    avg_shape_loss = epoch_shape_loss_sum / total_batches
+    avg_grid_loss = epoch_grid_loss_sum / total_batches
+    avg_kl_loss = epoch_kl_loss_sum / total_batches
+    
     logger.info("=" * 60)
-    logger.info("Epoch Summary:")
+    logger.info(f"Epoch {current_epoch_num} Summary:")
     logger.info(f"  Final Avg Shape Loss: {avg_shape_loss:.4f}")
     logger.info(f"  Final Avg Grid Loss: {avg_grid_loss:.4f}")
     logger.info(f"  Final Avg KL Loss: {avg_kl_loss:.4f}")
-    logger.info(f"  Final Avg Total Loss: {avg_loss:.4f}")
+    logger.info(f"  Final Avg Total Loss: {avg_loss_for_epoch:.4f}")
     logger.info("=" * 60)
 
-    return avg_loss
-
+    return avg_loss_for_epoch, avg_shape_loss, avg_grid_loss, avg_kl_loss
 
 
 def main_training(file_store_name):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
+    # Reload settings variables to ensure they are current, especially if an optimization function was called
+    global data_settings, model_architecture, training_settings, latent_optimization
+    global TRAINING_KEYS, N_EXAMPLES_PER_TASK
+    global LATENT_DIM, HIDDEN_DIM, NUM_LAYERS, NUM_HEADS, DROPOUT
+    global BATCH_SIZE, NUM_EPOCHS, LEARNING_RATE, BETA
+    global OPTIMIZE_Z, OPTIMIZE_Z_NUM_STEPS, OPTIMIZE_Z_LR
+    global OPTIMIZE_Z_INFERENCE, OPTIMIZE_Z_INFERENCE_NUM_STEPS, OPTIMIZE_Z_INFERENCE_LR
+
+    settings.load_settings() # Force reload from file to ensure all parts of the code use updated settings
+    data_settings = settings.get_data_settings()
+    model_architecture = settings.get_model_architecture()
+    training_settings = settings.get_training_settings()
+    latent_optimization = settings.get_latent_optimization()
+
+    TRAINING_KEYS = data_settings.get('training_keys', [data_settings.get('key', None)])
+    if TRAINING_KEYS is None or not TRAINING_KEYS[0]:
+        raise ValueError("No training keys specified in data_settings after reload.")
+    N_EXAMPLES_PER_TASK = data_settings['n']
+    
+    LATENT_DIM = model_architecture['latent_dim']
+    HIDDEN_DIM = model_architecture['hidden_dim']
+    NUM_LAYERS = model_architecture['num_layers']
+    NUM_HEADS = model_architecture['num_heads']
+    DROPOUT = model_architecture['dropout']
+    
+    BATCH_SIZE = training_settings['batch_size']
+    NUM_EPOCHS = training_settings['num_epochs']
+    LEARNING_RATE = training_settings['learning_rate']
+    BETA = training_settings['beta']
+
+    OPTIMIZE_Z = latent_optimization['training']['enabled']
+    OPTIMIZE_Z_NUM_STEPS = latent_optimization['training']['num_steps']
+    OPTIMIZE_Z_LR = latent_optimization['training']['learning_rate']
+    OPTIMIZE_Z_INFERENCE = latent_optimization['inference']['enabled']
+    OPTIMIZE_Z_INFERENCE_NUM_STEPS = latent_optimization['inference']['num_steps']
+    OPTIMIZE_Z_INFERENCE_LR = latent_optimization['inference']['learning_rate']
+    
+    set_seed(data_settings['training_seed'])
+
+
     run_dir = create_run_directory(file_store_name)
     logger = setup_logging(run_dir)
-    logger.info(f"Starting training for ARC problem {KEY}")
+    logger.info(f"Starting training for ARC problems: {TRAINING_KEYS}")
+    logger.info(f"Full settings dump: {json.dumps(settings.get_settings(), indent=2)}")
     print("Run directory created:", run_dir)
 
     logger.info("Generating and preparing data...")
     print("Generating and preparing data...")
-    # Use the generated examples function with the defined n examples.
-    _,_,_,input_sequences,output_sequences = generate_and_process_tasks(KEY, n)
-    logger.info(f"Generated {len(input_sequences)} pairs of sequences")
-    print(f"Generated {len(input_sequences)} pairs of sequences.")
+
+    all_input_sequences = []
+    all_output_sequences = []
+    logger.info(f"Generating data for tasks: {TRAINING_KEYS}")
+    print(f"Generating data for tasks: {TRAINING_KEYS}")
+
+    for task_key in TRAINING_KEYS:
+        logger.info(f"Processing task: {task_key} with {N_EXAMPLES_PER_TASK} examples")
+        print(f"Processing task: {task_key} with {N_EXAMPLES_PER_TASK} examples")
+        try:
+            _, _, _, task_input_sequences, task_output_sequences = generate_and_process_tasks(task_key, N_EXAMPLES_PER_TASK)
+            all_input_sequences.extend(task_input_sequences)
+            all_output_sequences.extend(task_output_sequences)
+            logger.info(f"Generated {len(task_input_sequences)} pairs for task {task_key}")
+            print(f"Generated {len(task_input_sequences)} pairs for task {task_key}")
+        except Exception as e:
+            logger.error(f"Error generating data for task {task_key}: {e}")
+            print(f"Error generating data for task {task_key}: {e}")
+            continue 
+    
+    if not all_input_sequences:
+        logger.error("No data generated from any task. Exiting training.")
+        print("No data generated from any task. Exiting training.")
+        return None, None
+
+    input_sequences = all_input_sequences
+    output_sequences = all_output_sequences
+    logger.info(f"Total generated {len(input_sequences)} pairs of sequences from {len(TRAINING_KEYS)} tasks.")
+    print(f"Total generated {len(input_sequences)} pairs of sequences from {len(TRAINING_KEYS)} tasks.")
 
     dataloader = prepare_dataloader(input_sequences, output_sequences, BATCH_SIZE)
 
     logger.info("Initializing model...")
     print("Initializing model...")
-    model = LatentProgramNetwork().to(device)
-    optimizer = Adam(model.parameters(), lr=LEARNING_RATE)
-    print("Model and optimizer initialized.")
+    # Model instantiation will pick up global LATENT_DIM, HIDDEN_DIM etc. which are now reloaded
+    model = LatentProgramNetwork().to(device) 
+
+    optimizer_weight_decay = training_settings.get('optimizer_weight_decay', 0.0)
+    optimizer = Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=optimizer_weight_decay)
+    print(f"Model and optimizer initialized. Optimizer weight decay: {optimizer_weight_decay}")
+
+    use_mixed_precision = training_settings.get('use_mixed_precision', False)
+    scaler = torch.cuda.amp.GradScaler(enabled=use_mixed_precision)
+    logger.info(f"Mixed precision training enabled: {use_mixed_precision}")
+
+    gradient_accumulation_steps = training_settings.get('gradient_accumulation_steps', 1)
+    logger.info(f"Gradient accumulation steps: {gradient_accumulation_steps}")
+    
+    # Learning rate scheduler
+    lr_scheduler_config = training_settings.get('learning_rate_scheduler', {'type': 'none'})
+    scheduler = None
+    if lr_scheduler_config['type'] == 'cosine':
+        # CosineAnnealingLR needs T_max which is total number of steps.
+        # Total steps = (num_epochs - warmup_epochs) * len(dataloader) / gradient_accumulation_steps
+        # This is a bit tricky if warmup is per epoch. Let's simplify:
+        # If using warmup, scheduler starts after warmup.
+        # For now, let's assume T_max is for the entire training duration after warmup.
+        # A common setup for cosine annealing with warmup is to use warmup for N epochs,
+        # then cosine anneal for M-N epochs.
+        # Or, simpler: a warmup phase, then a fixed scheduler.
+        # For this integration, let's stick to a simple CosineAnnealingLR without complex warmup logic
+        # directly tied to step count, or use a simpler StepLR if cosine is too complex here.
+        # A more robust implementation would wrap this in a custom scheduler class.
+        # For now, this is a basic setup.
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, 
+            T_max=NUM_EPOCHS * len(dataloader) // gradient_accumulation_steps, # Approximation of total steps
+            eta_min=lr_scheduler_config.get('lr_min', 1e-6)
+        )
+        logger.info(f"Using CosineAnnealingLR scheduler. T_max={scheduler.T_max}, eta_min={scheduler.eta_min}")
+    elif lr_scheduler_config['type'] == 'step':
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=lr_scheduler_config.get('step_size', 30), gamma=lr_scheduler_config.get('gamma', 0.1))
+        logger.info(f"Using StepLR scheduler. Step_size={scheduler.step_size}, gamma={scheduler.gamma}")
+
 
     count_model_parameters(model)
     print("Model parameter count completed.")
 
-    # Initialize results dictionary with an epoch accuracy list.
     results = {
         'epoch_losses': [],
-        'epoch_accuracies': [],  # Will hold accuracy per epoch
+        'epoch_accuracies': [],
+        'epoch_metrics': [], # To store shape, grid, kl losses per epoch
         'reconstructions': [],
         'latent_mus': [],
         'latent_log_vars': [],
         'latent_zs': [],
-        'input_sequences': input_sequences,
-        'output_sequences': output_sequences,
-        'losses_gradient_ascent': []  # Store optimization losses
+        'input_sequences': [seq.tolist() for seq in input_sequences], # Convert to list for JSON
+        'output_sequences': [seq.tolist() for seq in output_sequences], # Convert to list for JSON
+        'losses_gradient_ascent': []
     }
 
     print("Starting training loop...")
     for epoch in range(NUM_EPOCHS):
-        logger.info("\n" + "=" * 80)
+        logger.info("\\n" + "=" * 80)
         logger.info(f"Starting Epoch {epoch+1}/{NUM_EPOCHS}")
-        print(f"\nEpoch {epoch+1}/{NUM_EPOCHS} started.")
+        current_lr = optimizer.param_groups[0]['lr']
+        logger.info(f"Current learning rate: {current_lr}")
+        print(f"\\nEpoch {epoch+1}/{NUM_EPOCHS} started. LR: {current_lr}")
         logger.info("=" * 80)
 
-        avg_loss = train_model(model, dataloader, optimizer, run_dir, logger)
+        avg_loss, avg_shape_loss, avg_grid_loss, avg_kl_loss = train_model(
+            model, dataloader, optimizer, run_dir, logger, 
+            scaler, use_mixed_precision, gradient_accumulation_steps,
+            current_epoch_num=epoch+1, total_epochs=NUM_EPOCHS
+        )
         results['epoch_losses'].append(avg_loss)
-        logger.info(f"\nEpoch {epoch+1}/{NUM_EPOCHS} completed.")
+        results['epoch_metrics'].append({
+            'epoch': epoch + 1,
+            'avg_shape_loss': avg_shape_loss,
+            'avg_grid_loss': avg_grid_loss,
+            'avg_kl_loss': avg_kl_loss,
+            'avg_total_loss': avg_loss,
+            'learning_rate': current_lr
+        })
+        
+        if scheduler:
+            scheduler.step() # Step the scheduler each epoch
+
+        logger.info(f"\\nEpoch {epoch+1}/{NUM_EPOCHS} completed.")
         logger.info(f"Average Loss: {avg_loss:.4f}")
         print(f"Epoch {epoch+1} completed. Average Loss: {avg_loss:.4f}")
 
@@ -483,47 +582,65 @@ def main_training(file_store_name):
         epoch_shape_tokens = 0
         epoch_grid_correct = 0
         epoch_grid_tokens = 0
-        sample_exact_correct = 0  # Count of samples that exactly match the output.
-        total_samples = 0
+        sample_exact_correct = 0
+        total_samples_eval = 0 # Use a different variable for clarity during evaluation
 
-        # We now leave the no_grad block for the latent optimization step.
-        for batch_input, batch_target in dataloader:
-            total_samples += batch_input.size(0)
-            batch_input = batch_input.to(device)
-            batch_target = batch_target.to(device)
+        # We now leave the no_grad block for the latent optimization step if it's enabled for inference.
+        # The get_optimized_z function handles its own grad context.
+        for batch_input_eval, batch_target_eval in dataloader: # Can use a validation dataloader here if available
+            total_samples_eval += batch_input_eval.size(0)
+            batch_input_eval = batch_input_eval.to(device)
+            batch_target_eval = batch_target_eval.to(device)
 
-            # Use the appropriate latent optimization method
-            if OPTIMIZE_Z:
-                z, losses = get_optimized_z(model, batch_input, batch_target)
-                if losses is not None:
-                    results['losses_gradient_ascent'].append(losses)
+            # Use the appropriate latent optimization method for inference
+            if OPTIMIZE_Z_INFERENCE: # Check inference specific flag
+                # Pass inference specific num_steps and lr
+                z_eval, losses_eval = get_optimized_z(model, batch_input_eval, batch_target_eval, 
+                                                      num_steps=OPTIMIZE_Z_INFERENCE_NUM_STEPS, 
+                                                      lr=OPTIMIZE_Z_INFERENCE_LR,
+                                                      # Add a context flag if get_optimized_z needs to know it's inference
+                                                      # context='inference' # if get_optimized_z signature is updated
+                                                      )
+                if losses_eval is not None and isinstance(results.get('losses_gradient_ascent'), list) : # Check if list before append
+                    results['losses_gradient_ascent'].append(losses_eval) # This might grow very large
             else:
-                mu, log_var = model.encoder(batch_input, batch_target)
-                z = model.reparameterize(mu, log_var)
+                with torch.no_grad(): # Ensure no grads if not optimizing z
+                    mu_eval, log_var_eval = model.encoder(batch_input_eval, batch_target_eval)
+                    z_eval = model.reparameterize(mu_eval, log_var_eval)
 
             # Now, perform decoding with no_grad.
             with torch.no_grad():
-                shape_logits, grid_logits = model.decoder(z, batch_target, target_seq=batch_target)
-                shape_pred = shape_logits.argmax(dim=-1)  # (batch_size, 2)
-                grid_pred = grid_logits.argmax(dim=-1)      # (batch_size, 900)
-                shape_tgt = batch_target[:, 900:902].long()
-                grid_tgt = batch_target[:, :900].long()
+                # The decoder's target_seq argument is for teacher forcing. 
+                # For true autoregressive generation during eval, it should be None
+                # or handle it differently if evaluating reconstruction of target.
+                # Current model.decoder uses target_seq for teacher-forced decoding.
+                shape_logits_eval, grid_logits_eval = model.decoder(z_eval, batch_input_eval, target_seq=batch_target_eval)
+                
+                shape_pred_eval = shape_logits_eval.argmax(dim=-1)
+                grid_pred_eval = grid_logits_eval.argmax(dim=-1)
+                shape_tgt_eval = batch_target_eval[:, 900:902].long()
+                grid_tgt_eval = batch_target_eval[:, :900].long()
 
-            epoch_shape_correct += (shape_pred == shape_tgt).sum().item()
-            epoch_shape_tokens += shape_tgt.numel()
-            for i in range(batch_input.size(0)):
-                tgt_rows = int(batch_target[i, 900].item())
-                tgt_cols = int(batch_target[i, 901].item())
-                active_pixels = tgt_rows * tgt_cols
-                epoch_grid_correct += (grid_pred[i, :active_pixels] == grid_tgt[i, :active_pixels]).sum().item()
-                epoch_grid_tokens += active_pixels
-                if torch.all(shape_pred[i] == shape_tgt[i]) and torch.all(grid_pred[i, :active_pixels] == grid_tgt[i, :active_pixels]):
+            epoch_shape_correct += (shape_pred_eval == shape_tgt_eval).sum().item()
+            epoch_shape_tokens += shape_tgt_eval.numel()
+            for i in range(batch_input_eval.size(0)):
+                tgt_rows_eval = int(batch_target_eval[i, 900].item())
+                tgt_cols_eval = int(batch_target_eval[i, 901].item())
+                active_pixels_eval = tgt_rows_eval * tgt_cols_eval
+                if active_pixels_eval > 0:
+                    epoch_grid_correct += (grid_pred_eval[i, :active_pixels_eval] == grid_tgt_eval[i, :active_pixels_eval]).sum().item()
+                    epoch_grid_tokens += active_pixels_eval
+                    if torch.all(shape_pred_eval[i] == shape_tgt_eval[i]) and \
+                       torch.all(grid_pred_eval[i, :active_pixels_eval] == grid_tgt_eval[i, :active_pixels_eval]):
+                        sample_exact_correct += 1
+                elif torch.all(shape_pred_eval[i] == shape_tgt_eval[i]): # If grid is empty, only shape matters for exact
                     sample_exact_correct += 1
+
 
         epoch_shape_accuracy = epoch_shape_correct / epoch_shape_tokens if epoch_shape_tokens > 0 else 0.0
         epoch_grid_accuracy = epoch_grid_correct / epoch_grid_tokens if epoch_grid_tokens > 0 else 0.0
         epoch_overall_accuracy = (epoch_shape_correct + epoch_grid_correct) / (epoch_shape_tokens + epoch_grid_tokens) if (epoch_shape_tokens + epoch_grid_tokens) > 0 else 0.0
-        sample_level_accuracy = sample_exact_correct / total_samples if total_samples > 0 else 0.0
+        sample_level_accuracy = sample_exact_correct / total_samples_eval if total_samples_eval > 0 else 0.0
 
         results['epoch_accuracies'].append({
             'epoch': epoch + 1,
@@ -536,37 +653,63 @@ def main_training(file_store_name):
         logger.info(f"Epoch {epoch+1} Accuracy -- Shape: {epoch_shape_accuracy:.4f}, Grid: {epoch_grid_accuracy:.4f}, Overall: {epoch_overall_accuracy:.4f}, Sample Exact: {sample_level_accuracy:.4f}")
         print(f"Epoch {epoch+1} Accuracy: Shape: {epoch_shape_accuracy:.4f}, Grid: {epoch_grid_accuracy:.4f}, Overall: {epoch_overall_accuracy:.4f}, Sample Exact: {sample_level_accuracy:.4f}")
 
-        model.train()  # Return to training mode for next epoch
+        # model.train() # Already called at the start of train_model function for the next epoch
 
-        if (epoch + 1) % 5 == 0:
+        if (epoch + 1) % training_settings.get('save_checkpoint_interval', 50) == 0 or (epoch + 1) == NUM_EPOCHS : # Save more frequently or based on setting
             logger.info(f"Saving checkpoint at epoch {epoch+1}...")
-            save_checkpoint(model, optimizer, epoch, avg_loss, run_dir)
+            save_checkpoint(model, optimizer, epoch + 1, avg_loss, run_dir) # Save epoch as 1-indexed
             print(f"Checkpoint saved at epoch {epoch+1}.")
 
-    print("Training complete. Starting final evaluation...")
+    print("Training complete. Starting final evaluation on the dataloader (can be train or val)...")
     model.eval()
-    with torch.no_grad():
-        batch_idx = 0
-        for batch_input, batch_target in dataloader:
-            batch_idx += 1
-            batch_input = batch_input.to(device)
-            batch_target = batch_target.to(device)
-            mu, log_var = model.encoder(batch_input, batch_target)
-            if OPTIMIZE_Z:
-                z, losses = get_optimized_z(model, batch_input, batch_target)
-                if losses is not None:
-                    results['losses_gradient_ascent'].append(losses)
-            else:
+    # Final evaluation loop (similar to per-epoch evaluation but maybe on a dedicated test set if available)
+    # For now, it re-uses the main dataloader for collecting final latent representations.
+    # This part is mostly for collecting latent variables and reconstructions.
+    final_eval_batch_count = 0
+    for batch_input, batch_target in dataloader: # Consider using a different dataloader for final eval if needed
+        final_eval_batch_count +=1
+        batch_input = batch_input.to(device)
+        batch_target = batch_target.to(device)
+        
+        # Consistent z retrieval for final eval
+        if OPTIMIZE_Z_INFERENCE:
+            z, losses = get_optimized_z(model, batch_input, batch_target, 
+                                        num_steps=OPTIMIZE_Z_INFERENCE_NUM_STEPS, 
+                                        lr=OPTIMIZE_Z_INFERENCE_LR)
+            # if losses is not None and isinstance(results.get('losses_gradient_ascent'), list):
+            #    results['losses_gradient_ascent'].append(losses) # Decide if needed for final eval too
+        else:
+            with torch.no_grad():
+                mu, log_var = model.encoder(batch_input, batch_target)
                 z = model.reparameterize(mu, log_var)
-                
-            shape_logits, grid_logits = model.decoder(z, batch_target, target_seq=batch_target)
-            results['latent_mus'].append(mu.cpu())
-            results['latent_log_vars'].append(log_var.cpu())
-            results['latent_zs'].append(z.cpu())            
-            results['reconstructions'].append((shape_logits.cpu(), grid_logits.cpu()))
-            print(f"Final evaluation: Processed batch {batch_idx}")
+        
+        with torch.no_grad(): # Ensure no grads for decoder pass
+            shape_logits, grid_logits = model.decoder(z, batch_input, target_seq=batch_target) # Using target_seq for reconstruction eval
+            # Store only a subset of these potentially large tensors if memory is an issue
+            if isinstance(results.get('latent_mus'), list):
+                 results['latent_mus'].append(mu.cpu().numpy().tolist() if 'mu' in locals() else [])
+            if isinstance(results.get('latent_log_vars'), list):
+                 results['latent_log_vars'].append(log_var.cpu().numpy().tolist() if 'log_var' in locals() else [])
+            if isinstance(results.get('latent_zs'), list):
+                 results['latent_zs'].append(z.cpu().numpy().tolist())
+            if isinstance(results.get('reconstructions'), list):
+                 results['reconstructions'].append(
+                     (shape_logits.cpu().numpy().tolist(), grid_logits.cpu().numpy().tolist())
+                 )
+        print(f"Final evaluation: Processed batch {final_eval_batch_count}/{len(dataloader)}")
+        if final_eval_batch_count > 20 and len(dataloader)>20 : # Limit stored reconstructions for large datasets
+            print(f"Limiting stored latent vars/reconstructions to first {final_eval_batch_count} batches to save memory.")
+            break
 
-    save_results(results, run_dir)
+
+    save_results(results, run_dir) # save_results now handles JSON directly if modified, or save a separate JSON here
+    # Example of saving the main results dictionary to JSON (ensure tensors are converted to lists/numbers)
+    try:
+        # save_training_json(results, run_dir) # If you created this function
+        pass # The save_results in model_utils.py should be updated or a new json save function added
+    except Exception as e:
+        logger.error(f"Could not save results as JSON: {e}")
+
     print("Results saved in:", run_dir)
     return results, model
 
