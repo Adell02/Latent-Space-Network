@@ -337,6 +337,11 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
     """
     from models.base_model import compute_loss
     from utils.latent_functions import get_optimized_z
+    from utils.settings_manager import settings
+
+    # Get latent optimization settings
+    latent_optimization = settings.get_latent_optimization()
+    optimize_z_inference = latent_optimization['inference']['enabled']
 
     model.eval()
     shape_correct, shape_tokens = 0, 0
@@ -351,20 +356,27 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
     query_reconstructions = []
     z_optimization_logs = []
 
-
     for batch_input, batch_target in samples_dataloader:
         batch_input = batch_input.to(device)
         batch_target = batch_target.to(device)
         batch_size = batch_input.size(0)
 
-        # Optimize z using only the support example - use inference context
-        z, losses_gradient_ascent = get_optimized_z(
-            model,
-            batch_input,
-            batch_target,
-            context='inference'
-        )
-        z_optimization_logs.append(losses_gradient_ascent)
+        # Get latent representation - either optimized or standard VAE sampling
+        if optimize_z_inference:
+            # Optimize z using only the support example - use inference context
+            z, losses_gradient_ascent = get_optimized_z(
+                model,
+                batch_input,
+                batch_target,
+                context='inference'
+            )
+            z_optimization_logs.append(losses_gradient_ascent)
+        else:
+            # Standard VAE sampling without optimization
+            with torch.no_grad():
+                mu, log_var = model.encoder(batch_input, batch_target)
+                z = model.reparameterize(mu, log_var)
+            z_optimization_logs.append(None)  # No optimization logs
         
         # Compute support loss
         support_loss = compute_loss(model, batch_input, batch_target)
@@ -377,7 +389,6 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
                 shape_logits.cpu(),
                 grid_logits.cpu()
             ))
-
 
     for batch_input, batch_target in queries_dataloader:
         batch_input = batch_input.to(device)
@@ -429,6 +440,7 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
             'overall_accuracy': (shape_correct + grid_correct) / (shape_tokens + grid_tokens) if (shape_tokens + grid_tokens) > 0 else 0.0,
             'sample_exact_accuracy': sample_exact_correct / total_samples if total_samples > 0 else 0.0,
             'losses_gradient_ascent': z_optimization_logs,
+            'used_latent_optimization': optimize_z_inference,  # Add this info to the results
         },
         'reconstruction_results': {
             'support_reconstructions': support_reconstructions,

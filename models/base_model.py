@@ -597,11 +597,11 @@ def main_training(file_store_name):
             batch_input_eval = batch_input_eval.to(device)
             batch_target_eval = batch_target_eval.to(device)
 
-            # Use the appropriate latent optimization method for inference
-            if OPTIMIZE_Z_INFERENCE: # Check inference specific flag
-                # Pass context='inference' to use inference-specific parameters
+            # Use the appropriate latent optimization method for training
+            if OPTIMIZE_Z: # Check training specific flag
+                # Pass context='training' to use training-specific parameters
                 z_eval, losses_eval = get_optimized_z(model, batch_input_eval, batch_target_eval, 
-                                                      context='inference')
+                                                      context='training')
                 if losses_eval is not None and isinstance(results.get('losses_gradient_ascent'), list) : # Check if list before append
                     results['losses_gradient_ascent'].append(losses_eval) # This might grow very large
             else:
