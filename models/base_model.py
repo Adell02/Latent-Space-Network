@@ -239,6 +239,11 @@ class TransformerDecoder(nn.Module):
         memory_input = torch.cat([shape_emb, grid_emb], dim=1)
 
         latent_emb = self.latent_projection(z)
+        
+        # Ensure latent_emb has the correct batch size
+        if latent_emb.size(0) != batch_size:
+            latent_emb = latent_emb.expand(batch_size, -1)
+        
         memory = torch.cat([memory_input, latent_emb.unsqueeze(1).expand(-1, memory_input.size(1), -1)], dim=-1)
         memory = self.memory_projection(memory)
         return memory
