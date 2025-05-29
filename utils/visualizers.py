@@ -437,7 +437,7 @@ def visualize_stored_results(run_dir):
     else:
         # If no params file exists, create a default one with current values
         from models.base_model import (
-            KEY, TRAINING_SEED, LATENT_DIM, HIDDEN_DIM, NUM_LAYERS, NUM_HEADS,
+            TRAINING_KEYS, TRAINING_SEED, LATENT_DIM, HIDDEN_DIM, NUM_LAYERS, NUM_HEADS,
             DROPOUT, MAX_LENGTH, ENCODER_MAX_LENGTH, DECODER_MAX_LENGTH,
             BATCH_SIZE, NUM_EPOCHS, LEARNING_RATE, BETA, n,
             OPTIMIZE_Z, OPTIMIZE_Z_NUM_STEPS, OPTIMIZE_Z_LR,
@@ -448,7 +448,7 @@ def visualize_stored_results(run_dir):
             DEFAULT_EVAL_N_QUERIES, DEFAULT_EVAL_EPOCH
         )
         model_params = {
-            'KEY': KEY,
+            'TRAINING_KEYS': TRAINING_KEYS,
             'TRAINING_SEED': TRAINING_SEED,
             'EVAL_SEED': EVAL_SEED,
             'LATENT_DIM': LATENT_DIM,
@@ -509,7 +509,7 @@ def plot_model_summary(results, model_params):
     
     # Create text box with model parameters
     param_text = "Model Parameters:\n\n"
-    param_text += f"Key: {model_params['KEY']}\n"
+    param_text += f"Training Keys: {', '.join(model_params.get('TRAINING_KEYS', ['None']))}\n"
     param_text += f"Training Seed: {model_params['TRAINING_SEED']}\n"
     param_text += f"Evaluation Seed: {model_params['EVAL_SEED']}\n\n"
     
