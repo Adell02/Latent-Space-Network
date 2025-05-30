@@ -154,64 +154,196 @@ def plot_training_and_latent(results):
     axs[0].spines['right'].set_visible(False)
 
     # Subplot 1: Latent Space Visualization via t-SNE
-    all_mus = torch.cat(results['latent_mus'], dim=0).numpy()
-    tsne = TSNE(n_components=2, perplexity=1, random_state=42)
-    latent_2d = tsne.fit_transform(all_mus)
-    sc1 = axs[1].scatter(latent_2d[:, 0], latent_2d[:, 1],
-                         c=np.arange(len(latent_2d)), cmap='viridis', alpha=0.8, s=80)
-    axs[1].set_title('Latent space (t-SNE)', fontsize=18)
-    axs[1].set_xlabel('Dimension 1', fontsize=16)
-    axs[1].set_ylabel('Dimension 2', fontsize=16)
-    plt.colorbar(sc1, ax=axs[1], label='Sample Index', pad=0.02)
-    axs[1].grid(False)
-    axs[1].spines['top'].set_visible(False)
-    axs[1].spines['right'].set_visible(False)
-
+    if 'latent_mus' not in results or not results['latent_mus']:
+        print("Warning: No latent means found in results. Skipping latent space visualization.")
+        plt.tight_layout()
+        plt.show()
+        return
+    
+    # Helper function to extract and combine data, similar to the one in plot_latent_analysis
+    def process_latent_var(latent_var_list, var_name):
+        try:
+            if not latent_var_list:
+                print(f"Warning: Empty {var_name} list. Skipping visualization.")
+                return None
+                
+            # If we have a dictionary structure (multiple keys), extract and combine data
+            if isinstance(latent_var_list, dict):
+                combined_data = []
+                for key, value in latent_var_list.items():
+                    if value:  # If not empty
+                        combined_data.extend(value)
+                if not combined_data:
+                    print(f"Warning: No data in {var_name} dictionary. Skipping visualization.")
+                    return None
+                latent_var_list = combined_data
+            
+            # Process based on data type
+            if isinstance(latent_var_list[0], torch.Tensor):
+                # List of tensors
+                processed_var = torch.cat(latent_var_list, dim=0).numpy()
+            elif isinstance(latent_var_list[0], np.ndarray):
+                # List of numpy arrays
+                processed_var = np.concatenate(latent_var_list, axis=0)
+            elif isinstance(latent_var_list[0], list):
+                # List of lists (Python lists)
+                processed_var = np.array(latent_var_list)
+                # Check if it's valid data with actual features
+                if processed_var.size == 0 or (len(processed_var.shape) > 1 and processed_var.shape[1] == 0):
+                    print(f"Warning: {var_name} has zero features. Skipping visualization.")
+                    return None
+                # If multi-dimensional, flatten to 2D (samples × features)
+                if len(processed_var.shape) > 2:
+                    processed_var = processed_var.reshape(-1, processed_var.shape[-1])
+            else:
+                print(f"Warning: Unexpected {var_name} format: {type(latent_var_list[0])}. Skipping visualization.")
+                return None
+                
+            # Final validity check
+            if processed_var.size == 0 or (len(processed_var.shape) > 1 and processed_var.shape[1] == 0):
+                print(f"Warning: Processed {var_name} has zero features. Skipping visualization.")
+                return None
+                
+            return processed_var
+        except (IndexError, TypeError, ValueError) as e:
+            print(f"Warning: Error processing {var_name}: {e}. Skipping visualization.")
+            return None
+    
+    # Process latent means
+    all_mus = process_latent_var(results.get('latent_mus', []), 'latent_mus')
+    
+    if all_mus is None or len(all_mus) < 2:
+        print("Warning: Not enough valid latent means for t-SNE. Skipping visualization.")
+        plt.tight_layout()
+        plt.show()
+        return
+    
+    # Choose appropriate perplexity based on number of samples
+    perplexity = min(30, max(1, len(all_mus) - 1))
+    
+    # Apply t-SNE
+    try:
+        tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42)
+        latent_2d = tsne.fit_transform(all_mus)
+        sc1 = axs[1].scatter(latent_2d[:, 0], latent_2d[:, 1],
+                            c=np.arange(len(latent_2d)), cmap='viridis', alpha=0.8, s=80)
+        axs[1].set_title('Latent space (t-SNE)', fontsize=18)
+        axs[1].set_xlabel('Dimension 1', fontsize=16)
+        axs[1].set_ylabel('Dimension 2', fontsize=16)
+        plt.colorbar(sc1, ax=axs[1], label='Sample Index', pad=0.02)
+        axs[1].grid(False)
+        axs[1].spines['top'].set_visible(False)
+        axs[1].spines['right'].set_visible(False)
+    except Exception as e:
+        print(f"Warning: Error during t-SNE: {e}. Skipping latent visualization.")
+        axs[1].text(0.5, 0.5, f"Error: {str(e)}", 
+                   horizontalalignment='center', verticalalignment='center',
+                   transform=axs[1].transAxes)
+        axs[1].axis('off')
+    
     plt.tight_layout()
     plt.show()
 
 def plot_latent_analysis(results):
     """Plot detailed latent space analysis for the latent means, log variances, and sampled z."""
     fig, axs = plt.subplots(1, 3, figsize=(18, 6))
+    
+    # Helper function to process different formats of latent variables
+    def process_latent_var(latent_var_list, var_name):
+        try:
+            if not latent_var_list:
+                print(f"Warning: Empty {var_name} list. Skipping {var_name} visualization.")
+                return None
+            
+            # If we have a dictionary structure (multiple keys), extract and combine data
+            if isinstance(latent_var_list, dict):
+                combined_data = []
+                for key, value in latent_var_list.items():
+                    if value:  # If not empty
+                        combined_data.extend(value)
+                if not combined_data:
+                    print(f"Warning: No data in {var_name} dictionary. Skipping visualization.")
+                    return None
+                latent_var_list = combined_data
+            
+            # Process based on data type
+            if isinstance(latent_var_list[0], torch.Tensor):
+                # List of tensors
+                processed_var = torch.cat(latent_var_list, dim=0).numpy()
+            elif isinstance(latent_var_list[0], np.ndarray):
+                # List of numpy arrays
+                processed_var = np.concatenate(latent_var_list, axis=0)
+            elif isinstance(latent_var_list[0], list):
+                # List of lists (Python lists)
+                processed_var = np.array(latent_var_list)
+                # Check if it's valid data with actual features
+                if processed_var.size == 0 or (len(processed_var.shape) > 1 and processed_var.shape[1] == 0):
+                    print(f"Warning: {var_name} has zero features. Skipping visualization.")
+                    return None
+                # If multi-dimensional, flatten to 2D (samples × features)
+                if len(processed_var.shape) > 2:
+                    processed_var = processed_var.reshape(-1, processed_var.shape[-1])
+            else:
+                print(f"Warning: Unexpected {var_name} format: {type(latent_var_list[0])}. Skipping visualization.")
+                return None
+                
+            # Final validity check
+            if processed_var.size == 0 or (len(processed_var.shape) > 1 and processed_var.shape[1] == 0):
+                print(f"Warning: Processed {var_name} has zero features. Skipping visualization.")
+                return None
+                
+            return processed_var
+        except (IndexError, TypeError, ValueError) as e:
+            print(f"Warning: Error processing {var_name}: {e}. Skipping visualization.")
+            return None
+    
+    # Process all three latent variables
+    latent_mu = process_latent_var(results.get('latent_mus', []), 'latent_mus')
+    latent_log_var = process_latent_var(results.get('latent_log_vars', []), 'latent_log_vars')
+    latent_z = process_latent_var(results.get('latent_zs', []), 'latent_zs')
+    
+    # Count how many valid latent variables we have
+    valid_count = sum(1 for var in [latent_mu, latent_log_var, latent_z] if var is not None)
+    
+    if valid_count == 0:
+        print("Warning: No valid latent variables found for visualization. Skipping plot.")
+        return
 
-    # Subplot 0: t-SNE of latent means (samples plotted directly)
-    latent_mu = torch.cat(results['latent_mus'], dim=0).numpy()
-    tsne_dims = TSNE(n_components=2, perplexity=1, random_state=42).fit_transform(latent_mu)
-    sc0 = axs[0].scatter(tsne_dims[:, 0], tsne_dims[:, 1],
-                         c=np.arange(tsne_dims.shape[0]), cmap='viridis', alpha=0.8, s=80)
-    axs[0].set_title('t-SNE Mean', fontsize=18)
-    axs[0].set_xlabel('Dimension 1', fontsize=16)
-    axs[0].set_ylabel('Dimension 2', fontsize=16)
-    plt.colorbar(sc0, ax=axs[0], label='Sample Index', pad=0.02)
-    axs[0].grid(False)
-    axs[0].spines['top'].set_visible(False)
-    axs[0].spines['right'].set_visible(False)
-
-    # Subplot 1: t-SNE of log-variance values
-    latent_log_var = torch.cat(results['latent_log_vars'], dim=0).numpy()
-    tsne_dims = TSNE(n_components=2, perplexity=1, random_state=42).fit_transform(latent_log_var)
-    sc1 = axs[1].scatter(tsne_dims[:, 0], tsne_dims[:, 1],
-                         c=np.arange(tsne_dims.shape[0]), cmap='viridis', alpha=0.8, s=80)
-    axs[1].set_title('t-SNE log-Variance', fontsize=18)
-    axs[1].set_xlabel('Dimension 1', fontsize=16)
-    axs[1].set_ylabel('Dimension 2', fontsize=16)
-    plt.colorbar(sc1, ax=axs[1], label='Sample Index', pad=0.02)
-    axs[1].grid(False)
-    axs[1].spines['top'].set_visible(False)
-    axs[1].spines['right'].set_visible(False)
-
-    # Subplot 2: t-SNE of sampled z values
-    latent_z = torch.cat(results['latent_zs'], dim=0).numpy()
-    tsne_dims = TSNE(n_components=2, perplexity=1, random_state=42).fit_transform(latent_z)
-    sc2 = axs[2].scatter(tsne_dims[:, 0], tsne_dims[:, 1],
-                         c=np.arange(tsne_dims.shape[0]), cmap='viridis', alpha=0.8, s=80)
-    axs[2].set_title('t-SNE sampled Z', fontsize=18)
-    axs[2].set_xlabel('Dimension 1', fontsize=16)
-    axs[2].set_ylabel('Dimension 2', fontsize=16)
-    plt.colorbar(sc2, ax=axs[2], label='Sample Index', pad=0.02)
-    axs[2].grid(False)
-    axs[2].spines['top'].set_visible(False)
-    axs[2].spines['right'].set_visible(False)
+    # Function to create t-SNE plot with appropriate perplexity
+    def create_tsne_plot(data, ax, title):
+        if data is None or len(data) < 2:
+            ax.text(0.5, 0.5, f"Insufficient data for {title}", 
+                   horizontalalignment='center', verticalalignment='center',
+                   transform=ax.transAxes)
+            ax.axis('off')
+            return
+            
+        # Choose appropriate perplexity based on number of samples
+        perplexity = min(30, max(1, len(data) - 1))
+        
+        try:
+            tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42)
+            tsne_dims = tsne.fit_transform(data)
+            sc = ax.scatter(tsne_dims[:, 0], tsne_dims[:, 1],
+                           c=np.arange(tsne_dims.shape[0]), cmap='viridis', alpha=0.8, s=80)
+            ax.set_title(title, fontsize=18)
+            ax.set_xlabel('Dimension 1', fontsize=16)
+            ax.set_ylabel('Dimension 2', fontsize=16)
+            plt.colorbar(sc, ax=ax, label='Sample Index', pad=0.02)
+            ax.grid(False)
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+        except Exception as e:
+            print(f"Warning: Error in t-SNE for {title}: {e}")
+            ax.text(0.5, 0.5, f"Error: {str(e)}", 
+                   horizontalalignment='center', verticalalignment='center',
+                   transform=ax.transAxes)
+            ax.axis('off')
+    
+    # Create the three plots
+    create_tsne_plot(latent_mu, axs[0], 't-SNE Mean')
+    create_tsne_plot(latent_log_var, axs[1], 't-SNE log-Variance')
+    create_tsne_plot(latent_z, axs[2], 't-SNE sampled Z')
 
     plt.tight_layout()
     plt.show()
@@ -262,15 +394,46 @@ def plot_reconstructions(results):
     shape_logits_list = []
     grid_logits_list = []
 
+    # Process reconstructions based on data type
     for shape_logits, grid_logits in reconstructions:
-        # Convert logits to predicted values.
-        pred_shapes = shape_logits.argmax(dim=-1)
-        pred_grid = grid_logits.argmax(dim=-1)
-        shape_logits_list.append(pred_shapes)
-        grid_logits_list.append(pred_grid)
+        # Check if we're dealing with PyTorch tensors or Python lists
+        if isinstance(shape_logits, torch.Tensor):
+            # Convert logits to predicted values using PyTorch methods
+            pred_shapes = shape_logits.argmax(dim=-1)
+            pred_grid = grid_logits.argmax(dim=-1)
+            shape_logits_list.append(pred_shapes)
+            grid_logits_list.append(pred_grid)
+        else:
+            # Handle Python lists (from saved results)
+            # Convert to numpy arrays and get argmax
+            shape_array = np.array(shape_logits)
+            grid_array = np.array(grid_logits)
+            
+            # Get the argmax along the last dimension
+            # For shape_array: [batch_size, seq_len, vocab_size] -> [batch_size, seq_len]
+            pred_shapes = np.argmax(shape_array, axis=-1)
+            pred_grid = np.argmax(grid_array, axis=-1)
+            
+            # Convert to tensors for consistent handling later
+            shape_logits_list.append(torch.tensor(pred_shapes))
+            grid_logits_list.append(torch.tensor(pred_grid))
 
-    shape_recons = torch.cat(shape_logits_list, dim=0).cpu().numpy()  # Shape: (N, 2)
-    grid_recons = torch.cat(grid_logits_list, dim=0).cpu().numpy()    # Shape: (N, 900)
+    # Combine all predictions
+    try:
+        shape_recons = torch.cat(shape_logits_list, dim=0).cpu().numpy()  # Shape: (N, 2)
+        grid_recons = torch.cat(grid_logits_list, dim=0).cpu().numpy()    # Shape: (N, 900)
+    except RuntimeError as e:
+        print(f"Error combining predictions: {e}")
+        print("Attempting alternative approach for saved data...")
+        # Alternative approach for saved data that might have inconsistent dimensions
+        all_shapes = []
+        all_grids = []
+        for shape_tensor in shape_logits_list:
+            all_shapes.extend(shape_tensor.cpu().numpy())
+        for grid_tensor in grid_logits_list:
+            all_grids.extend(grid_tensor.cpu().numpy())
+        shape_recons = np.array(all_shapes).reshape(-1, 2)
+        grid_recons = np.array(all_grids).reshape(-1, 900)
 
     num_samples = min(DEFAULT_VISUALIZE_N_VALUES, len(shape_recons))
     for i in range(num_samples):
@@ -280,7 +443,7 @@ def plot_reconstructions(results):
         # Plot input:
         input_seq = input_seqs[i]
         in_rows, in_cols = int(input_seq[-2]), int(input_seq[-1])
-        input_grid_full = input_seq[:900].reshape(30, 30)
+        input_grid_full = np.array(input_seq[:900]).reshape(30, 30)
         input_grid = input_grid_full[:in_rows, :in_cols]
         axs[0].imshow(input_grid, cmap='viridis')
         axs[0].set_title('Input')
@@ -289,7 +452,7 @@ def plot_reconstructions(results):
         # Plot target:
         target_seq = output_seqs[i]
         out_rows, out_cols = int(target_seq[-2]), int(target_seq[-1])
-        target_grid_full = target_seq[:900].reshape(30, 30)
+        target_grid_full = np.array(target_seq[:900]).reshape(30, 30)
         target_grid = target_grid_full[:out_rows, :out_cols]
         axs[1].imshow(target_grid, cmap='viridis')
         axs[1].set_title('Target')
