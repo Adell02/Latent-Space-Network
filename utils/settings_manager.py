@@ -3,24 +3,18 @@ import os
 from typing import Dict, Any
 
 class SettingsManager:
-    _instance = None
-    _settings = None
+    
+    def __init__(self,settings_file: str = "model_settings.json"):
+        self.settings_file = settings_file
+        self._settings = None
+        self.load_settings()
 
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super(SettingsManager, cls).__new__(cls)
-        return cls._instance
-
-    def __init__(self):
-        if self._settings is None:
-            self.load_settings()
-
-    def load_settings(self, settings_file: str = "model_settings.json") -> None:
+    def load_settings(self) -> None:
         """Load settings from JSON file."""
-        if not os.path.exists(settings_file):
-            raise FileNotFoundError(f"Settings file not found: {settings_file}")
+        if not os.path.exists(self.settings_file):
+            raise FileNotFoundError(f"Settings file not found: {self.settings_file}")
         
-        with open(settings_file, 'r') as f:
+        with open(self.settings_file, 'r') as f:
             self._settings = json.load(f)
 
     def get_settings(self) -> Dict[str, Any]:
@@ -48,10 +42,11 @@ class SettingsManager:
 
     def save_settings(self, run_dir: str) -> None:
         """Save current settings to a run directory."""
-        settings_file = os.path.join(run_dir, 'model_settings.json')
+        settings_file = os.path.join(run_dir, self.settings_file.split("/")[-1])
         with open(settings_file, 'w') as f:
             json.dump(self._settings, f, indent=4)
         print(f"Settings saved to {settings_file}")
 
 # Create a global settings manager instance
-settings = SettingsManager() 
+#settings = SettingsManager(settings_file="model_settings.json") 
+settings = SettingsManager(settings_file="LPN_reproduction/pattern_task_settings.json")

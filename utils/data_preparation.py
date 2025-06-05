@@ -2,7 +2,7 @@ import numpy as np
 import os 
 
 
-def transform_grid_to_sequence(grid):
+def transform_grid_to_sequence(grid:np.ndarray):
     """
     Transform a 2D grid into a sequence as described in the paper:
     - Pad grid to 30x30

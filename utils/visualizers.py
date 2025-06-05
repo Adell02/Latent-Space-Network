@@ -373,9 +373,13 @@ def plot_epoch_accuracies(results):
 def plot_z_optimization_losses(results):
     """Plot z optimization losses over steps."""
     losses = results['losses_gradient_ascent']
+    print(type(losses))
+    print(losses)
+    print(len(losses))
+    
     plt.figure(figsize=(10, 6))
-    for i in range(len(losses)):    
-        plt.plot(losses[i], marker='o', linestyle='-', label="Sample {}".format(i))        
+    
+    plt.plot(losses, marker='o', linestyle='-')        
     plt.title("Z Optimization Losses Over Steps", fontsize=16)
     plt.xlabel("Step", fontsize=14)
     plt.ylabel("Loss", fontsize=14)

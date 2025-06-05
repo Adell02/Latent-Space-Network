@@ -32,6 +32,8 @@ def optimize_latent_z(lpn, input_seq, target_seq, num_steps=None, lr=None):
     losses = []
     z_changes = []
 
+    print("\n\nOptimizing with num_steps: ", num_steps,"\n\n")
+
     for step in range(num_steps):
         optimizer_z.zero_grad()
         # Decode using the current z.

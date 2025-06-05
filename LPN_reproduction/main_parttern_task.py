@@ -1,6 +1,9 @@
 import argparse
 import torch
 import os
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from training import main_training
 from evaluation import main_test
 from utils.model_utils import (
@@ -30,7 +33,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train, evaluate, or visualize the Latent Program Network')
     parser.add_argument('--mode', choices=['train', 'visualize', 'eval', 'all'], nargs='+', required=True,
                       help='Mode to run: train, visualize, evaluate, or all')
-    parser.add_argument('--file_name', type=str, help='Directory storing/containing model checkpoints and results',required=True)
+    parser.add_argument('--file_name', type=str, help='Directory storing/containing model checkpoints and results',required=False,default="pattern_task")
     parser.add_argument('--keys', type=str, nargs='+', default=DEFAULT_EVAL_KEYS,
                       help='Problem keys for evaluation (space-separated)')
     parser.add_argument('--n_eval_samples', type=int, default=DEFAULT_EVAL_N_SAMPLES,

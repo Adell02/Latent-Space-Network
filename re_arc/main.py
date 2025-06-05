@@ -3,6 +3,7 @@ import tqdm
 import os
 import json
 import numpy as np
+import random
 
 from random import seed as set_seed
 
@@ -206,7 +207,7 @@ def evaluate_verifiers_on_original_tasks() -> None:
 
 ############## CUSTOM FUNCTIONS ##############
 
-def generate_and_process_tasks(key, n_examples, plot=False, print_data=False):
+def generate_and_process_tasks(key, n_examples, plot=False, print_data=False,n_pairs=4):
     """
     Generate a batch of tasks for the given ARC key using the generator function,
     and convert them into sequence representations. Optionally plot and print the data.
@@ -223,40 +224,51 @@ def generate_and_process_tasks(key, n_examples, plot=False, print_data=False):
     # Define the file path for the JSON file associated with the key
     file_path = f're_arc/arc_original/training/{key}.json'
 
-    # Check if the JSON file exists; if not, generate the data using demo_generator
-    if not os.path.exists(file_path):
-        demo_generator(key)
+    if os.path.exists(file_path):
+        # Load the JSON file containing the task data
+        with open(file_path, 'r') as fp:
+            original_task = json.load(fp)
 
-    # Load the JSON file containing the task data
-    with open(file_path, 'r') as fp:
-        original_task = json.load(fp)
+        # Combine train and test examples from the loaded task data
+        original_task = original_task['train'] + original_task['test']
 
-    # Combine train and test examples from the loaded task data
-    original_task = original_task['train'] + original_task['test']
-
+        # Print and plot the original task data if flags are set
+        if print_data:
+            print(np.array(original_task))
+        if plot:
+            plot_task(original_task)
+    
     # Retrieve the generator function for the specified key
     generator = getattr(generators, f'generate_{key}')
 
-    # Print and plot the original task data if flags are set
-    if print_data:
-        print(np.array(original_task))
-    if plot:
-        plot_task(original_task)
+    if key == "pattern_task":
+        generated_examples = []
+        for n in range(n_examples):
+            _PATTERN_COLORS = []
+            for i in range(4):
+                row = []
+                for j in range(4):
+                    # Generate random colors (0-9) for the pattern
+                    row.append(random.randint(0, 9))
+                _PATTERN_COLORS.extend(row)
 
-    # Generate n_examples using the generator
-    generated_examples = [generator(0, 1) for _ in range(n_examples)]
+            generated_examples = generated_examples + [generator(0, 1, _PATTERN_COLORS) for _ in range(n_pairs)]
+    else:
+        # Generate n_examples using the generator
+        generated_examples = [generator(0, 1) for _ in range(n_examples)]
     
     input_grids = []
     output_grids = []
 
     input_sequences = []
     output_sequences = []
-
+            
     # Process each generated example
     for example in generated_examples:
         # Assuming that each generated example is a dictionary with keys 'input' and 'output'
         input_grid = np.array(example['input'])
         output_grid = np.array(example['output'])
+        
         input_grids.append(input_grid)
         output_grids.append(output_grid)
 
@@ -266,7 +278,7 @@ def generate_and_process_tasks(key, n_examples, plot=False, print_data=False):
         input_sequences.append(input_seq)
         output_sequences.append(output_seq)
 
-    return generated_examples, (input_grids), (output_grids), (input_sequences), (output_sequences)   
+    return generated_examples, (input_grids), (output_grids), (input_sequences), (output_sequences) 
 
 
 def load_generated_arc_data(key, n_examples):

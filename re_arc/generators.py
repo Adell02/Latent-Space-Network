@@ -1,7 +1,40 @@
 from re_arc.dsl import *
 from re_arc.utils import *
+import random
 
-
+def generate_pattern_task(diff_lb: float, diff_ub: float, _PATTERN_COLORS: list = None) -> dict:
+    # Constants
+    BLACK = 0  # Black color code
+    BLUE = 1   # Blue color code
+    
+    # Create a 10x10 black grid
+    grid_size = (10, 10)
+    input_grid = canvas(BLACK, grid_size)
+    
+    # Place a blue pixel at a random location
+    # Ensure there's room for a 4x4 pattern (max starting position is 6,6)
+    marker_row = random.randint(0, 6)
+    marker_col = random.randint(0, 6)
+    marker_position = (marker_row, marker_col)
+    
+    input_grid = fill(input_grid, BLUE, {marker_position})
+    
+    # Create the pattern using the fixed colors defined at module level
+    pattern = []
+    for i in range(4):
+        for j in range(4):
+            color = _PATTERN_COLORS[i*4 + j]
+            position = (i + marker_row, j + marker_col)
+            pattern.append((color, position))
+    
+    # Create output by placing the pattern at the marker position
+    output_grid = fill(input_grid, BLACK, {marker_position})  # Remove the blue marker
+    
+    # Apply the pattern to the output grid
+    for color, position in pattern:
+        output_grid = fill(output_grid, color, {position})
+    
+    return {'input': input_grid, 'output': output_grid}
 
 def generate_dbc1a6ce(diff_lb: float, diff_ub: float) -> dict:
     dim_bounds = (3, 30)
