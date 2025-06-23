@@ -1,8 +1,10 @@
 import argparse
 import torch
 import os
+import pickle
+import numpy as np
 from training import main_training
-from evaluation import main_test
+from evaluation import main_test, encode_training_sequences
 from utils.model_utils import (
     load_model,
     save_evaluation_results
@@ -52,6 +54,8 @@ def main_args():
     if not args.file_name:
         raise ValueError("--file_name must be specified")
 
+    run_dir = os.path.join(BASE_DIR, args.file_name)
+
     if 'train' in args.mode or 'all' in args.mode:
         # Train the model
         results, model = main_training(args.file_name)
@@ -68,14 +72,42 @@ def main_args():
         if args.n_eval_queries is None:
             print("No n_eval_queries specified for evaluation, using default n_eval_queries")
         
-        model, _, _, _ = load_model(os.path.join(BASE_DIR, args.file_name), epoch=args.epoch, device=device)
+        model, _, _, _ = load_model(run_dir, epoch=args.epoch, device=device)
+        
+        # Encode training sequences using the trained model
+        print("\n=== ENCODING TRAINING SEQUENCES ===")
+        encoded_training_data = encode_training_sequences(
+            model=model, 
+            run_dir=run_dir, 
+            device=device, 
+            max_samples=500,  # Limit for memory and visualization clarity
+            batch_size=16
+        )
+        
+        if encoded_training_data is not None:
+            # Save encoded training data for visualization
+            encoded_file = os.path.join(run_dir, 'encoded_training_latents.pkl')
+            with open(encoded_file, 'wb') as f:
+                pickle.dump(encoded_training_data, f)
+            print(f"Encoded training latents saved to {encoded_file}")
+            print(f"Encoded {len(encoded_training_data['latent_mus'])} training samples")
+        else:
+            print("Warning: Could not encode training sequences")
         
         # Run evaluation
-        print("\nRunning evaluation...")
+        print("\n=== RUNNING EVALUATION ===")
         eval_results = main_test(model, args.keys, args.n_eval_samples, args.n_eval_queries, EVAL_SEED, device)
+        
+        # Add encoded training data to evaluation results for easy access
+        if encoded_training_data is not None:
+            for key in eval_results:
+                eval_results[key]['encoded_training_latents'] = {
+                    'latent_mus': encoded_training_data['latent_mus'].tolist(),  # Convert to list for JSON serialization
+                    'encoding_info': encoded_training_data['encoding_info']
+                }
                 
         # Save evaluation results
-        save_evaluation_results(eval_results, os.path.join(BASE_DIR, args.file_name))
+        save_evaluation_results(eval_results, run_dir)
         
     if 'visualize' in args.mode or 'all' in args.mode:
         if args.visualize_n_values is None:
@@ -85,7 +117,7 @@ def main_args():
             args.visualize_n_values = args.n_eval_queries
         # Also run visualization
         print("\nVisualizing stored results...")
-        visualize_stored_results(os.path.join(BASE_DIR, args.file_name))
+        visualize_stored_results(run_dir)
 
 if __name__ == "__main__":
     main_args()

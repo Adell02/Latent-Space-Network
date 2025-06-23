@@ -15,6 +15,177 @@ evaluation_settings = settings.get_evaluation_settings()
 DEFAULT_VISUALIZE_N_VALUES = evaluation_settings['visualize_n_values']
 
 ##############################
+# LOAD LATENT REPRESENTATIONS
+##############################
+
+def load_evaluation_latent_data(run_dir, return_all_components=False):
+    """
+    Load latent representations generated during evaluation.
+    These are created by encoding training sequences with the trained model.
+    
+    Args:
+        run_dir: Directory containing evaluation results
+        return_all_components: If True, return dict with all components, else just latent_mus
+        
+    Returns:
+        np.ndarray or dict or None: Latent representations, dict with all components, or None if not found
+    """
+    # First try to load from the dedicated encoded training latents file
+    encoded_file = os.path.join(run_dir, 'encoded_training_latents.pkl')
+    if os.path.exists(encoded_file):
+        try:
+            print(f"Loading encoded training latents from {encoded_file}...")
+            with open(encoded_file, 'rb') as f:
+                encoded_data = pickle.load(f)
+            
+            if return_all_components:
+                all_components = {
+                    'latent_mus': encoded_data['latent_mus'],
+                    'latent_log_vars': encoded_data['latent_log_vars'], 
+                    'latent_zs': encoded_data['latent_zs'],
+                    'encoding_info': encoded_data.get('encoding_info', {})
+                }
+                
+                print(f"✓ Successfully loaded all latent components:")
+                print(f"  - Means (μ): {len(all_components['latent_mus'])} samples")
+                print(f"  - Log-vars (log σ²): {len(all_components['latent_log_vars'])} samples")
+                print(f"  - Sampled Z: {len(all_components['latent_zs'])} samples")
+                print(f"  - Encoding device: {all_components['encoding_info'].get('device', 'Unknown')}")
+                
+                return all_components
+            else:
+                latent_mus = encoded_data['latent_mus']
+                encoding_info = encoded_data.get('encoding_info', {})
+                
+                print(f"✓ Successfully loaded {len(latent_mus)} encoded training latent vectors")
+                print(f"  - Total training samples: {encoding_info.get('total_training_samples', 'Unknown')}")
+                print(f"  - Encoded samples: {encoding_info.get('encoded_samples', len(latent_mus))}")
+                print(f"  - Encoding device: {encoding_info.get('device', 'Unknown')}")
+                
+                return latent_mus
+            
+        except Exception as e:
+            print(f"⚠ Error loading encoded training latents: {e}")
+    
+    # Fallback: try to load from evaluation results
+    eval_file = os.path.join(run_dir, 'evaluation_results.pkl')
+    if os.path.exists(eval_file):
+        try:
+            print(f"Trying to load training latents from evaluation results...")
+            with open(eval_file, 'rb') as f:
+                eval_results = pickle.load(f)
+            
+            # Look for encoded training latents in any key's results
+            for key, results in eval_results.items():
+                if 'encoded_training_latents' in results:
+                    if return_all_components:
+                        embedded_data = results['encoded_training_latents']
+                        all_components = {
+                            'latent_mus': np.array(embedded_data['latent_mus']),
+                            'latent_log_vars': np.array(embedded_data.get('latent_log_vars', [])),
+                            'latent_zs': np.array(embedded_data.get('latent_zs', [])),
+                            'encoding_info': embedded_data.get('encoding_info', {})
+                        }
+                        
+                        print(f"✓ Found all latent components in evaluation results for key '{key}'")
+                        print(f"  - Means: {len(all_components['latent_mus'])} samples")
+                        print(f"  - Log-vars: {len(all_components['latent_log_vars'])} samples")
+                        print(f"  - Sampled Z: {len(all_components['latent_zs'])} samples")
+                        
+                        return all_components
+                    else:
+                        latent_mus = np.array(results['encoded_training_latents']['latent_mus'])
+                        encoding_info = results['encoded_training_latents'].get('encoding_info', {})
+                        
+                        print(f"✓ Found {len(latent_mus)} training latent vectors in evaluation results for key '{key}'")
+                        print(f"  - Total training samples: {encoding_info.get('total_training_samples', 'Unknown')}")
+                        print(f"  - Encoded samples: {encoding_info.get('encoded_samples', len(latent_mus))}")
+                        
+                        return latent_mus
+            
+            print("⚠ No encoded training latents found in evaluation results")
+            
+        except Exception as e:
+            print(f"⚠ Error loading evaluation results: {e}")
+    
+    print("⚠ Warning: No encoded training latent data found.")
+    print("  This suggests evaluation hasn't been run with the updated code.")
+    print("  Please run evaluation to generate encoded training latents.")
+    return None
+
+def load_legacy_latent_data(run_dir):
+    """
+    Legacy function to load latent data from training results.pkl.
+    This is kept for backward compatibility but will show a deprecation warning.
+    
+    Args:
+        run_dir: Directory containing results.pkl
+        
+    Returns:
+        np.ndarray or None: Latent representations or None if not found
+    """
+    results_file = os.path.join(run_dir, 'results.pkl')
+    if not os.path.exists(results_file):
+        return None
+    
+    try:
+        print("⚠ DEPRECATION WARNING: Loading latents from legacy training results.pkl")
+        print("  Consider running evaluation to generate fresh encoded latents for better accuracy.")
+        
+        with open(results_file, 'rb') as f:
+            results = pickle.load(f)
+        
+        # Process latent means using the original approach
+        def process_latent_var(latent_var_list, var_name):
+            try:
+                if not latent_var_list:
+                    return None
+                    
+                # If we have a dictionary structure (multiple keys), extract and combine data
+                if isinstance(latent_var_list, dict):
+                    combined_data = []
+                    for key, value in latent_var_list.items():
+                        if value:  # If not empty
+                            combined_data.extend(value)
+                    if not combined_data:
+                        return None
+                    latent_var_list = combined_data
+                
+                # Process based on data type
+                if isinstance(latent_var_list[0], torch.Tensor):
+                    processed_var = torch.cat(latent_var_list, dim=0).numpy()
+                elif isinstance(latent_var_list[0], np.ndarray):
+                    processed_var = np.concatenate(latent_var_list, axis=0)
+                elif isinstance(latent_var_list[0], list):
+                    processed_var = np.array(latent_var_list)
+                    if processed_var.size == 0 or (len(processed_var.shape) > 1 and processed_var.shape[1] == 0):
+                        return None
+                    if len(processed_var.shape) > 2:
+                        processed_var = processed_var.reshape(-1, processed_var.shape[-1])
+                else:
+                    return None
+                    
+                if processed_var.size == 0 or (len(processed_var.shape) > 1 and processed_var.shape[1] == 0):
+                    return None
+                    
+                return processed_var
+            except (IndexError, TypeError, ValueError):
+                return None
+        
+        # Process latent means
+        all_mus = process_latent_var(results.get('latent_mus', []), 'latent_mus')
+        
+        if all_mus is None or len(all_mus) < 2:
+            return None
+        
+        print(f"✓ Loaded {len(all_mus)} legacy training latent vectors")
+        return all_mus
+        
+    except Exception as e:
+        print(f"⚠ Error loading legacy training results: {e}")
+        return None
+
+##############################
 # VISUALIZERS FOR DATA
 ##############################
 
@@ -139,8 +310,8 @@ def visualize_sequence_reconstruction(original, reconstructed, epoch, batch_idx,
     plt.savefig(os.path.join(run_dir, f'reconstruction_epoch{epoch}_batch{batch_idx}.png'))
     plt.close()
 
-def plot_training_and_latent(results):
-    """Plot training loss and latent space visualization."""
+def plot_training_and_latent(results, save_dir=None):
+    """Plot training loss and latent space visualization using evaluation-generated latents."""
     fig, axs = plt.subplots(1, 2, figsize=(18, 6))
 
     # Subplot 0: Log(Training Loss) Over Epochs
@@ -154,201 +325,226 @@ def plot_training_and_latent(results):
     axs[0].spines['right'].set_visible(False)
 
     # Subplot 1: Latent Space Visualization via t-SNE
-    if 'latent_mus' not in results or not results['latent_mus']:
-        print("Warning: No latent means found in results. Skipping latent space visualization.")
-        plt.tight_layout()
-        plt.show()
-        return
+    # Try to load latents from evaluation first, then fall back to legacy
+    if save_dir:
+        # When called from visualize_stored_results, save_dir is the run_dir
+        run_dir = save_dir
+    else:
+        # Fallback: try to infer run_dir (this might not always work)
+        run_dir = os.getcwd()
     
-    # Helper function to extract and combine data, similar to the one in plot_latent_analysis
-    def process_latent_var(latent_var_list, var_name):
-        try:
-            if not latent_var_list:
-                print(f"Warning: Empty {var_name} list. Skipping visualization.")
-                return None
-                
-            # If we have a dictionary structure (multiple keys), extract and combine data
-            if isinstance(latent_var_list, dict):
-                combined_data = []
-                for key, value in latent_var_list.items():
-                    if value:  # If not empty
-                        combined_data.extend(value)
-                if not combined_data:
-                    print(f"Warning: No data in {var_name} dictionary. Skipping visualization.")
+    # Load evaluation-generated latents
+    all_mus = load_evaluation_latent_data(run_dir)
+    
+    # Fallback to legacy latents if evaluation latents not found
+    if all_mus is None:
+        all_mus = load_legacy_latent_data(run_dir)
+    
+    # Final fallback to results latent_mus (original approach)
+    if all_mus is None and 'latent_mus' in results and results['latent_mus']:
+        print("⚠ Falling back to legacy results processing...")
+        
+        def process_latent_var(latent_var_list, var_name):
+            try:
+                if not latent_var_list:
                     return None
-                latent_var_list = combined_data
-            
-            # Process based on data type
-            if isinstance(latent_var_list[0], torch.Tensor):
-                # List of tensors
-                processed_var = torch.cat(latent_var_list, dim=0).numpy()
-            elif isinstance(latent_var_list[0], np.ndarray):
-                # List of numpy arrays
-                processed_var = np.concatenate(latent_var_list, axis=0)
-            elif isinstance(latent_var_list[0], list):
-                # List of lists (Python lists)
-                processed_var = np.array(latent_var_list)
-                # Check if it's valid data with actual features
+                if isinstance(latent_var_list, dict):
+                    combined_data = []
+                    for key, value in latent_var_list.items():
+                        if value:
+                            combined_data.extend(value)
+                    if not combined_data:
+                        return None
+                    latent_var_list = combined_data
+                
+                if isinstance(latent_var_list[0], torch.Tensor):
+                    processed_var = torch.cat(latent_var_list, dim=0).numpy()
+                elif isinstance(latent_var_list[0], np.ndarray):
+                    processed_var = np.concatenate(latent_var_list, axis=0)
+                elif isinstance(latent_var_list[0], list):
+                    processed_var = np.array(latent_var_list)
+                    if processed_var.size == 0 or (len(processed_var.shape) > 1 and processed_var.shape[1] == 0):
+                        return None
+                    if len(processed_var.shape) > 2:
+                        processed_var = processed_var.reshape(-1, processed_var.shape[-1])
+                else:
+                    return None
+                    
                 if processed_var.size == 0 or (len(processed_var.shape) > 1 and processed_var.shape[1] == 0):
-                    print(f"Warning: {var_name} has zero features. Skipping visualization.")
                     return None
-                # If multi-dimensional, flatten to 2D (samples × features)
-                if len(processed_var.shape) > 2:
-                    processed_var = processed_var.reshape(-1, processed_var.shape[-1])
-            else:
-                print(f"Warning: Unexpected {var_name} format: {type(latent_var_list[0])}. Skipping visualization.")
+                return processed_var
+            except (IndexError, TypeError, ValueError):
                 return None
                 
-            # Final validity check
-            if processed_var.size == 0 or (len(processed_var.shape) > 1 and processed_var.shape[1] == 0):
-                print(f"Warning: Processed {var_name} has zero features. Skipping visualization.")
-                return None
-                
-            return processed_var
-        except (IndexError, TypeError, ValueError) as e:
-            print(f"Warning: Error processing {var_name}: {e}. Skipping visualization.")
-            return None
-    
-    # Process latent means
-    all_mus = process_latent_var(results.get('latent_mus', []), 'latent_mus')
+        all_mus = process_latent_var(results.get('latent_mus', []), 'latent_mus')
     
     if all_mus is None or len(all_mus) < 2:
-        print("Warning: Not enough valid latent means for t-SNE. Skipping visualization.")
-        plt.tight_layout()
-        plt.show()
-        return
-    
-    # Choose appropriate perplexity based on number of samples
-    perplexity = min(30, max(1, len(all_mus) - 1))
-    
-    # Apply t-SNE
-    try:
-        tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42)
-        latent_2d = tsne.fit_transform(all_mus)
-        sc1 = axs[1].scatter(latent_2d[:, 0], latent_2d[:, 1],
-                            c=np.arange(len(latent_2d)), cmap='viridis', alpha=0.8, s=80)
-        axs[1].set_title('Latent space (t-SNE)', fontsize=18)
-        axs[1].set_xlabel('Dimension 1', fontsize=16)
-        axs[1].set_ylabel('Dimension 2', fontsize=16)
-        plt.colorbar(sc1, ax=axs[1], label='Sample Index', pad=0.02)
-        axs[1].grid(False)
-        axs[1].spines['top'].set_visible(False)
-        axs[1].spines['right'].set_visible(False)
-    except Exception as e:
-        print(f"Warning: Error during t-SNE: {e}. Skipping latent visualization.")
-        axs[1].text(0.5, 0.5, f"Error: {str(e)}", 
+        print("⚠ Warning: No valid latent means found for t-SNE visualization.")
+        axs[1].text(0.5, 0.5, 'No latent data available\n\nRun evaluation to generate\nencoded training latents', 
                    horizontalalignment='center', verticalalignment='center',
-                   transform=axs[1].transAxes)
+                   transform=axs[1].transAxes, fontsize=12)
+        axs[1].set_title('Latent space (t-SNE)', fontsize=18)
         axs[1].axis('off')
+    else:
+        # Choose appropriate perplexity based on number of samples
+        perplexity = min(30, max(1, len(all_mus) - 1))
+        
+        # Apply t-SNE
+        try:
+            tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42)
+            latent_2d = tsne.fit_transform(all_mus)
+            sc1 = axs[1].scatter(latent_2d[:, 0], latent_2d[:, 1],
+                                c=np.arange(len(latent_2d)), cmap='viridis', alpha=0.8, s=80)
+            axs[1].set_title('Latent space (t-SNE)', fontsize=18)
+            axs[1].set_xlabel('Dimension 1', fontsize=16)
+            axs[1].set_ylabel('Dimension 2', fontsize=16)
+            plt.colorbar(sc1, ax=axs[1], label='Sample Index', pad=0.02)
+            axs[1].grid(False)
+            axs[1].spines['top'].set_visible(False)
+            axs[1].spines['right'].set_visible(False)
+            
+            print(f"✓ t-SNE visualization created with {len(all_mus)} samples")
+        except Exception as e:
+            print(f"⚠ Warning: Error during t-SNE: {e}")
+            axs[1].text(0.5, 0.5, f"t-SNE Error:\n{str(e)}", 
+                       horizontalalignment='center', verticalalignment='center',
+                       transform=axs[1].transAxes)
+            axs[1].set_title('Latent space (t-SNE)', fontsize=18)
+            axs[1].axis('off')
     
     plt.tight_layout()
-    plt.show()
+    if save_dir:
+        plt.savefig(os.path.join(save_dir, 'training_and_latent.png'), dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"Training and latent plot saved to {save_dir}/training_and_latent.png")
+    else:
+        plt.show()
 
-def plot_latent_analysis(results):
-    """Plot detailed latent space analysis for the latent means, log variances, and sampled z."""
+def plot_latent_analysis(results, save_dir=None):
+    """Plot detailed latent space analysis using fresh encoded training latents from trained model."""
     fig, axs = plt.subplots(1, 3, figsize=(18, 6))
     
-    # Helper function to process different formats of latent variables
-    def process_latent_var(latent_var_list, var_name):
-        try:
-            if not latent_var_list:
-                print(f"Warning: Empty {var_name} list. Skipping {var_name} visualization.")
-                return None
-            
-            # If we have a dictionary structure (multiple keys), extract and combine data
-            if isinstance(latent_var_list, dict):
-                combined_data = []
-                for key, value in latent_var_list.items():
-                    if value:  # If not empty
-                        combined_data.extend(value)
-                if not combined_data:
-                    print(f"Warning: No data in {var_name} dictionary. Skipping visualization.")
-                    return None
-                latent_var_list = combined_data
-            
-            # Process based on data type
-            if isinstance(latent_var_list[0], torch.Tensor):
-                # List of tensors
-                processed_var = torch.cat(latent_var_list, dim=0).numpy()
-            elif isinstance(latent_var_list[0], np.ndarray):
-                # List of numpy arrays
-                processed_var = np.concatenate(latent_var_list, axis=0)
-            elif isinstance(latent_var_list[0], list):
-                # List of lists (Python lists)
-                processed_var = np.array(latent_var_list)
-                # Check if it's valid data with actual features
-                if processed_var.size == 0 or (len(processed_var.shape) > 1 and processed_var.shape[1] == 0):
-                    print(f"Warning: {var_name} has zero features. Skipping visualization.")
-                    return None
-                # If multi-dimensional, flatten to 2D (samples × features)
-                if len(processed_var.shape) > 2:
-                    processed_var = processed_var.reshape(-1, processed_var.shape[-1])
-            else:
-                print(f"Warning: Unexpected {var_name} format: {type(latent_var_list[0])}. Skipping visualization.")
-                return None
-                
-            # Final validity check
-            if processed_var.size == 0 or (len(processed_var.shape) > 1 and processed_var.shape[1] == 0):
-                print(f"Warning: Processed {var_name} has zero features. Skipping visualization.")
-                return None
-                
-            return processed_var
-        except (IndexError, TypeError, ValueError) as e:
-            print(f"Warning: Error processing {var_name}: {e}. Skipping visualization.")
-            return None
+    # Try to load evaluation-generated latents
+    if save_dir:
+        run_dir = save_dir
+    else:
+        run_dir = os.getcwd()
     
-    # Process all three latent variables
-    latent_mu = process_latent_var(results.get('latent_mus', []), 'latent_mus')
-    latent_log_var = process_latent_var(results.get('latent_log_vars', []), 'latent_log_vars')
-    latent_z = process_latent_var(results.get('latent_zs', []), 'latent_zs')
+    # Load ALL latent components from evaluation-generated encoded training latents
+    print("✓ Using fresh encoded training latents from trained model for ALL latent analysis")
+    encoded_latents = load_evaluation_latent_data(run_dir, return_all_components=True)
+    
+    if encoded_latents is not None:
+        latent_mu = encoded_latents['latent_mus']
+        latent_log_var = encoded_latents['latent_log_vars']
+        latent_z = encoded_latents['latent_zs']
+        data_source = "fresh encoded (trained model)"
+    else:
+        print("⚠ WARNING: No fresh encoded latents found, falling back to legacy training data")
+        
+        # Fallback to legacy data processing
+        def process_latent_var(latent_var_list, var_name):
+            try:
+                if not latent_var_list:
+                    return None
+                
+                if isinstance(latent_var_list, dict):
+                    combined_data = []
+                    for key, value in latent_var_list.items():
+                        if value:
+                            combined_data.extend(value)
+                    if not combined_data:
+                        return None
+                    latent_var_list = combined_data
+                
+                if isinstance(latent_var_list[0], torch.Tensor):
+                    processed_var = torch.cat(latent_var_list, dim=0).numpy()
+                elif isinstance(latent_var_list[0], np.ndarray):
+                    processed_var = np.concatenate(latent_var_list, axis=0)
+                elif isinstance(latent_var_list[0], list):
+                    processed_var = np.array(latent_var_list)
+                    if processed_var.size == 0 or (len(processed_var.shape) > 1 and processed_var.shape[1] == 0):
+                        return None
+                    if len(processed_var.shape) > 2:
+                        processed_var = processed_var.reshape(-1, processed_var.shape[-1])
+                else:
+                    return None
+                    
+                if processed_var.size == 0 or (len(processed_var.shape) > 1 and processed_var.shape[1] == 0):
+                    return None
+                return processed_var
+            except (IndexError, TypeError, ValueError):
+                return None
+        
+        latent_mu = process_latent_var(results.get('latent_mus', []), 'latent_mus')
+        latent_log_var = process_latent_var(results.get('latent_log_vars', []), 'latent_log_vars')
+        latent_z = process_latent_var(results.get('latent_zs', []), 'latent_zs')
+        data_source = "legacy training data"
     
     # Count how many valid latent variables we have
     valid_count = sum(1 for var in [latent_mu, latent_log_var, latent_z] if var is not None)
     
     if valid_count == 0:
-        print("Warning: No valid latent variables found for visualization. Skipping plot.")
-        return
-
-    # Function to create t-SNE plot with appropriate perplexity
-    def create_tsne_plot(data, ax, title):
-        if data is None or len(data) < 2:
-            ax.text(0.5, 0.5, f"Insufficient data for {title}", 
-                   horizontalalignment='center', verticalalignment='center',
-                   transform=ax.transAxes)
-            ax.axis('off')
-            return
+        print("⚠ Warning: No valid latent variables found for analysis.")
+        for i, title in enumerate(['Mean (μ)', 'Log-Variance (log σ²)', 'Sampled Z']):
+            axs[i].text(0.5, 0.5, f"No data for {title}\n\nRun evaluation to generate\nencoded training latents", 
+                       horizontalalignment='center', verticalalignment='center',
+                       transform=axs[i].transAxes, fontsize=12)
+            axs[i].set_title(f't-SNE {title}', fontsize=18)
+            axs[i].axis('off')
+    else:
+        # Function to create t-SNE plot with appropriate perplexity
+        def create_tsne_plot(data, ax, title):
+            if data is None or len(data) < 2:
+                ax.text(0.5, 0.5, f"Insufficient data for {title}", 
+                       horizontalalignment='center', verticalalignment='center',
+                       transform=ax.transAxes)
+                ax.set_title(title, fontsize=18)
+                ax.axis('off')
+                return
+                
+            # Choose appropriate perplexity based on number of samples
+            perplexity = min(30, max(1, len(data) - 1))
             
-        # Choose appropriate perplexity based on number of samples
-        perplexity = min(30, max(1, len(data) - 1))
+            try:
+                tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42)
+                tsne_dims = tsne.fit_transform(data)
+                sc = ax.scatter(tsne_dims[:, 0], tsne_dims[:, 1],
+                               c=np.arange(tsne_dims.shape[0]), cmap='viridis', alpha=0.8, s=80)
+                ax.set_title(title, fontsize=18)
+                ax.set_xlabel('Dimension 1', fontsize=16)
+                ax.set_ylabel('Dimension 2', fontsize=16)
+                plt.colorbar(sc, ax=ax, label='Sample Index', pad=0.02)
+                ax.grid(False)
+                ax.spines['top'].set_visible(False)
+                ax.spines['right'].set_visible(False)
+                
+                # Add data source info
+                ax.text(0.02, 0.98, f"Source: {data_source}", transform=ax.transAxes, 
+                       fontsize=8, alpha=0.7, verticalalignment='top')
+                
+            except Exception as e:
+                print(f"⚠ Warning: Error in t-SNE for {title}: {e}")
+                ax.text(0.5, 0.5, f"t-SNE Error:\n{str(e)}", 
+                       horizontalalignment='center', verticalalignment='center',
+                       transform=ax.transAxes)
+                ax.set_title(title, fontsize=18)
+                ax.axis('off')
         
-        try:
-            tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42)
-            tsne_dims = tsne.fit_transform(data)
-            sc = ax.scatter(tsne_dims[:, 0], tsne_dims[:, 1],
-                           c=np.arange(tsne_dims.shape[0]), cmap='viridis', alpha=0.8, s=80)
-            ax.set_title(title, fontsize=18)
-            ax.set_xlabel('Dimension 1', fontsize=16)
-            ax.set_ylabel('Dimension 2', fontsize=16)
-            plt.colorbar(sc, ax=ax, label='Sample Index', pad=0.02)
-            ax.grid(False)
-            ax.spines['top'].set_visible(False)
-            ax.spines['right'].set_visible(False)
-        except Exception as e:
-            print(f"Warning: Error in t-SNE for {title}: {e}")
-            ax.text(0.5, 0.5, f"Error: {str(e)}", 
-                   horizontalalignment='center', verticalalignment='center',
-                   transform=ax.transAxes)
-            ax.axis('off')
-    
-    # Create the three plots
-    create_tsne_plot(latent_mu, axs[0], 't-SNE Mean')
-    create_tsne_plot(latent_log_var, axs[1], 't-SNE log-Variance')
-    create_tsne_plot(latent_z, axs[2], 't-SNE sampled Z')
+        # Create the three plots using fresh encoded latents
+        create_tsne_plot(latent_mu, axs[0], 't-SNE Mean (μ)')
+        create_tsne_plot(latent_log_var, axs[1], 't-SNE Log-Variance (log σ²)')
+        create_tsne_plot(latent_z, axs[2], 't-SNE Sampled Z')
 
     plt.tight_layout()
-    plt.show()
+    if save_dir:
+        plt.savefig(os.path.join(save_dir, 'latent_analysis.png'), dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"Latent analysis plot saved to {save_dir}/latent_analysis.png")
+    else:
+        plt.show()
 
-def plot_epoch_accuracies(results):
+def plot_epoch_accuracies(results, save_dir=None):
     """Plot shape, grid, overall, and sample-level exact accuracy over epochs."""
     # Extract epoch numbers and accuracy metrics from the results.
     epoch_nums = [acc["epoch"] for acc in results["epoch_accuracies"]]
@@ -368,152 +564,138 @@ def plot_epoch_accuracies(results):
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.show()
+    if save_dir:
+        plt.savefig(os.path.join(save_dir, 'epoch_accuracies.png'), dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"Epoch accuracies plot saved to {save_dir}/epoch_accuracies.png")
+    else:
+        plt.show()
 
-def plot_z_optimization_losses(results):
+def plot_z_optimization_losses(results, save_dir=None):
     """Plot z optimization losses over steps."""
     losses = results['losses_gradient_ascent']
-    print(type(losses))
-    print(losses)
-    print(len(losses))
+    
+    # Flatten the nested list structure
+    flattened_losses = []
+    for loss_sequence in losses:
+        if isinstance(loss_sequence, list):
+            flattened_losses.extend(loss_sequence)
+        else:
+            flattened_losses.append(loss_sequence)
     
     plt.figure(figsize=(10, 6))
-    
-    plt.plot(losses, marker='o', linestyle='-')        
+    plt.plot(flattened_losses, marker='o', linestyle='-', markersize=2)        
     plt.title("Z Optimization Losses Over Steps", fontsize=16)
     plt.xlabel("Step", fontsize=14)
     plt.ylabel("Loss", fontsize=14)
-    plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.show()
+    if save_dir:
+        plt.savefig(os.path.join(save_dir, 'z_optimization_losses.png'), dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"Z optimization losses plot saved to {save_dir}/z_optimization_losses.png")
+    else:
+        plt.show()
 
 
-def plot_reconstructions(results):
-    """Plot grid reconstructions from results along with an error map."""
-    # Extract sequences and reconstructions.
-    input_seqs = results['input_sequences']
-    output_seqs = results['output_sequences']
+def plot_reconstructions(results, save_dir=None, filename_prefix=""):
+    """Plot input, target, reconstruction, and error map for each sample."""
     reconstructions = results['reconstructions']
+    
+    input_seqs = [item['input'] for item in reconstructions]
+    output_seqs = [item['target'] for item in reconstructions]
+
     shape_logits_list = []
     grid_logits_list = []
 
-    # Process reconstructions based on data type
-    for shape_logits, grid_logits in reconstructions:
-        # Check if we're dealing with PyTorch tensors or Python lists
-        if isinstance(shape_logits, torch.Tensor):
-            # Convert logits to predicted values using PyTorch methods
-            pred_shapes = shape_logits.argmax(dim=-1)
-            pred_grid = grid_logits.argmax(dim=-1)
-            shape_logits_list.append(pred_shapes)
-            grid_logits_list.append(pred_grid)
-        else:
-            # Handle Python lists (from saved results)
-            # Convert to numpy arrays and get argmax
-            shape_array = np.array(shape_logits)
-            grid_array = np.array(grid_logits)
-            
-            # Get the argmax along the last dimension
-            # For shape_array: [batch_size, seq_len, vocab_size] -> [batch_size, seq_len]
-            pred_shapes = np.argmax(shape_array, axis=-1)
-            pred_grid = np.argmax(grid_array, axis=-1)
-            
-            # Convert to tensors for consistent handling later
-            shape_logits_list.append(torch.tensor(pred_shapes))
-            grid_logits_list.append(torch.tensor(pred_grid))
+    for item in reconstructions:
+        shape_logits, grid_logits = item['reconstruction']
 
-    # Combine all predictions
-    try:
-        shape_recons = torch.cat(shape_logits_list, dim=0).cpu().numpy()  # Shape: (N, 2)
-        grid_recons = torch.cat(grid_logits_list, dim=0).cpu().numpy()    # Shape: (N, 900)
-    except RuntimeError as e:
-        print(f"Error combining predictions: {e}")
-        print("Attempting alternative approach for saved data...")
-        # Alternative approach for saved data that might have inconsistent dimensions
-        all_shapes = []
-        all_grids = []
-        for shape_tensor in shape_logits_list:
-            all_shapes.extend(shape_tensor.cpu().numpy())
-        for grid_tensor in grid_logits_list:
-            all_grids.extend(grid_tensor.cpu().numpy())
-        shape_recons = np.array(all_shapes).reshape(-1, 2)
-        grid_recons = np.array(all_grids).reshape(-1, 900)
+        shape_array = np.array(shape_logits)
+        grid_array = np.array(grid_logits)
+
+        pred_shapes = np.argmax(shape_array, axis=-1)
+        pred_grid = np.argmax(grid_array, axis=-1)
+
+        shape_logits_list.append(torch.tensor(pred_shapes))
+        grid_logits_list.append(torch.tensor(pred_grid))
+
+    shape_recons = torch.stack(shape_logits_list).numpy()
+    grid_recons = torch.stack(grid_logits_list).numpy()
 
     num_samples = min(DEFAULT_VISUALIZE_N_VALUES, len(shape_recons))
     for i in range(num_samples):
-        # Create 4 subplots: Input, Target, Reconstruction, Error Map
         fig, axs = plt.subplots(1, 4, figsize=(24, 6))
 
-        # Plot input:
+        # Input
         input_seq = input_seqs[i]
         in_rows, in_cols = int(input_seq[-2]), int(input_seq[-1])
-        input_grid_full = np.array(input_seq[:900]).reshape(30, 30)
-        input_grid = input_grid_full[:in_rows, :in_cols]
+        input_grid = np.array(input_seq[:900]).reshape(30, 30)[:in_rows, :in_cols]
         axs[0].imshow(input_grid, cmap='viridis')
         axs[0].set_title('Input')
         axs[0].axis('off')
 
-        # Plot target:
+        # Target
         target_seq = output_seqs[i]
         out_rows, out_cols = int(target_seq[-2]), int(target_seq[-1])
-        target_grid_full = np.array(target_seq[:900]).reshape(30, 30)
-        target_grid = target_grid_full[:out_rows, :out_cols]
+        target_grid = np.array(target_seq[:900]).reshape(30, 30)[:out_rows, :out_cols]
         axs[1].imshow(target_grid, cmap='viridis')
         axs[1].set_title('Target')
         axs[1].axis('off')
 
-        # Plot reconstruction:
-        shape_pred = shape_recons[i]  # Expected: [predicted_rows, predicted_cols]
-        recon_rows, recon_cols = int(shape_pred[0]), int(shape_pred[1])
-        grid_recon_full = grid_recons[i].reshape(30, 30)
-        recon_grid = grid_recon_full[:recon_rows, :recon_cols]
+        # Reconstruction
+        recon_rows, recon_cols = int(shape_recons[i][0]), int(shape_recons[i][1])
+        recon_grid = grid_recons[i].reshape(30, 30)[:recon_rows, :recon_cols]
         axs[2].imshow(recon_grid, cmap='viridis')
         axs[2].set_title(f'Reconstruction ({recon_rows}x{recon_cols})')
         axs[2].axis('off')
 
-        # Plot error map over the overlapping region:
-        # Determine the common dimensions.
+        # Error Map
         common_rows = min(out_rows, recon_rows)
         common_cols = min(out_cols, recon_cols)
-        error_region_target = target_grid[:common_rows, :common_cols]
-        error_region_recon = recon_grid[:common_rows, :common_cols]
-        error_map = np.abs(error_region_target - error_region_recon)
+        error_map = np.abs(target_grid[:common_rows, :common_cols] - recon_grid[:common_rows, :common_cols])
         axs[3].imshow(error_map, cmap='hot')
         axs[3].set_title('Error Map')
         axs[3].axis('off')
 
         plt.suptitle(f'Sample {i+1}', fontsize=18)
         plt.tight_layout()
-        plt.show()
+        if save_dir:
+            filename = f'{filename_prefix}reconstructions_sample_{i+1}.png' if filename_prefix else f'reconstructions_sample_{i+1}.png'
+            plt.savefig(os.path.join(save_dir, filename), dpi=150, bbox_inches='tight')
+            plt.close()
+            print(f"Reconstruction plot for sample {i+1} saved to {save_dir}/{filename}")
+        else:
+            plt.show()
 
 
-
-
-def visualize_all_results(results):
+def visualize_all_results(results, save_dir=None):
     """Plot all visualizations for the results."""
     print("\nPlotting training progress and latent space...")
-    plot_training_and_latent(results)
+    plot_training_and_latent(results, save_dir)
 
     print("\nPlotting latent space analysis...")
-    plot_latent_analysis(results)
+    plot_latent_analysis(results, save_dir)
 
     print("\nPlotting epoch accuracies over time...")
-    plot_epoch_accuracies(results)
+    plot_epoch_accuracies(results, save_dir)
 
     if 'losses_gradient_ascent' in results:
-        print("\nPlotting z optimization losses...")
-        plot_z_optimization_losses(results)
+        if len(results['losses_gradient_ascent']) > 0:
+            print("\nPlotting z optimization losses...")
+            plot_z_optimization_losses(results, save_dir)
 
-    print("\nPlotting reconstructions...")
-    plot_reconstructions(results)
+    # print("\nPlotting reconstructions...")
+    # plot_reconstructions(results, save_dir)
 
 
-def plot_evaluation_results(results):
+def plot_evaluation_results(results, save_dir=None):
     """
     Plot evaluation metrics and reconstructions for each key.
     
     Args:
         results: Dictionary containing evaluation results for each key
+        save_dir: Directory to save plots (optional)
     """
     # Plot metrics
     fig, axs = plt.subplots(2, 3, figsize=(15, 10))
@@ -544,7 +726,12 @@ def plot_evaluation_results(results):
             axs[i].set_ylim(0, 1)
     
     plt.tight_layout()
-    plt.show()
+    if save_dir:
+        plt.savefig(os.path.join(save_dir, 'evaluation_metrics.png'), dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"Evaluation metrics plot saved to {save_dir}/evaluation_metrics.png")
+    else:
+        plt.show()
     
     # Print detailed metrics for each key
     print("\nDetailed Evaluation Results:")
@@ -560,116 +747,202 @@ def plot_evaluation_results(results):
             print(f"  Sample Exact Accuracy: {metrics['sample_exact_accuracy']:.4f}")
 
             if 'losses_gradient_ascent' in results[key]['metrics']:
-                print(f"\nPlotting z optimization losses")
-                plot_z_optimization_losses(results[key]['metrics'])        
+                print(f"\nPlotting z optimization losses for key {key}")
+                plot_z_optimization_losses(results[key]['metrics'], save_dir)        
 
         if 'reconstruction_results' in results[key]:
-            print(f"\nPlotting support reconstructions")
+            print(f"\nPlotting support reconstructions for key {key}")
             aux = {
                 'input_sequences': results[key]['reconstruction_results']['input_samples_sequences'],
                 'output_sequences': results[key]['reconstruction_results']['output_samples_sequences'],
                 'reconstructions': results[key]['reconstruction_results']['support_reconstructions'],
             }
-            plot_reconstructions(aux)
+            plot_reconstructions(aux, save_dir, f"{key}_support_")
 
-            print(f"\nPlotting query reconstructions")
+            print(f"\nPlotting query reconstructions for key {key}")
             aux = {
                 'input_sequences': results[key]['reconstruction_results']['input_queries_sequences'],
                 'output_sequences': results[key]['reconstruction_results']['output_queries_sequences'],
                 'reconstructions': results[key]['reconstruction_results']['query_reconstructions'],
             }
-            plot_reconstructions(aux)
+            plot_reconstructions(aux, save_dir, f"{key}_query_")
 
 
 def visualize_stored_results(run_dir):
     """
     Load and visualize results from a previous run.
+    Makes training results optional - will still work if only evaluation results exist.
     
     Args:
         run_dir: Directory containing the stored results
     """
-    # Load training results
-    results_file = os.path.join(run_dir, 'results.pkl')
-    if not os.path.exists(results_file):
-        raise FileNotFoundError(f"No results file found in {run_dir}")
+    print(f"Looking for results in: {run_dir}")
     
-    with open(results_file, 'rb') as f:
-        results = pickle.load(f)
+    # Try to load training results
+    results_file = os.path.join(run_dir, 'results.pkl')
+    results = None
+    
+    if os.path.exists(results_file):
+        print("Found training results file, loading...")
+        try:
+            with open(results_file, 'rb') as f:
+                results = pickle.load(f)
+            print("✓ Training results loaded successfully")
+        except Exception as e:
+            print(f"⚠ Warning: Could not load training results: {e}")
+            results = None
+    else:
+        print("No training results file found (results.pkl)")
     
     # Load model parameters
     params_file = os.path.join(run_dir, 'model_params.pkl')
+    model_params = None
+    
     if os.path.exists(params_file):
-        with open(params_file, 'rb') as f:
-            model_params = pickle.load(f)
+        print("Found model parameters file, loading...")
+        try:
+            with open(params_file, 'rb') as f:
+                model_params = pickle.load(f)
+            print("✓ Model parameters loaded successfully")
+        except Exception as e:
+            print(f"⚠ Warning: Could not load model parameters: {e}")
+            model_params = None
     else:
-        # If no params file exists, create a default one with current values
-        from models.base_model import (
-            TRAINING_KEYS, TRAINING_SEED, LATENT_DIM, HIDDEN_DIM, NUM_LAYERS, NUM_HEADS,
-            DROPOUT, MAX_LENGTH, ENCODER_MAX_LENGTH, DECODER_MAX_LENGTH,
-            BATCH_SIZE, NUM_EPOCHS, LEARNING_RATE, BETA, n,
-            OPTIMIZE_Z, OPTIMIZE_Z_NUM_STEPS, OPTIMIZE_Z_LR,
-            OPTIMIZE_Z_INFERENCE, OPTIMIZE_Z_INFERENCE_NUM_STEPS, OPTIMIZE_Z_INFERENCE_LR
-        )
-        from main import (
-            EVAL_SEED, DEFAULT_EVAL_KEYS, DEFAULT_EVAL_N_SAMPLES,
-            DEFAULT_EVAL_N_QUERIES, DEFAULT_EVAL_EPOCH
-        )
-        model_params = {
-            'TRAINING_KEYS': TRAINING_KEYS,
-            'TRAINING_SEED': TRAINING_SEED,
-            'EVAL_SEED': EVAL_SEED,
-            'LATENT_DIM': LATENT_DIM,
-            'HIDDEN_DIM': HIDDEN_DIM,
-            'NUM_LAYERS': NUM_LAYERS,
-            'NUM_HEADS': NUM_HEADS,
-            'DROPOUT': DROPOUT,
-            'MAX_LENGTH': MAX_LENGTH,
-            'ENCODER_MAX_LENGTH': ENCODER_MAX_LENGTH,
-            'DECODER_MAX_LENGTH': DECODER_MAX_LENGTH,
-            'BATCH_SIZE': BATCH_SIZE,
-            'NUM_EPOCHS': NUM_EPOCHS,
-            'LEARNING_RATE': LEARNING_RATE,
-            'BETA': BETA,
-            'n': n,
-            'OPTIMIZE_Z': OPTIMIZE_Z,
-            'OPTIMIZE_Z_NUM_STEPS': OPTIMIZE_Z_NUM_STEPS,
-            'OPTIMIZE_Z_LR': OPTIMIZE_Z_LR,
-            'OPTIMIZE_Z_INFERENCE': OPTIMIZE_Z_INFERENCE,
-            'OPTIMIZE_Z_INFERENCE_NUM_STEPS': OPTIMIZE_Z_INFERENCE_NUM_STEPS,
-            'OPTIMIZE_Z_INFERENCE_LR': OPTIMIZE_Z_INFERENCE_LR,
-            'DEFAULT_EVAL_KEYS': DEFAULT_EVAL_KEYS,
-            'DEFAULT_EVAL_N_SAMPLES': DEFAULT_EVAL_N_SAMPLES,
-            'DEFAULT_EVAL_N_QUERIES': DEFAULT_EVAL_N_QUERIES,
-            'DEFAULT_EVAL_EPOCH': DEFAULT_EVAL_EPOCH
-        }
+        print("No model parameters file found (model_params.pkl)")
+        
+        # Try to create default parameters from current settings
+        try:
+            from utils.settings_manager import settings
+            
+            data_settings = settings.get_data_settings()
+            model_architecture = settings.get_model_architecture()
+            training_settings = settings.get_training_settings()
+            latent_optimization = settings.get_latent_optimization()
+            evaluation_settings = settings.get_evaluation_settings()
+            
+            model_params = {
+                'TRAINING_KEYS': data_settings.get('training_keys', []),
+                'TRAINING_SEED': data_settings.get('training_seed', 42),
+                'EVAL_SEED': data_settings.get('eval_seed', 1),
+                'LATENT_DIM': model_architecture.get('latent_dim', 64),
+                'HIDDEN_DIM': model_architecture.get('hidden_dim', 128),
+                'NUM_LAYERS': model_architecture.get('num_layers', 2),
+                'NUM_HEADS': model_architecture.get('num_heads', 4),
+                'DROPOUT': model_architecture.get('dropout', 0.1),
+                'MAX_LENGTH': model_architecture.get('max_length', 902),
+                'ENCODER_MAX_LENGTH': model_architecture.get('encoder_max_length', 1805),
+                'DECODER_MAX_LENGTH': model_architecture.get('decoder_max_length', 902),
+                'BATCH_SIZE': training_settings.get('batch_size', 16),
+                'NUM_EPOCHS': training_settings.get('num_epochs', 10),
+                'LEARNING_RATE': training_settings.get('learning_rate', 0.001),
+                'BETA': training_settings.get('beta', 0.1),
+                'n': data_settings.get('n', 100),
+                'OPTIMIZE_Z': latent_optimization.get('training', {}).get('enabled', False),
+                'OPTIMIZE_Z_NUM_STEPS': latent_optimization.get('training', {}).get('num_steps', 5),
+                'OPTIMIZE_Z_LR': latent_optimization.get('training', {}).get('learning_rate', 0.1),
+                'OPTIMIZE_Z_INFERENCE': latent_optimization.get('inference', {}).get('enabled', True),
+                'OPTIMIZE_Z_INFERENCE_NUM_STEPS': latent_optimization.get('inference', {}).get('num_steps', 10),
+                'OPTIMIZE_Z_INFERENCE_LR': latent_optimization.get('inference', {}).get('learning_rate', 0.1),
+                'DEFAULT_EVAL_KEYS': evaluation_settings.get('eval_keys', []),
+                'DEFAULT_EVAL_N_SAMPLES': evaluation_settings.get('eval_n_samples', 2),
+                'DEFAULT_EVAL_N_QUERIES': evaluation_settings.get('eval_n_queries', 10),
+                'DEFAULT_EVAL_EPOCH': evaluation_settings.get('eval_epoch', 1),
+                'OPTIMIZATION_METHOD': latent_optimization.get('method', 'gradient')
+            }
+            print("✓ Created default model parameters from current settings")
+        except Exception as e:
+            print(f"⚠ Warning: Could not create default model parameters: {e}")
+            model_params = {
+                'TRAINING_KEYS': ['unknown'],
+                'TRAINING_SEED': 42,
+                'EVAL_SEED': 1,
+                'LATENT_DIM': 64,
+                'HIDDEN_DIM': 128,
+                'NUM_LAYERS': 2,
+                'NUM_HEADS': 4,
+                'DROPOUT': 0.1,
+                'MAX_LENGTH': 902,
+                'ENCODER_MAX_LENGTH': 1805,
+                'DECODER_MAX_LENGTH': 902,
+                'BATCH_SIZE': 16,
+                'NUM_EPOCHS': 10,
+                'LEARNING_RATE': 0.001,
+                'BETA': 0.1,
+                'n': 100,
+                'OPTIMIZE_Z': False,
+                'OPTIMIZE_Z_NUM_STEPS': 5,
+                'OPTIMIZE_Z_LR': 0.1,
+                'OPTIMIZE_Z_INFERENCE': True,
+                'OPTIMIZE_Z_INFERENCE_NUM_STEPS': 10,
+                'OPTIMIZE_Z_INFERENCE_LR': 0.1,
+                'DEFAULT_EVAL_KEYS': ['unknown'],
+                'DEFAULT_EVAL_N_SAMPLES': 2,
+                'DEFAULT_EVAL_N_QUERIES': 10,
+                'DEFAULT_EVAL_EPOCH': 1,
+                'OPTIMIZATION_METHOD': 'gradient'
+            }
+            print("✓ Using minimal default model parameters")
     
-    # Plot model summary first
-    print("\nPlotting model summary...")
-    plot_model_summary(results, model_params)
+    # Plot model summary if we have parameters (even if no training results)
+    if model_params is not None:
+        print("\nPlotting model summary...")
+        try:
+            plot_model_summary(results, model_params, run_dir)
+        except Exception as e:
+            print(f"⚠ Warning: Could not plot model summary: {e}")
     
-    # Visualize training results
-    print("\nVisualizing training results...")
-    visualize_all_results(results)
+    # Visualize training results if available
+    if results is not None:
+        print("\nVisualizing training results...")
+        try:
+            visualize_all_results(results, run_dir)
+        except Exception as e:
+            print(f"⚠ Warning: Could not visualize training results: {e}")
+    else:
+        print("Skipping training results visualization (no training results available)")
     
     # Try to load and visualize evaluation results
     eval_file = os.path.join(run_dir, 'evaluation_results.pkl')
     if os.path.exists(eval_file):
-        print("\nVisualizing evaluation results...")
-        with open(eval_file, 'rb') as f:
-            eval_results = pickle.load(f)
-        
-        # Plot evaluation metrics and reconstructions
-        plot_evaluation_results(eval_results)
+        print("\nFound evaluation results file, loading...")
+        try:
+            with open(eval_file, 'rb') as f:
+                eval_results = pickle.load(f)
+            print("✓ Evaluation results loaded successfully")
+            
+            print("Visualizing evaluation results...")
+            plot_evaluation_results(eval_results, run_dir)
+        except Exception as e:
+            print(f"⚠ Warning: Could not load/visualize evaluation results: {e}")
     else:
-        print("\nNo evaluation results found in the run directory.")
+        print("No evaluation results found (evaluation_results.pkl)")
+    
+    # Summary of what was found and processed
+    print(f"\n=== VISUALIZATION SUMMARY ===")
+    print(f"Run directory: {run_dir}")
+    print(f"Training results: {'✓ Found and processed' if results is not None else '✗ Not found'}")
+    print(f"Model parameters: {'✓ Found and processed' if model_params is not None else '✗ Not found'}")
+    eval_found = os.path.exists(os.path.join(run_dir, 'evaluation_results.pkl'))
+    print(f"Evaluation results: {'✓ Found and processed' if eval_found else '✗ Not found'}")
+    
+    if results is None and not eval_found:
+        print("\n⚠ Warning: No results files found in the specified directory.")
+        print("Make sure the directory contains either 'results.pkl' or 'evaluation_results.pkl'")
+    elif results is None:
+        print("\n✓ Evaluation-only visualization completed successfully")
+    elif not eval_found:
+        print("\n✓ Training-only visualization completed successfully")
+    else:
+        print("\n✓ Complete visualization (training + evaluation) completed successfully")
 
-def plot_model_summary(results, model_params):
+def plot_model_summary(results, model_params, save_dir=None):
     """
     Plot a summary of model parameters and results.
     
     Args:
-        results: Dictionary containing training and evaluation results
-        model_params: Dictionary containing model parameters from base_model.py and main.py
+        results: Dictionary containing training and evaluation results (can be None)
+        model_params: Dictionary containing model parameters
+        save_dir: Directory to save the plot (optional)
     """
     # Create figure with two subplots
     fig = plt.figure(figsize=(15, 10))
@@ -677,25 +950,25 @@ def plot_model_summary(results, model_params):
     # Create text box with model parameters
     param_text = "Model Parameters:\n\n"
     param_text += f"Training Keys: {', '.join(model_params.get('TRAINING_KEYS', ['None']))}\n"
-    param_text += f"Training Seed: {model_params['TRAINING_SEED']}\n"
-    param_text += f"Evaluation Seed: {model_params['EVAL_SEED']}\n\n"
+    param_text += f"Training Seed: {model_params.get('TRAINING_SEED', 'N/A')}\n"
+    param_text += f"Evaluation Seed: {model_params.get('EVAL_SEED', 'N/A')}\n\n"
     
     param_text += "Architecture:\n"
-    param_text += f"Latent Dimension: {model_params['LATENT_DIM']}\n"
-    param_text += f"Hidden Dimension: {model_params['HIDDEN_DIM']}\n"
-    param_text += f"Number of Layers: {model_params['NUM_LAYERS']}\n"
-    param_text += f"Number of Heads: {model_params['NUM_HEADS']}\n"
-    param_text += f"Dropout: {model_params['DROPOUT']}\n"
-    param_text += f"Max Length: {model_params['MAX_LENGTH']}\n"
-    param_text += f"Encoder Max Length: {model_params['ENCODER_MAX_LENGTH']}\n"
-    param_text += f"Decoder Max Length: {model_params['DECODER_MAX_LENGTH']}\n\n"
+    param_text += f"Latent Dimension: {model_params.get('LATENT_DIM', 'N/A')}\n"
+    param_text += f"Hidden Dimension: {model_params.get('HIDDEN_DIM', 'N/A')}\n"
+    param_text += f"Number of Layers: {model_params.get('NUM_LAYERS', 'N/A')}\n"
+    param_text += f"Number of Heads: {model_params.get('NUM_HEADS', 'N/A')}\n"
+    param_text += f"Dropout: {model_params.get('DROPOUT', 'N/A')}\n"
+    param_text += f"Max Length: {model_params.get('MAX_LENGTH', 'N/A')}\n"
+    param_text += f"Encoder Max Length: {model_params.get('ENCODER_MAX_LENGTH', 'N/A')}\n"
+    param_text += f"Decoder Max Length: {model_params.get('DECODER_MAX_LENGTH', 'N/A')}\n\n"
     
     param_text += "Training Settings:\n"
-    param_text += f"Batch Size: {model_params['BATCH_SIZE']}\n"
-    param_text += f"Number of Epochs: {model_params['NUM_EPOCHS']}\n"
-    param_text += f"Learning Rate: {model_params['LEARNING_RATE']}\n"
-    param_text += f"Beta (KL Loss): {model_params['BETA']}\n"
-    param_text += f"Training Examples per Batch: {model_params['n']}\n\n"
+    param_text += f"Batch Size: {model_params.get('BATCH_SIZE', 'N/A')}\n"
+    param_text += f"Number of Epochs: {model_params.get('NUM_EPOCHS', 'N/A')}\n"
+    param_text += f"Learning Rate: {model_params.get('LEARNING_RATE', 'N/A')}\n"
+    param_text += f"Beta (KL Loss): {model_params.get('BETA', 'N/A')}\n"
+    param_text += f"Training Examples per Batch: {model_params.get('n', 'N/A')}\n\n"
     
     param_text += "Latent Optimization:\n"
     
@@ -704,14 +977,14 @@ def plot_model_summary(results, model_params):
     param_text += f"Optimization Method: {optimization_method}\n\n"
     
     param_text += "Training Optimization:\n"
-    param_text += f"  Enabled: {model_params['OPTIMIZE_Z']}\n"
-    param_text += f"  Steps: {model_params['OPTIMIZE_Z_NUM_STEPS']}\n"
-    param_text += f"  Learning Rate: {model_params['OPTIMIZE_Z_LR']}\n\n"
+    param_text += f"  Enabled: {model_params.get('OPTIMIZE_Z', 'N/A')}\n"
+    param_text += f"  Steps: {model_params.get('OPTIMIZE_Z_NUM_STEPS', 'N/A')}\n"
+    param_text += f"  Learning Rate: {model_params.get('OPTIMIZE_Z_LR', 'N/A')}\n\n"
     
     param_text += "Inference Optimization:\n"
-    param_text += f"  Enabled: {model_params['OPTIMIZE_Z_INFERENCE']}\n"
-    param_text += f"  Steps: {model_params['OPTIMIZE_Z_INFERENCE_NUM_STEPS']}\n"
-    param_text += f"  Learning Rate: {model_params['OPTIMIZE_Z_INFERENCE_LR']}\n\n"
+    param_text += f"  Enabled: {model_params.get('OPTIMIZE_Z_INFERENCE', 'N/A')}\n"
+    param_text += f"  Steps: {model_params.get('OPTIMIZE_Z_INFERENCE_NUM_STEPS', 'N/A')}\n"
+    param_text += f"  Learning Rate: {model_params.get('OPTIMIZE_Z_INFERENCE_LR', 'N/A')}\n\n"
     
     # Add evolutionary parameters if available
     if 'EVOLUTIONARY_POPULATION_SIZE' in model_params:
@@ -729,10 +1002,10 @@ def plot_model_summary(results, model_params):
         param_text += f"  Mutation Std: {model_params.get('VORONOI_MUTATION_STD', 'N/A')}\n\n"
     
     param_text += "Evaluation Settings:\n"
-    param_text += f"Eval Keys: {model_params['DEFAULT_EVAL_KEYS']}\n"
-    param_text += f"Eval Samples: {model_params['DEFAULT_EVAL_N_SAMPLES']}\n"
-    param_text += f"Eval Queries: {model_params['DEFAULT_EVAL_N_QUERIES']}\n"
-    param_text += f"Eval Epoch: {model_params['DEFAULT_EVAL_EPOCH']}\n"
+    param_text += f"Eval Keys: {model_params.get('DEFAULT_EVAL_KEYS', 'N/A')}\n"
+    param_text += f"Eval Samples: {model_params.get('DEFAULT_EVAL_N_SAMPLES', 'N/A')}\n"
+    param_text += f"Eval Queries: {model_params.get('DEFAULT_EVAL_N_QUERIES', 'N/A')}\n"
+    param_text += f"Eval Epoch: {model_params.get('DEFAULT_EVAL_EPOCH', 'N/A')}\n"
     
     # Add parameters text box
     plt.subplot(1, 2, 1)
@@ -744,27 +1017,35 @@ def plot_model_summary(results, model_params):
     plt.subplot(1, 2, 2)
     results_text = "Results Summary:\n\n"
     
-    # Training results
-    if 'epoch_accuracies' in results:
-        last_epoch = results['epoch_accuracies'][-1]
-        results_text += "Training Results (Last Epoch):\n"
-        results_text += f"Shape Accuracy: {last_epoch['shape_accuracy']:.4f}\n"
-        results_text += f"Grid Accuracy: {last_epoch['grid_accuracy']:.4f}\n"
-        results_text += f"Overall Accuracy: {last_epoch['overall_accuracy']:.4f}\n"
-        results_text += f"Sample Exact Accuracy: {last_epoch['sample_exact_accuracy']:.4f}\n\n"
-    
-    # Evaluation results
-    if 'evaluation_results' in results:
-        results_text += "Evaluation Results:\n"
-        for key in results['evaluation_results']:
-            metrics = results['evaluation_results'][key]['metrics']
-            results_text += f"\nKey {key}:\n"
-            results_text += f"Support Loss: {metrics['support_loss']:.4f}\n"
-            results_text += f"Query Loss: {metrics['query_loss']:.4f}\n"
-            results_text += f"Shape Accuracy: {metrics['shape_accuracy']:.4f}\n"
-            results_text += f"Grid Accuracy: {metrics['grid_accuracy']:.4f}\n"
-            results_text += f"Overall Accuracy: {metrics['overall_accuracy']:.4f}\n"
-            results_text += f"Sample Exact Accuracy: {metrics['sample_exact_accuracy']:.4f}\n"
+    if results is not None:
+        # Training results
+        if 'epoch_accuracies' in results and results['epoch_accuracies']:
+            last_epoch = results['epoch_accuracies'][-1]
+            results_text += "Training Results (Last Epoch):\n"
+            results_text += f"Shape Accuracy: {last_epoch['shape_accuracy']:.4f}\n"
+            results_text += f"Grid Accuracy: {last_epoch['grid_accuracy']:.4f}\n"
+            results_text += f"Overall Accuracy: {last_epoch['overall_accuracy']:.4f}\n"
+            results_text += f"Sample Exact Accuracy: {last_epoch['sample_exact_accuracy']:.4f}\n\n"
+        
+        # Evaluation results (if embedded in training results)
+        if 'evaluation_results' in results:
+            results_text += "Evaluation Results:\n"
+            for key in results['evaluation_results']:
+                metrics = results['evaluation_results'][key]['metrics']
+                results_text += f"\nKey {key}:\n"
+                results_text += f"Support Loss: {metrics['support_loss']:.4f}\n"
+                results_text += f"Query Loss: {metrics['query_loss']:.4f}\n"
+                results_text += f"Shape Accuracy: {metrics['shape_accuracy']:.4f}\n"
+                results_text += f"Grid Accuracy: {metrics['grid_accuracy']:.4f}\n"
+                results_text += f"Overall Accuracy: {metrics['overall_accuracy']:.4f}\n"
+                results_text += f"Sample Exact Accuracy: {metrics['sample_exact_accuracy']:.4f}\n"
+    else:
+        results_text += "No training results available.\n"
+        results_text += "Only model parameters are shown.\n\n"
+        results_text += "This could be because:\n"
+        results_text += "• Training hasn't been run yet\n"
+        results_text += "• Results file is missing or corrupted\n"
+        results_text += "• Only evaluation has been performed\n"
     
     plt.text(0.05, 0.95, results_text, transform=plt.gca().transAxes,
              verticalalignment='top', fontfamily='monospace', fontsize=10)
@@ -772,4 +1053,9 @@ def plot_model_summary(results, model_params):
     
     plt.suptitle('Model Summary and Results', fontsize=16, y=0.95)
     plt.tight_layout()
-    plt.show()
+    if save_dir:
+        plt.savefig(os.path.join(save_dir, 'model_summary.png'), dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"Model summary plot saved to {save_dir}/model_summary.png")
+    else:
+        plt.show()

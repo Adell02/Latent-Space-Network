@@ -30,7 +30,7 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed
         input_seq = input_seq.to(device)
         target_seq = target_seq.to(device)
 
-        with torch.cuda.amp.autocast(enabled=use_mixed_precision):
+        with torch.amp.autocast(device_type=device.type, enabled=use_mixed_precision):
             # Pass beta from global settings (or training_settings directly)
             loss, shape_loss_comp, grid_loss_comp, kl_loss_comp = compute_loss(model, input_seq, target_seq, beta=BETA, return_components=True)
             loss = loss / gradient_accumulation_steps
@@ -216,6 +216,11 @@ def main_training(file_store_name):
         'losses_gradient_ascent': []
     }
 
+    # Save initial settings and model parameters
+    logger.info("Saving initial model parameters and settings...")
+    print("Saving initial model parameters and settings...")
+    save_results(results, run_dir)
+
     print("Starting training loop...")
     for epoch in range(NUM_EPOCHS):
         logger.info("\\n" + "=" * 80)
@@ -322,21 +327,36 @@ def main_training(file_store_name):
         logger.info(f"Epoch {epoch+1} Accuracy -- Shape: {epoch_shape_accuracy:.4f}, Grid: {epoch_grid_accuracy:.4f}, Overall: {epoch_overall_accuracy:.4f}, Sample Exact: {sample_level_accuracy:.4f}")
         print(f"Epoch {epoch+1} Accuracy: Shape: {epoch_shape_accuracy:.4f}, Grid: {epoch_grid_accuracy:.4f}, Overall: {epoch_overall_accuracy:.4f}, Sample Exact: {sample_level_accuracy:.4f}")
 
-        # model.train() # Already called at the start of train_model function for the next epoch
+        model.train() # Already called at the start of train_model function for the next epoch
 
-        if (epoch + 1) % training_settings.get('save_checkpoint_interval', 50) == 0 or (epoch + 1) == NUM_EPOCHS : # Save more frequently or based on setting
-            logger.info(f"Saving checkpoint at epoch {epoch+1}...")
-            save_checkpoint(model, optimizer, epoch + 1, avg_loss, run_dir) # Save epoch as 1-indexed
-            print(f"Checkpoint saved at epoch {epoch+1}.")
+        # Save checkpoint and results at regular intervals or at the end
+        save_interval = training_settings.get('save_checkpoint_interval', 50)
+        should_save = (epoch + 1) % save_interval == 0 or (epoch + 1) == NUM_EPOCHS
+        
+        if should_save:
+            logger.info(f"Saving checkpoint and results at epoch {epoch+1}...")
+            print(f"Saving checkpoint and results at epoch {epoch+1}...")
+            
+            # Save checkpoint
+            save_checkpoint(model, optimizer, epoch + 1, avg_loss, run_dir)
+            
+            # Save updated results (this will overwrite previous results.pkl with current progress)
+            save_results(results, run_dir)
+            
+            logger.info(f"Checkpoint and results saved at epoch {epoch+1}.")
+            print(f"Checkpoint and results saved at epoch {epoch+1}.")
 
     print("Training complete. Starting final evaluation on the dataloader (can be train or val)...")
     model.eval()
-    # Final evaluation loop (similar to per-epoch evaluation but maybe on a dedicated test set if available)
-    # For now, it re-uses the main dataloader for collecting final latent representations.
-    # This part is mostly for collecting latent variables and reconstructions.
+    
+    # Final evaluation loop to collect latent representations and reconstructions
+    # This is for collecting final latent variables and reconstructions.
+    # Limit the number of batches processed to avoid memory issues
     final_eval_batch_count = 0
-    for batch_input, batch_target in dataloader: # Consider using a different dataloader for final eval if needed
-        final_eval_batch_count +=1
+    max_eval_batches = 20  # Limit to save memory
+    
+    for batch_input, batch_target in dataloader:
+        final_eval_batch_count += 1
         batch_input = batch_input.to(device)
         batch_target = batch_target.to(device)
         
@@ -344,8 +364,9 @@ def main_training(file_store_name):
         if OPTIMIZE_Z_INFERENCE:
             z, losses = get_optimized_z(model, batch_input, batch_target, 
                                         context='inference')
-            # if losses is not None and isinstance(results.get('losses_gradient_ascent'), list):
-            #    results['losses_gradient_ascent'].append(losses) # Decide if needed for final eval too
+            # Get mu and log_var for storage
+            with torch.no_grad():
+                mu, log_var = model.encoder(batch_input, batch_target)
         else:
             with torch.no_grad():
                 mu, log_var = model.encoder(batch_input, batch_target)
@@ -353,30 +374,37 @@ def main_training(file_store_name):
         
         with torch.no_grad(): # Ensure no grads for decoder pass
             shape_logits, grid_logits = model.decoder(z, batch_input, target_seq=batch_target) # Using target_seq for reconstruction eval
+            
             # Store only a subset of these potentially large tensors if memory is an issue
             if isinstance(results.get('latent_mus'), list):
-                 results['latent_mus'].append(mu.cpu().numpy().tolist() if 'mu' in locals() else [])
+                mu_np = mu.cpu().numpy() if isinstance(mu, torch.Tensor) else mu
+                results['latent_mus'].append(mu_np.tolist())
             if isinstance(results.get('latent_log_vars'), list):
-                 results['latent_log_vars'].append(log_var.cpu().numpy().tolist() if 'log_var' in locals() else [])
+                log_var_np = log_var.cpu().numpy() if isinstance(log_var, torch.Tensor) else log_var
+                results['latent_log_vars'].append(log_var_np.tolist())
             if isinstance(results.get('latent_zs'), list):
-                 results['latent_zs'].append(z.cpu().numpy().tolist())
-            if isinstance(results.get('reconstructions'), list):
-                 results['reconstructions'].append(
-                     (shape_logits.cpu().numpy().tolist(), grid_logits.cpu().numpy().tolist())
-                 )
+                z_np = z.cpu().numpy() if isinstance(z, torch.Tensor) else z
+                results['latent_zs'].append(z_np.tolist())
+            
+            # Store only one reconstruction per batch to save memory
+            if isinstance(results.get('reconstructions'), list) and len(results['reconstructions']) < 20:
+                results['reconstructions'].append({
+                    'input': batch_input[0].cpu().numpy().tolist(),
+                    'target': batch_target[0].cpu().numpy().tolist(),
+                    'reconstruction': (shape_logits[0].cpu().numpy().tolist(), grid_logits[0].cpu().numpy().tolist())
+                })
+        
         print(f"Final evaluation: Processed batch {final_eval_batch_count}/{len(dataloader)}")
-        if final_eval_batch_count > 20 and len(dataloader)>20 : # Limit stored reconstructions for large datasets
+        
+        # Limit stored reconstructions for large datasets
+        if final_eval_batch_count >= max_eval_batches:
             print(f"Limiting stored latent vars/reconstructions to first {final_eval_batch_count} batches to save memory.")
             break
 
-    print(json.dumps(results, indent=2))
-    save_results(results, run_dir) # save_results now handles JSON directly if modified, or save a separate JSON here
-    # Example of saving the main results dictionary to JSON (ensure tensors are converted to lists/numbers)
-    try:
-        # save_training_json(results, run_dir) # If you created this function
-        pass # The save_results in model_utils.py should be updated or a new json save function added
-    except Exception as e:
-        logger.error(f"Could not save results as JSON: {e}")
+    # Final save of complete results
+    logger.info("Saving final complete results...")
+    print("Saving final complete results...")
+    save_results(results, run_dir)
 
     print("Results saved in:", run_dir)
     return results, model

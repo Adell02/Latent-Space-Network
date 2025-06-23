@@ -1,37 +1,34 @@
 {
     "data_settings": {
         "training_keys": [
-            "00d62c1b", 
-            "1cf80156", 
-            "25d8a9c8", 
-            "0a938d79", 
-            "74dd1130"
+            "pattern_task"
         ],
         "training_seed": 42,
         "eval_seed": 1,
-        "n": 100,
+        "n": 500,
         "run_base_dir": "runs_re_arc"
     },
     "model_architecture": {
-        "latent_dim": 128,
-        "hidden_dim": 64,
-        "num_layers": 4,
-        "num_heads": 8,
-        "dropout": 0.15,
+        "num_encoders": 4,
+        "latent_dim": 16,
+        "hidden_dim": 96,
+        "num_layers": 2,
+        "num_heads": 6,
+        "dropout": 1e-6,
         "max_length": 902,
         "encoder_max_length": 1805,
         "decoder_max_length": 902,
         "use_gradient_checkpointing": true
     },
     "training_settings": {
-        "num_epochs": 10,
-        "batch_size": 16,
+        "num_epochs": 24,
+        "batch_size": 128,
         "gradient_accumulation_steps": 2,
-        "learning_rate": 0.0001,
+        "learning_rate": 0.0004,
         "optimizer_weight_decay": 1e-05,
-        "beta": 0.1,
+        "beta": 1e-2,
         "use_mixed_precision": true,
-        "save_checkpoint_interval": 1,
+        "save_checkpoint_interval": 2,
         "learning_rate_scheduler": {
             "type": "none",
             "warmup_epochs": 20,
@@ -40,13 +37,13 @@
     },
     "latent_optimization": {
         "training": {
-            "enabled": false,
+            "enabled": true,
             "num_steps": 1,
             "learning_rate": 0.1
         },
         "inference": {
             "enabled": true,
-            "num_steps": 100,
+            "num_steps": 150,
             "learning_rate": 0.1
         },
         "method": "gradient",
@@ -63,10 +60,12 @@
         }
     },
     "evaluation_settings": {
-        "eval_keys": ["1cf80156"],
+        "eval_keys": [
+            "pattern_task"
+        ],
         "eval_n_samples": 2,
         "eval_n_queries": 100,
-        "eval_epoch": 10,
-        "visualize_n_values": 2
+        "eval_epoch": 24,
+        "visualize_n_values": 5
     }
 }

@@ -4,15 +4,243 @@ from tqdm import tqdm
 import pickle
 import os
 import numpy as np
+import sys
+
+# Add the parent directory to the path for imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.model_utils import set_seed, prepare_dataloader
 from re_arc.main import generate_and_process_tasks
-from utils.settings_manager import settings
-from utils.latent_functions import get_optimized_z
-from models.base_model import compute_loss
+# Use local multiencoder settings manager
+import Multiencoder_LPN.settings_manager as settings
+from models.multi_encoder_lpn import multinomial_loss, gaussian_poe
+
+# Get the local settings instance
+# settings is already imported directly
 
 # Maximum batch size to avoid GPU memory issues
 MAX_BATCH_SIZE = 16
+
+##############################
+# Multi-Encoder Latent Optimization Functions
+##############################
+
+def multi_encoder_optimize_latent_z(multi_encoder_model, input_seq, target_seq, num_steps=None, lr=None, return_trajectory=False):
+    """
+    Optimize latent z for multi-encoder model using gradient ascent.
+    
+    Args:
+        multi_encoder_model: MultiEncoderLPN model
+        input_seq: Input sequence tensor
+        target_seq: Target sequence tensor
+        num_steps: Number of optimization steps
+        lr: Learning rate
+        return_trajectory: Whether to return optimization trajectory
+        
+    Returns:
+        z: Optimized latent vector
+        losses: List of losses during optimization
+        trajectory: Optimization trajectory (if requested)
+    """
+    latent_optimization = settings.settings.get_latent_optimization()
+    if num_steps is None:
+        num_steps = latent_optimization['inference']['num_steps']
+    if lr is None:
+        lr = latent_optimization['inference']['learning_rate']
+    
+    num_encoders = len(multi_encoder_model.encoders)
+    batch_size = input_seq.size(0)
+    
+    # Create identical views for all encoders (inference behavior)
+    encoder_views = [(input_seq, target_seq) for _ in range(num_encoders)]
+    
+    # Get initial latent parameters from the multi-encoder model
+    with torch.no_grad():
+        (_, _), mu_star, logvar_star = multi_encoder_model(encoder_views, training=False, sample_latent=False)
+        initial_z = mu_star.detach().clone()  # Use mu* as initial z for inference
+    
+    # Compute initial loss before optimization (step 0)
+    with torch.no_grad():
+        shape_logits_init, grid_logits_init = multi_encoder_model.decoder(initial_z, input_seq, target_seq=target_seq)
+        shape_targets = target_seq[:, 900:902].long()
+        shape_loss_init = F.cross_entropy(shape_logits_init.reshape(-1, 31), shape_targets.reshape(-1))
+        
+        # Compute initial grid loss
+        grid_loss_list_init = []
+        for i in range(batch_size):
+            tgt_rows = int(target_seq[i, 900].item())
+            tgt_cols = int(target_seq[i, 901].item())
+            active_pixels = tgt_rows * tgt_cols
+            if active_pixels > 0:
+                loss_i = F.cross_entropy(grid_logits_init[i, :active_pixels],
+                                       target_seq[i, :active_pixels].long())
+                grid_loss_list_init.append(loss_i)
+
+        grid_loss_init = sum(grid_loss_list_init) / len(grid_loss_list_init) if grid_loss_list_init else \
+                       torch.tensor(0.0, device=input_seq.device)
+        initial_loss = (shape_loss_init + grid_loss_init).item()
+
+    # Detach z from the graph and enable gradients on it
+    z = initial_z.detach().requires_grad_(True)
+
+    # Create an optimizer for z
+    optimizer_z = torch.optim.Adam([z], lr=lr)
+
+    # Track losses and z changes - start with initial loss
+    losses = [initial_loss]
+    z_changes = []
+    
+    # Track trajectory information if requested
+    trajectory = {
+        'z_vectors': [initial_z.detach().clone()],
+        'losses': [initial_loss],
+        'encoder_mu': mu_star.detach().clone(),
+        'encoder_log_var': logvar_star.detach().clone(),
+        'initial_z': initial_z.detach().clone()
+    } if return_trajectory else None
+
+    print(f"    Multi-encoder gradient ascent: {num_steps} steps, LR: {lr}, Batch size: {batch_size}")
+    print(f"    Initial loss: {initial_loss:.4f}")
+
+    # Create progress bar for gradient ascent steps
+    pbar = tqdm(range(num_steps), desc="Multi-encoder gradient ascent", unit="step", leave=False)
+
+    for step in pbar:
+        optimizer_z.zero_grad()
+        # Decode using the current z
+        shape_logits, grid_logits = multi_encoder_model.decoder(z, input_seq, target_seq=target_seq)
+
+        # Compute loss on the shape tokens
+        shape_targets = target_seq[:, 900:902].long()
+        shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
+
+        # Compute grid loss
+        grid_loss_list = []
+        for i in range(batch_size):
+            tgt_rows = int(target_seq[i, 900].item())
+            tgt_cols = int(target_seq[i, 901].item())
+            active_pixels = tgt_rows * tgt_cols
+            if active_pixels > 0:
+                loss_i = F.cross_entropy(grid_logits[i, :active_pixels],
+                                       target_seq[i, :active_pixels].long())
+                grid_loss_list.append(loss_i)
+
+        grid_loss = sum(grid_loss_list) / len(grid_loss_list) if grid_loss_list else \
+                   torch.tensor(0.0, device=input_seq.device, requires_grad=True)
+
+        reconstruction_loss = shape_loss + grid_loss
+        losses.append(reconstruction_loss.item())
+
+        # Track how much z has changed
+        z_delta = torch.norm(z - initial_z).item()
+        z_changes.append(z_delta)
+
+        # Update progress bar with current metrics
+        pbar.set_postfix({
+            'loss': f'{reconstruction_loss.item():.4f}',
+            'Δz': f'{z_delta:.4f}',
+            'shape': f'{shape_loss.item():.4f}',
+            'grid': f'{grid_loss.item():.4f}'
+        })
+
+        reconstruction_loss.backward()
+        torch.nn.utils.clip_grad_norm_(z, 1.0)
+        optimizer_z.step()
+
+        # Store trajectory information after optimization step
+        if return_trajectory:
+            trajectory['z_vectors'].append(z.detach().clone())
+            trajectory['losses'].append(reconstruction_loss.item())
+
+    pbar.close()
+
+    # Final change in Z
+    final_z_change = torch.norm(z - initial_z).item()
+    loss_improvement = losses[0] - losses[-1]
+    
+    print(f"    ✓ Multi-encoder optimization complete: "
+          f"Loss {losses[0]:.4f} → {losses[-1]:.4f} "
+          f"(Δ: {loss_improvement:+.4f}), "
+          f"Z change: {final_z_change:.4f}")
+
+    if return_trajectory:
+        return z, losses, trajectory
+    else:
+        return z, losses
+
+
+def multi_encoder_get_optimized_z(multi_encoder_model, input_seq, target_seq, num_steps=None, lr=None, context='inference', return_trajectory=False):
+    """
+    Get optimized z for multi-encoder model - wrapper function to handle different optimization methods.
+    
+    Args:
+        multi_encoder_model: MultiEncoderLPN model
+        input_seq: Input sequence tensor
+        target_seq: Target sequence tensor
+        num_steps: Number of optimization steps
+        lr: Learning rate
+        context: 'training' or 'inference' context
+        return_trajectory: Whether to return optimization trajectory
+        
+    Returns:
+        z: Optimized latent vector
+        losses: List of losses during optimization
+        trajectory: Optimization trajectory (if requested)
+    """
+    latent_optimization = settings.settings.get_latent_optimization()
+    
+    # Use context-specific parameters if not provided
+    if context == 'training':
+        context_settings = latent_optimization['training']
+    else:
+        context_settings = latent_optimization['inference']
+    
+    if num_steps is None:
+        num_steps = context_settings['num_steps']
+    if lr is None:
+        lr = context_settings['learning_rate']
+    
+    # For now, only implement gradient-based optimization for multi-encoder
+    # Could add evolutionary and voronoi methods later if needed
+    method = latent_optimization.get('method', 'gradient_ascent')
+    
+    if method == 'gradient_ascent':
+        return multi_encoder_optimize_latent_z(
+            multi_encoder_model, input_seq, target_seq, 
+            num_steps=num_steps, lr=lr, return_trajectory=return_trajectory
+        )
+    else:
+        # Fallback to gradient ascent for unsupported methods
+        print(f"Warning: Method '{method}' not implemented for multi-encoder, using gradient_ascent")
+        return multi_encoder_optimize_latent_z(
+            multi_encoder_model, input_seq, target_seq, 
+            num_steps=num_steps, lr=lr, return_trajectory=return_trajectory
+        )
+
+##############################
+# Multi-Encoder Data Preparation for Inference
+##############################
+
+def create_multi_encoder_inference_batches(input_sequences, output_sequences, num_encoders, batch_size):
+    """
+    Create batches for multi-encoder inference where all encoders get identical samples.
+    For inference: K identical copies of the single (x,y₀) pair for each encoder.
+    """
+    total_samples = len(input_sequences)
+    batches = []
+    
+    for i in range(0, total_samples, batch_size):
+        end_idx = min(i + batch_size, total_samples)
+        
+        batch_inputs = torch.tensor(input_sequences[i:end_idx]).float()
+        batch_outputs = torch.tensor(output_sequences[i:end_idx]).float()
+        
+        # Create identical views for all encoders (same data for inference)
+        encoder_views = [(batch_inputs, batch_outputs) for _ in range(num_encoders)]
+        
+        batches.append((encoder_views, end_idx - i))
+    
+    return batches
 
 ##############################
 # Encode Training Sequences
@@ -24,7 +252,7 @@ def encode_training_sequences(model, run_dir, device='cuda', max_samples=500, ba
     to generate latent representations for background visualization.
     
     Args:
-        model: Trained model to use for encoding
+        model: Trained multi-encoder model to use for encoding
         run_dir: Directory containing results.pkl
         device: Device to run encoding on
         max_samples: Maximum number of samples to encode (None for all)
@@ -64,53 +292,52 @@ def encode_training_sequences(model, run_dir, device='cuda', max_samples=500, ba
             output_sequences = output_sequences[:max_samples]
             print(f"Limited to {max_samples} samples for memory efficiency")
         
-        # Encode sequences using the trained model
+        # Get number of encoders from model
+        num_encoders = len(model.encoders)
+        print(f"Using {num_encoders} encoders for inference")
+        
+        # Create inference batches for multi-encoder model
+        inference_batches = create_multi_encoder_inference_batches(
+            input_sequences, output_sequences, num_encoders, batch_size
+        )
+        
+        # Encode sequences using the trained multi-encoder model
         model.eval()
         latent_mus = []
         latent_log_vars = []
         latent_zs = []
         initial_losses = []
         
-        print(f"Encoding {len(input_sequences)} training samples using trained model...")
+        print(f"Encoding {len(input_sequences)} training samples using trained multi-encoder model...")
         
         with torch.no_grad():
-            for i in tqdm(range(0, len(input_sequences), batch_size), desc="Encoding training samples"):
-                end_idx = min(i + batch_size, len(input_sequences))
+            for encoder_views, actual_batch_size in tqdm(inference_batches, desc="Encoding training samples"):
+                # Move all encoder views to device
+                encoder_views_gpu = []
+                for input_seq, target_seq in encoder_views:
+                    encoder_views_gpu.append((input_seq.to(device), target_seq.to(device)))
                 
-                # Convert to tensors
-                batch_input = torch.tensor(input_sequences[i:end_idx]).float().to(device)
-                batch_output = torch.tensor(output_sequences[i:end_idx]).float().to(device)
+                # Forward pass through multi-encoder model (inference mode)
+                (shape_logits, grid_logits), mu, log_var = model(encoder_views_gpu, training=False, sample_latent=False)
+                z = mu  # Use mean for deterministic encoding
                 
-                # Encode (equivalent to initial step of trajectory)
-                mu, log_var = model.encoder(batch_input, batch_output)
-                z = model.reparameterize(mu, log_var)
+                # Use the first encoder's target for loss computation (they're all identical in inference)
+                target_seq = encoder_views_gpu[0][1]
                 
                 # Compute loss for this encoded latent (equivalent to initial trajectory loss)
-                shape_logits, grid_logits = model.decoder(z, batch_input, target_seq=batch_output)
-                shape_targets = batch_output[:, 900:902].long()
-                shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
-                
-                # Compute grid loss
-                grid_loss_list = []
-                for j in range(batch_input.size(0)):
-                    tgt_rows = int(batch_output[j, 900].item())
-                    tgt_cols = int(batch_output[j, 901].item())
-                    active_pixels = tgt_rows * tgt_cols
-                    if active_pixels > 0:
-                        loss_j = F.cross_entropy(grid_logits[j, :active_pixels],
-                                               batch_output[j, :active_pixels].long())
-                        grid_loss_list.append(loss_j)
-
-                grid_loss = sum(grid_loss_list) / len(grid_loss_list) if grid_loss_list else \
-                           torch.tensor(0.0, device=batch_input.device)
-                
-                batch_losses = (shape_loss + grid_loss).item()
+                batch_losses = multinomial_loss(
+                    (shape_logits, grid_logits), 
+                    target_seq, 
+                    beta=0.0,  # Don't include KL term for loss computation
+                    mu=mu, 
+                    logvar=log_var
+                ).item()
                 
                 # Store equivalent information to trajectory
                 latent_mus.append(mu.cpu().numpy())
                 latent_log_vars.append(log_var.cpu().numpy())
                 latent_zs.append(z.cpu().numpy())
-                initial_losses.extend([batch_losses] * batch_input.size(0))  # Loss per sample
+                initial_losses.extend([batch_losses / actual_batch_size] * actual_batch_size)  # Loss per sample
         
         # Concatenate all batches
         all_latent_mus = np.concatenate(latent_mus, axis=0)
@@ -132,7 +359,8 @@ def encode_training_sequences(model, run_dir, device='cuda', max_samples=500, ba
                 'max_samples_limit': max_samples,
                 'batch_size': batch_size,
                 'device': str(device),
-                'has_initial_losses': True
+                'has_initial_losses': True,
+                'num_encoders': num_encoders
             }
         }
         
@@ -235,10 +463,10 @@ def main_test(model, keys, n_samples, n_queries, seed, device='cuda'):
 
 def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda'):
     """
-    Evaluate model performance on dataloaders.
+    Evaluate multi-encoder model performance on dataloaders.
     
     Args:
-        model: The trained model to evaluate
+        model: The trained multi-encoder model to evaluate
         samples_dataloader: DataLoader containing support samples for latent optimization
         queries_dataloader: DataLoader containing query samples for evaluation
         device: Device to run evaluation on
@@ -246,9 +474,11 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
     Returns:
         dict: Dictionary containing evaluation metrics and reconstruction results
     """
-    latent_optimization = settings.get_latent_optimization()
+    latent_optimization = settings.settings.get_latent_optimization()
     optimize_z_inference = latent_optimization['inference']['enabled']
+    num_encoders = len(model.encoders)
     
+    print(f"Multi-encoder evaluation with {num_encoders} encoders")
     print(f"Latent optimization enabled: {optimize_z_inference}")
     if optimize_z_inference:
         print(f"Optimization steps: {latent_optimization['inference']['num_steps']}")
@@ -291,7 +521,7 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
             print(f"\nOptimizing latent space for support batch {batch_idx+1} ({batch_size} samples)...")
             
             # Request trajectory information during optimization
-            current_z_for_this_sample_batch, losses_opt, trajectory = get_optimized_z(
+            current_z_for_this_sample_batch, losses_opt, trajectory = multi_encoder_get_optimized_z(
                 model, batch_input_s, batch_target_s, context='inference', return_trajectory=True
             )
             
@@ -336,21 +566,33 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
                 print(f"Warning: No optimization losses returned for batch {batch_idx+1}")
         else:
             with torch.no_grad():
-                mu, log_var = model.encoder(batch_input_s, batch_target_s)
-                current_z_for_this_sample_batch = model.reparameterize(mu, log_var)
+                # Create identical encoder views for multi-encoder model (inference mode)
+                encoder_views = [(batch_input_s, batch_target_s) for _ in range(num_encoders)]
+                (_, _), mu, log_var = model(encoder_views, training=False, sample_latent=False)
+                current_z_for_this_sample_batch = mu  # Use mean for deterministic inference
                 print(f"Using encoder z (no optimization) for batch {batch_idx+1}")
         
         # Store z vectors from all support samples
         if current_z_for_this_sample_batch is not None:
             all_support_z_vectors.append(current_z_for_this_sample_batch)
 
-        # Calculate support loss
-        s_loss_val = compute_loss(model, batch_input_s, batch_target_s)
-        support_losses.append(s_loss_val.item())
+        # Calculate support loss using multi-encoder model
+        with torch.no_grad():
+            encoder_views = [(batch_input_s, batch_target_s) for _ in range(num_encoders)]
+            (shape_logits, grid_logits), mu, log_var = model(encoder_views, training=False, sample_latent=False)
+            s_loss_val = multinomial_loss(
+                (shape_logits, grid_logits), 
+                batch_target_s, 
+                beta=0.0,  # Don't include KL term for evaluation
+                mu=mu, 
+                logvar=log_var
+            )
+            support_losses.append(s_loss_val.item())
 
         # Store reconstructions with their corresponding inputs/outputs
         if current_z_for_this_sample_batch is not None:
             with torch.no_grad():
+                # Use the decoder directly with the optimized z
                 shape_logits_s, grid_logits_s = model.decoder(current_z_for_this_sample_batch, batch_input_s, target_seq=batch_target_s)
                 # Store each sample's reconstruction with its input and target
                 for i in range(batch_input_s.size(0)):
@@ -420,8 +662,16 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
             
             shape_logits, grid_logits = model.decoder(z_query_expanded, batch_input_q, target_seq=batch_target_q)
             
-            # Compute query loss
-            q_loss_val = compute_loss(model, batch_input_q, batch_target_q)
+            # Compute query loss using multi-encoder model
+            encoder_views = [(batch_input_q, batch_target_q) for _ in range(num_encoders)]
+            (_, _), mu_q, log_var_q = model(encoder_views, training=False, sample_latent=False)
+            q_loss_val = multinomial_loss(
+                (shape_logits, grid_logits), 
+                batch_target_q, 
+                beta=0.0,  # Don't include KL term for evaluation
+                mu=mu_q, 
+                logvar=log_var_q
+            )
             query_losses.append(q_loss_val.item())
             
             # Store each query's reconstruction with its input and target
