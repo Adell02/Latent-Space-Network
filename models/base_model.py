@@ -3,7 +3,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import sys
-from typing import Tuple
+from typing import Tuple, List, Union
+import copy
 
 # add the parent directory to the path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -30,11 +31,16 @@ if TRAINING_KEYS is None or not TRAINING_KEYS[0]:
 TRAINING_SEED = data_settings['training_seed']
 N_EXAMPLES_PER_TASK = data_settings['n']
 
-# Model architecture settings
+# Model architecture settings with backward compatibility
+NUM_ENCODERS = model_architecture.get('num_encoders', 1)
 LATENT_DIM = model_architecture['latent_dim']
-HIDDEN_DIM = model_architecture['hidden_dim']
-NUM_LAYERS = model_architecture['num_layers']
-NUM_HEADS = model_architecture['num_heads']
+# Support both old and new parameter names
+ENCODER_HIDDEN_DIM = model_architecture.get('encoder_hidden_dim', model_architecture.get('hidden_dim', 96))
+DECODER_HIDDEN_DIM = model_architecture.get('decoder_hidden_dim', model_architecture.get('hidden_dim', 96))
+ENCODER_LAYERS = model_architecture.get('encoder_layers', model_architecture.get('num_layers', 2))
+DECODER_LAYERS = model_architecture.get('decoder_layers', model_architecture.get('num_layers', 2))
+ENCODER_HEADS = model_architecture.get('encoder_heads', model_architecture.get('num_heads', 6))
+DECODER_HEADS = model_architecture.get('decoder_heads', model_architecture.get('num_heads', 6))
 DROPOUT = model_architecture['dropout']
 MAX_LENGTH = model_architecture['max_length']
 ENCODER_MAX_LENGTH = model_architecture['encoder_max_length']
@@ -56,13 +62,33 @@ OPTIMIZE_Z_INFERENCE_LR = latent_optimization['inference']['learning_rate']
 
 set_seed(TRAINING_SEED)
 
+# -------------------------------------------------
+#  Low‑level helper: diagonal‑Gaussian PoE
+# -------------------------------------------------
+
+def gaussian_poe(mu: torch.Tensor, logvar: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Multiply K diagonal Gaussians.
+    Args
+    -----
+    mu      : (K, B, D)
+    logvar  : (K, B, D)
+    Returns
+    -------
+    fused_mu, fused_logvar : (B, D)
+    """
+    precision   = torch.exp(-logvar)            # Σ⁻¹
+    fused_var   = 1. / precision.sum(0)         # (B,D)
+    fused_mu    = fused_var * (precision * mu).sum(0)
+    fused_logvar = fused_var.log()
+    return fused_mu, fused_logvar
+
 ##############################
 # Define Model Components
 ##############################
 
 class TransformerEncoder(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int, num_layers: int, num_heads: int,
-                 dropout: float = DROPOUT, max_length: int = ENCODER_MAX_LENGTH):
+    def __init__(self, input_dim: int, hidden_dim: int = ENCODER_HIDDEN_DIM, num_layers: int = ENCODER_LAYERS, 
+                 num_heads: int = ENCODER_HEADS, dropout: float = DROPOUT, max_length: int = ENCODER_MAX_LENGTH):
         super().__init__()
         # Embedding tables
         self.color_embedding = nn.Embedding(num_embeddings=10, embedding_dim=hidden_dim)
@@ -160,8 +186,8 @@ class TransformerEncoder(nn.Module):
         return mu, log_var
 
 class TransformerDecoder(nn.Module):
-    def __init__(self, output_dim: int, hidden_dim: int, num_layers: int, num_heads: int,
-                 dropout: float = DROPOUT):
+    def __init__(self, output_dim: int, hidden_dim: int = DECODER_HIDDEN_DIM, num_layers: int = DECODER_LAYERS, 
+                 num_heads: int = DECODER_HEADS, dropout: float = DROPOUT):
         super().__init__()
         self.hidden_dim = hidden_dim
 
@@ -273,65 +299,257 @@ class TransformerDecoder(nn.Module):
         shape_logits = self.shape_output(decoder_output[:, 900:902])
         return shape_logits, grid_logits
 
-class LatentProgramNetwork(nn.Module):
-    def __init__(self, input_dim: int = 1, latent_dim: int = LATENT_DIM, hidden_dim: int = HIDDEN_DIM,
-                 num_layers: int = NUM_LAYERS, num_heads: int = NUM_HEADS, dropout: float = DROPOUT,
-                 encoder_max_length: int = ENCODER_MAX_LENGTH, decoder_max_length: int = DECODER_MAX_LENGTH):
+# -------------------------------------------------
+#  Multi‑Encoder wrapper
+# -------------------------------------------------
+class MultiEncoderLPN(nn.Module):
+    """K‑encoder → PoE → single decoder."""
+
+    def __init__(
+        self,
+        num_encoders: int = NUM_ENCODERS,
+        *,
+        latent_dim: int = LATENT_DIM,
+        encoder_hidden_dim: int = ENCODER_HIDDEN_DIM,
+        decoder_hidden_dim: int = DECODER_HIDDEN_DIM,
+        encoder_layers: int = ENCODER_LAYERS,
+        decoder_layers: int = DECODER_LAYERS,
+        encoder_heads: int = ENCODER_HEADS,
+        decoder_heads: int = DECODER_HEADS,
+        dropout: float = DROPOUT,
+        encoder_max_length: int = ENCODER_MAX_LENGTH,
+        decoder_max_length: int = DECODER_MAX_LENGTH,
+    ) -> None:
         super().__init__()
         self.latent_dim = latent_dim
-        self.hidden_dim = hidden_dim
+        self.num_encoders = num_encoders
+        # ---- Create separate encoder instances for individual training ----
+        self.encoders = nn.ModuleList([
+            TransformerEncoder(1, encoder_hidden_dim, encoder_layers, encoder_heads, dropout, encoder_max_length)
+            for _ in range(num_encoders)
+        ])
+        self.decoder = TransformerDecoder(1, decoder_hidden_dim, decoder_layers, decoder_heads, dropout)
+
+    # -------------------------------------------------
+    #  Re‑parameterisation
+    # -------------------------------------------------
+    def _reparam(self, mu: torch.Tensor, logvar: torch.Tensor, sample: bool) -> torch.Tensor:
+        if not sample:
+            return mu
+        std = torch.exp(0.5 * logvar)
+        return mu + torch.randn_like(std) * std
+
+    # -------------------------------------------------
+    #  Forward methods for training and inference
+    # -------------------------------------------------
+    def forward_single_encoder(self, encoder_idx: int, input_seq: torch.Tensor, target_seq: torch.Tensor, 
+                              training: bool = True, sample_latent: bool = True) -> Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor]:
+        """Forward pass for a single encoder during individual training."""
+        assert 0 <= encoder_idx < self.num_encoders, f"encoder_idx {encoder_idx} out of range [0, {self.num_encoders})"
         
-        # Initialize components with device awareness
-        self.encoder = TransformerEncoder(input_dim, hidden_dim, num_layers, num_heads,
-                                        dropout, max_length=encoder_max_length)
-        self.decoder = TransformerDecoder(input_dim, hidden_dim, num_layers, num_heads, dropout)        
+        mu, logvar = self.encoders[encoder_idx](input_seq, target_seq)
+        z = self._reparam(mu, logvar, sample_latent and training)
+        shape_logits, grid_logits = self.decoder(z, input_seq, target_seq=target_seq)
+        return (shape_logits, grid_logits), mu, logvar
+
+    def forward(
+        self,
+        input_views: List[Tuple[torch.Tensor, torch.Tensor]],  # [(x,y), ...] len = K
+        *,
+        training: bool = True,
+        sample_latent: bool = True,
+        use_poe: bool = False,  # New parameter to control PoE usage
+    ) -> Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor]:
+        """Args
+        -----
+        input_views : during **training** K *different* (x,y) pairs from the same ARC task;
+                      during **inference** K *identical* copies of the single (x,y₀) pair.
+        use_poe : whether to use Product of Experts to combine encoders (inference mode)
+        """
+        K = len(self.encoders)
+        assert K == len(input_views), "#encoders ≠ #views"
+        
+        if use_poe:
+            # Inference mode: use PoE to combine all encoders
+            mu_list, logvar_list = [], []
+            for (enc, (x, y)) in zip(self.encoders, input_views):
+                μ, logσ2 = enc(x, y)
+                mu_list.append(μ)
+                logvar_list.append(logσ2)
+            mu_stack     = torch.stack(mu_list)        # (K,B,D)
+            logvar_stack = torch.stack(logvar_list)
+            mu_star, logvar_star = gaussian_poe(mu_stack, logvar_stack)
+            z = self._reparam(mu_star, logvar_star, sample_latent and training)
+            x0, y0 = input_views[0]                   # decoder always conditions on *one* input grid
+            # Always provide target_seq for proper loss computation, even during inference
+            shape_logits, grid_logits = self.decoder(z, x0, target_seq=y0)
+            return (shape_logits, grid_logits), mu_star, logvar_star
+        else:
+            # Training mode: use only the first encoder (or could be specified which one)
+            # This assumes input_views[0] corresponds to the current encoder being trained
+            x0, y0 = input_views[0]
+            mu, logvar = self.encoders[0](x0, y0)  # Use first encoder by default
+            z = self._reparam(mu, logvar, sample_latent and training)
+            shape_logits, grid_logits = self.decoder(z, x0, target_seq=y0)
+            return (shape_logits, grid_logits), mu, logvar
+
+class LatentProgramNetwork(nn.Module):
+    """Unified LPN that supports both single and multi-encoder configurations."""
+    
+    def __init__(self, input_dim: int = 1, latent_dim: int = LATENT_DIM, 
+                 encoder_hidden_dim: int = ENCODER_HIDDEN_DIM, decoder_hidden_dim: int = DECODER_HIDDEN_DIM,
+                 encoder_layers: int = ENCODER_LAYERS, decoder_layers: int = DECODER_LAYERS,
+                 encoder_heads: int = ENCODER_HEADS, decoder_heads: int = DECODER_HEADS,
+                 dropout: float = DROPOUT, encoder_max_length: int = ENCODER_MAX_LENGTH, 
+                 decoder_max_length: int = DECODER_MAX_LENGTH, num_encoders: int = NUM_ENCODERS):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.num_encoders = num_encoders
+        
+        if num_encoders == 1:
+            # Single encoder mode
+            self.encoder = TransformerEncoder(input_dim, encoder_hidden_dim, encoder_layers, encoder_heads,
+                                            dropout, max_length=encoder_max_length)
+            self.decoder = TransformerDecoder(input_dim, decoder_hidden_dim, decoder_layers, decoder_heads, dropout)
+            self.is_multi_encoder = False
+        else:
+            # Multi-encoder mode
+            self.multi_encoder = MultiEncoderLPN(
+                num_encoders=num_encoders,
+                latent_dim=latent_dim,
+                encoder_hidden_dim=encoder_hidden_dim,
+                decoder_hidden_dim=decoder_hidden_dim,
+                encoder_layers=encoder_layers,
+                decoder_layers=decoder_layers,
+                encoder_heads=encoder_heads,
+                decoder_heads=decoder_heads,
+                dropout=dropout,
+                encoder_max_length=encoder_max_length,
+                decoder_max_length=decoder_max_length
+            )
+            self.is_multi_encoder = True
     
     def reparameterize(self, mu: torch.Tensor, log_var: torch.Tensor) -> torch.Tensor:
         std = torch.exp(0.5 * log_var)
         eps = torch.randn_like(std)
         return mu + eps * std
 
-    def forward(self, input_seq: torch.Tensor, target_seq: torch.Tensor) -> Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor]:
-        mu, log_var = self.encoder(input_seq, target_seq)
-        z = self.reparameterize(mu, log_var)
-        shape_logits, grid_logits = self.decoder(z, input_seq, target_seq=target_seq)
-        return (shape_logits, grid_logits), mu, log_var
+    def forward(self, input_seq: torch.Tensor, target_seq: torch.Tensor, encoder_idx: int = None) -> Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor]:
+        if self.is_multi_encoder:
+            if encoder_idx is not None:
+                # Individual encoder training mode
+                return self.multi_encoder.forward_single_encoder(encoder_idx, input_seq, target_seq, training=True, sample_latent=True)
+            else:
+                # Inference mode with PoE - create identical views for all encoders
+                input_views = [(input_seq, target_seq) for _ in range(self.num_encoders)]
+                return self.multi_encoder(input_views, training=False, sample_latent=False, use_poe=True)
+        else:
+            # Single encoder mode
+            mu, log_var = self.encoder(input_seq, target_seq)
+            z = self.reparameterize(mu, log_var)
+            shape_logits, grid_logits = self.decoder(z, input_seq, target_seq=target_seq)
+            return (shape_logits, grid_logits), mu, log_var
 
+# -------------------------------------------------
+#  Convenience loss wrapper (matches existing API)
+# -------------------------------------------------
 
-def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Tensor, beta: float = BETA, return_components: bool = False) -> torch.Tensor:
-    reconstruction, mu, log_var = model(input_seq, target_seq)
-    shape_logits, grid_logits = reconstruction
-
+def multinomial_loss(
+    logits: Tuple[torch.Tensor, torch.Tensor],  # (shape_logits, grid_logits)
+    target_seq: torch.Tensor,
+    *,
+    beta: float = BETA,
+    mu: torch.Tensor,
+    logvar: torch.Tensor,
+) -> torch.Tensor:
+    shape_logits, grid_logits = logits
     shape_targets = target_seq[:, 900:902].long()
     shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
-    
+
     batch_size = target_seq.size(0)
-    grid_loss_sum = 0.0
-    active_elements_count = 0 # Keep track of total active pixels across batch for correct averaging
+    grid_loss_sum, active = 0.0, 0
     for i in range(batch_size):
-        # Retrieve the target dimensions (active region) from the last two tokens.
-        tgt_rows = int(target_seq[i, 900].item())
-        tgt_cols = int(target_seq[i, 901].item())
-        active_pixels = tgt_rows * tgt_cols
+        r, c = map(int, target_seq[i, 900:902])
+        n_pix = r * c
+        if n_pix:
+            grid_loss_sum += F.cross_entropy(grid_logits[i, :n_pix], target_seq[i, :n_pix].long(), reduction='sum')
+            active += n_pix
+    grid_loss = grid_loss_sum / active if active else torch.tensor(0.0, device=target_seq.device)
+    recon = shape_loss + grid_loss
+    kl = 0.5 * torch.sum(mu.pow(2) + logvar.exp() - 1 - logvar) / mu.size(0)
+    return recon + beta * kl
 
-        if active_pixels > 0:
-            # Compute cross-entropy only over the active region. Sum losses for each sample.
-            loss_i = F.cross_entropy(grid_logits[i, :active_pixels], target_seq[i, :active_pixels].long(), reduction='sum')
-            grid_loss_sum += loss_i
-            active_elements_count += active_pixels
+def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Tensor, beta: float = BETA, return_components: bool = False, encoder_idx: int = None) -> torch.Tensor:
+    """
+    Compute loss for both single and multi-encoder models.
+    """
+    if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
+        # Multi-encoder model
+        reconstruction, mu, log_var = model(input_seq, target_seq, encoder_idx=encoder_idx)
+        shape_logits, grid_logits = reconstruction
+        
+        loss = multinomial_loss(
+            (shape_logits, grid_logits),
+            target_seq,
+            beta=beta,
+            mu=mu,
+            logvar=log_var
+        )
+        
+        if return_components:
+            # Compute individual components for logging
+            shape_targets = target_seq[:, 900:902].long()
+            shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
+            
+            batch_size = target_seq.size(0)
+            grid_loss_sum, active = 0.0, 0
+            for i in range(batch_size):
+                r, c = map(int, target_seq[i, 900:902])
+                n_pix = r * c
+                if n_pix:
+                    grid_loss_sum += F.cross_entropy(grid_logits[i, :n_pix], target_seq[i, :n_pix].long(), reduction='sum')
+                    active += n_pix
+            grid_loss = grid_loss_sum / active if active else torch.tensor(0.0, device=target_seq.device)
+            kl_loss = 0.5 * torch.sum(mu.pow(2) + log_var.exp() - 1 - log_var) / mu.size(0)
+            
+            return loss, shape_loss, grid_loss, kl_loss
+        
+        return loss
+    else:
+        # Single encoder model (original implementation)
+        reconstruction, mu, log_var = model(input_seq, target_seq)
+        shape_logits, grid_logits = reconstruction
 
-    # Average grid loss over all active pixels in the batch
-    grid_loss = grid_loss_sum / active_elements_count if active_elements_count > 0 else torch.tensor(0.0, device=input_seq.device)
+        shape_targets = target_seq[:, 900:902].long()
+        shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
+        
+        batch_size = target_seq.size(0)
+        grid_loss_sum = 0.0
+        active_elements_count = 0 # Keep track of total active pixels across batch for correct averaging
+        for i in range(batch_size):
+            # Retrieve the target dimensions (active region) from the last two tokens.
+            tgt_rows = int(target_seq[i, 900].item())
+            tgt_cols = int(target_seq[i, 901].item())
+            active_pixels = tgt_rows * tgt_cols
 
-    reconstruction_loss = shape_loss + grid_loss
+            if active_pixels > 0:
+                # Compute cross-entropy only over the active region. Sum losses for each sample.
+                loss_i = F.cross_entropy(grid_logits[i, :active_pixels], target_seq[i, :active_pixels].long(), reduction='sum')
+                grid_loss_sum += loss_i
+                active_elements_count += active_pixels
 
-    # KL divergence loss, normalized by batch size for consistency
-    kl_loss = 0.5 * torch.sum(mu.pow(2) + log_var.exp() - 1 - log_var) / mu.size(0) 
+        # Average grid loss over all active pixels in the batch
+        grid_loss = grid_loss_sum / active_elements_count if active_elements_count > 0 else torch.tensor(0.0, device=input_seq.device)
 
-    total_loss = reconstruction_loss + beta * kl_loss
-    
-    if return_components:
-        return total_loss, shape_loss, grid_loss, kl_loss
-    return total_loss
+        reconstruction_loss = shape_loss + grid_loss
+
+        # KL divergence loss, normalized by batch size for consistency
+        kl_loss = 0.5 * torch.sum(mu.pow(2) + log_var.exp() - 1 - log_var) / mu.size(0) 
+
+        total_loss = reconstruction_loss + beta * kl_loss
+        
+        if return_components:
+            return total_loss, shape_loss, grid_loss, kl_loss
+        return total_loss
 
 

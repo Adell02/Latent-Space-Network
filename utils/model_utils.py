@@ -276,7 +276,7 @@ def perform_latent_analysis(results, run_dir):
 ##############################
 # Load Model
 ##############################
-def load_model(run_dir, epoch=None, device='cuda'):
+def load_model(run_dir, epoch=None, device='cuda', model_type='lpn'):
     """
     Load a model from a run directory.
     
@@ -292,10 +292,16 @@ def load_model(run_dir, epoch=None, device='cuda'):
         loss: Loss value of the loaded checkpoint
     """
     from models.base_model import LatentProgramNetwork, compute_loss
+    from models.multi_encoder_lpn import MultiEncoderLPN
     from torch.optim import Adam
     
     # Initialize model and optimizer
-    model = LatentProgramNetwork().to(device)
+    if model_type == 'lpn':
+        model = LatentProgramNetwork().to(device)
+    elif model_type == 'multi_encoder_lpn':
+        model = MultiEncoderLPN().to(device)
+    else:
+        raise ValueError(f"Invalid model type: {model_type}")
     optimizer = Adam(model.parameters(), lr=1e-4)  # Default learning rate
     
     if epoch is None:

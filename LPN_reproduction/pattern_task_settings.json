@@ -5,14 +5,21 @@
         ],
         "training_seed": 42,
         "eval_seed": 1,
-        "n": 500,
+        "n": 25,
         "run_base_dir": "runs_re_arc"
     },
     "model_architecture": {
+        "num_encoders": 4,
+        "encoder_layers" : 2,
+        "decoder_layers" : 2,
+        "encoder_heads" : 6,
+        "decoder_heads" : 6,
+        "encoder_hidden_dim" : 96,
+        "decoder_hidden_dim" : 96,
+        "hidden_dim" : 96,
+        "num_layers" : 2,
+        "num_heads" : 6,
         "latent_dim": 16,
-        "hidden_dim": 96,
-        "num_layers": 2,
-        "num_heads": 6,
         "dropout": 1e-6,
         "max_length": 902,
         "encoder_max_length": 1805,
@@ -20,8 +27,8 @@
         "use_gradient_checkpointing": true
     },
     "training_settings": {
-        "num_epochs": 50,
-        "batch_size": 128,
+        "num_epochs": 20,
+        "batch_size": 16,
         "gradient_accumulation_steps": 2,
         "learning_rate": 0.0004,
         "optimizer_weight_decay": 1e-05,
@@ -64,7 +71,7 @@
         ],
         "eval_n_samples": 2,
         "eval_n_queries": 100,
-        "eval_epoch": 50,
+        "eval_epoch": 20,
         "visualize_n_values": 5
     }
 }

@@ -5,10 +5,11 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import local multi-encoder training and evaluation modules
-import Multiencoder_LPN.training as multiencoder_training
-import Multiencoder_LPN.evaluation as multiencoder_evaluation
+from Multiencoder_LPN.training import main_training
+from Multiencoder_LPN.evaluation import main_test, encode_training_sequences
 from utils.model_utils import (
-    save_evaluation_results
+    save_evaluation_results,
+    load_model
 )
 from utils.visualizers import visualize_stored_results
 # Use local settings manager that points to multiencoder settings
@@ -32,63 +33,6 @@ DEFAULT_EVAL_EPOCH = evaluation_settings['eval_epoch']
 DEFAULT_VISUALIZE_N_VALUES = evaluation_settings['visualize_n_values']
 
 EVAL_SEED = data_settings['eval_seed']
-
-
-def load_multi_encoder_model(run_dir, epoch=None, device='cuda'):
-    """
-    Load a MultiEncoderLPN model from a run directory.
-    
-    Args:
-        run_dir (str): Path to the run directory
-        epoch (int, optional): Specific epoch to load. If None, loads the latest checkpoint.
-        device (str): Device to load the model on ('cuda' or 'cpu')
-    
-    Returns:
-        model: Loaded MultiEncoderLPN model
-        optimizer: Loaded optimizer
-        epoch: Epoch number of the loaded checkpoint
-        loss: Loss value of the loaded checkpoint
-    """
-    # Initialize model with settings from multiencoder settings
-    model = MultiEncoderLPN(
-        num_encoders=model_architecture['num_encoders'],
-        latent_dim=model_architecture['latent_dim'],
-        hidden_dim=model_architecture['hidden_dim'],
-        num_layers=model_architecture['num_layers'],
-        num_heads=model_architecture['num_heads'],
-        dropout=model_architecture['dropout'],
-        encoder_max_length=model_architecture['encoder_max_length'],
-        decoder_max_length=model_architecture['decoder_max_length']
-    ).to(device)
-    
-    # Initialize optimizer
-    training_settings = settings.get_training_settings()
-    optimizer = Adam(model.parameters(), lr=training_settings['learning_rate'])
-    
-    if epoch is None:
-        # Find the latest checkpoint
-        checkpoints = [f for f in os.listdir(run_dir) if f.startswith('checkpoint_epoch')]
-        if not checkpoints:
-            raise FileNotFoundError(f"No checkpoints found in {run_dir}")
-        latest_epoch = max([int(f.split('_')[1][5:].split('.')[0]) for f in checkpoints])
-        checkpoint_path = os.path.join(run_dir, f'checkpoint_epoch{latest_epoch}.pt')
-    else:
-        checkpoint_path = os.path.join(run_dir, f'checkpoint_epoch{epoch}.pt')
-    
-    if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-    
-    # Load checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    epoch = checkpoint['epoch']
-    loss = checkpoint['loss']
-    
-    # Set to evaluation mode
-    model.eval()
-    
-    return model, optimizer, epoch, loss
 
 
 def parse_args():
@@ -121,7 +65,7 @@ def main_args():
     if 'train' in args.mode or 'all' in args.mode:
         # Train the multi-encoder model
         print("\n=== TRAINING MULTI-ENCODER MODEL ===")
-        results, model = multiencoder_training.main_training(args.file_name)
+        results, model = main_training(args.file_name)
         print("Multi-encoder training complete. Results saved in the run directory.")
     
     if 'encode' in args.mode or 'all' in args.mode:
@@ -130,11 +74,11 @@ def main_args():
         if args.epoch is None:
             raise ValueError("--epoch must be specified for encoding")
         
-        model, _, _, _ = load_multi_encoder_model(os.path.join(BASE_DIR, args.file_name), epoch=args.epoch, device=device)
+        model, _, _, _ = load_model(os.path.join(BASE_DIR, args.file_name), epoch=args.epoch, device=device, model_type='multi_encoder_lpn')
         
         # Encode training sequences
         run_dir = os.path.join(BASE_DIR, args.file_name)
-        encoded_data = multiencoder_evaluation.encode_training_sequences(model, run_dir, device=device, max_samples=500, batch_size=8)
+        encoded_data = encode_training_sequences(model, run_dir, device=device, max_samples=500, batch_size=8)
         
         if encoded_data:
             # Save encoded data
@@ -158,11 +102,11 @@ def main_args():
         if args.n_eval_queries is None:
             print("No n_eval_queries specified for evaluation, using default n_eval_queries")
         
-        model, _, _, _ = load_multi_encoder_model(os.path.join(BASE_DIR, args.file_name), epoch=args.epoch, device=device)
+        model, _, _, _ = load_model(os.path.join(BASE_DIR, args.file_name), epoch=args.epoch, device=device, model_type='multi_encoder_lpn')
         
         # Run multi-encoder evaluation
         print(f"Running multi-encoder evaluation with {model_architecture['num_encoders']} encoders...")
-        eval_results = multiencoder_evaluation.main_test(model, args.keys, args.n_eval_samples, args.n_eval_queries, EVAL_SEED, device)
+        eval_results = main_test(model, args.keys, args.n_eval_samples, args.n_eval_queries, EVAL_SEED, device)
                 
         # Save evaluation results
         save_evaluation_results(eval_results, os.path.join(BASE_DIR, args.file_name))

@@ -7,12 +7,110 @@ from models.base_model import LatentProgramNetwork, compute_loss
 from utils.settings_manager import settings
 from re_arc.main import generate_and_process_tasks
 from utils.latent_functions import get_optimized_z
+from utils.data_preparation import split_dataset_for_multi_encoder
 
 ##############################
 # Main Training Function
 ##############################
 
-def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed_precision, gradient_accumulation_steps, current_epoch_num, total_epochs):
+def evaluate_accuracy(model, dataloader, device, is_multi_encoder=False, encoder_idx=None, optimize_z=False, logger=None):
+    """
+    Evaluate model accuracy on a given dataloader.
+    
+    Args:
+        model: The trained model
+        dataloader: DataLoader to evaluate on
+        device: Device to run evaluation on
+        is_multi_encoder: Whether this is a multi-encoder model
+        encoder_idx: Which encoder to use (None for PoE inference)
+        optimize_z: Whether to use latent optimization
+        logger: Logger instance
+    
+    Returns:
+        dict: Dictionary with accuracy metrics
+    """
+    model.eval()
+    
+    epoch_shape_correct = 0
+    epoch_shape_tokens = 0
+    epoch_grid_correct = 0
+    epoch_grid_tokens = 0
+    sample_exact_correct = 0
+    total_samples_eval = 0
+    
+    evaluation_name = f"Encoder {encoder_idx}" if encoder_idx is not None else "PoE" if is_multi_encoder else "Model"
+    
+    with torch.no_grad():
+        for batch_input_eval, batch_target_eval in dataloader:
+            total_samples_eval += batch_input_eval.size(0)
+            batch_input_eval = batch_input_eval.to(device)
+            batch_target_eval = batch_target_eval.to(device)
+
+            # Get latent representation
+            if optimize_z:
+                # Use latent optimization
+                z_eval, _ = get_optimized_z(model, batch_input_eval, batch_target_eval, context='training')
+            else:
+                if is_multi_encoder:
+                    if encoder_idx is not None:
+                        # Individual encoder evaluation
+                        mu_eval, log_var_eval = model(batch_input_eval, batch_target_eval, encoder_idx=encoder_idx)[1:3]
+                    else:
+                        # PoE inference
+                        mu_eval, log_var_eval = model(batch_input_eval, batch_target_eval)[1:3]
+                    z_eval = model.reparameterize(mu_eval, log_var_eval)
+                else:
+                    # Single encoder
+                    mu_eval, log_var_eval = model.encoder(batch_input_eval, batch_target_eval)
+                    z_eval = model.reparameterize(mu_eval, log_var_eval)
+
+            # Decode
+            if is_multi_encoder:
+                shape_logits_eval, grid_logits_eval = model.multi_encoder.decoder(z_eval, batch_input_eval, target_seq=batch_target_eval)
+            else:
+                shape_logits_eval, grid_logits_eval = model.decoder(z_eval, batch_input_eval, target_seq=batch_target_eval)
+            
+            shape_pred_eval = shape_logits_eval.argmax(dim=-1)
+            grid_pred_eval = grid_logits_eval.argmax(dim=-1)
+            shape_tgt_eval = batch_target_eval[:, 900:902].long()
+            grid_tgt_eval = batch_target_eval[:, :900].long()
+
+            epoch_shape_correct += (shape_pred_eval == shape_tgt_eval).sum().item()
+            epoch_shape_tokens += shape_tgt_eval.numel()
+            
+            for i in range(batch_input_eval.size(0)):
+                tgt_rows_eval = int(batch_target_eval[i, 900].item())
+                tgt_cols_eval = int(batch_target_eval[i, 901].item())
+                active_pixels_eval = tgt_rows_eval * tgt_cols_eval
+                if active_pixels_eval > 0:
+                    epoch_grid_correct += (grid_pred_eval[i, :active_pixels_eval] == grid_tgt_eval[i, :active_pixels_eval]).sum().item()
+                    epoch_grid_tokens += active_pixels_eval
+                    if torch.all(shape_pred_eval[i] == shape_tgt_eval[i]) and \
+                       torch.all(grid_pred_eval[i, :active_pixels_eval] == grid_tgt_eval[i, :active_pixels_eval]):
+                        sample_exact_correct += 1
+                elif torch.all(shape_pred_eval[i] == shape_tgt_eval[i]):
+                    sample_exact_correct += 1
+
+    # Calculate accuracies
+    shape_accuracy = epoch_shape_correct / epoch_shape_tokens if epoch_shape_tokens > 0 else 0.0
+    grid_accuracy = epoch_grid_correct / epoch_grid_tokens if epoch_grid_tokens > 0 else 0.0
+    overall_accuracy = (epoch_shape_correct + epoch_grid_correct) / (epoch_shape_tokens + epoch_grid_tokens) if (epoch_shape_tokens + epoch_grid_tokens) > 0 else 0.0
+    sample_exact_accuracy = sample_exact_correct / total_samples_eval if total_samples_eval > 0 else 0.0
+    
+    accuracy_metrics = {
+        'shape_accuracy': shape_accuracy,
+        'grid_accuracy': grid_accuracy,
+        'overall_accuracy': overall_accuracy,
+        'sample_exact_accuracy': sample_exact_accuracy,
+        'evaluation_name': evaluation_name
+    }
+    
+    if logger:
+        logger.info(f"{evaluation_name} Accuracy -- Shape: {shape_accuracy:.4f}, Grid: {grid_accuracy:.4f}, Overall: {overall_accuracy:.4f}, Sample Exact: {sample_exact_accuracy:.4f}")
+    
+    return accuracy_metrics
+
+def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed_precision, gradient_accumulation_steps, current_epoch_num, total_epochs, encoder_idx=None):
     model.train()
     epoch_total_loss = 0
     epoch_shape_loss_sum = 0
@@ -22,7 +120,10 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed
     optimizer.zero_grad() # Ensure gradients are zeroed at the start of accumulation cycle / epoch
 
     logger.info("-" * 60)
-    logger.info(f"Starting training batch loop for Epoch {current_epoch_num}/{total_epochs}...")
+    if encoder_idx is not None:
+        logger.info(f"Starting training batch loop for Encoder {encoder_idx} - Epoch {current_epoch_num}/{total_epochs}...")
+    else:
+        logger.info(f"Starting training batch loop for Epoch {current_epoch_num}/{total_epochs}...")
     total_batches = len(dataloader)
 
     for batch_idx, (input_seq, target_seq) in enumerate(dataloader):
@@ -31,8 +132,17 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed
         target_seq = target_seq.to(device)
 
         with torch.amp.autocast(device_type=device.type, enabled=use_mixed_precision):
-            # Pass beta from global settings (or training_settings directly)
-            loss, shape_loss_comp, grid_loss_comp, kl_loss_comp = compute_loss(model, input_seq, target_seq, beta=BETA, return_components=True)
+            # Pass encoder_idx for multi-encoder training, beta from global settings
+            if encoder_idx is not None:
+                # Multi-encoder: train specific encoder
+                loss, shape_loss_comp, grid_loss_comp, kl_loss_comp = compute_loss(
+                    model, input_seq, target_seq, beta=BETA, return_components=True, encoder_idx=encoder_idx
+                )
+            else:
+                # Single encoder or inference mode
+                loss, shape_loss_comp, grid_loss_comp, kl_loss_comp = compute_loss(
+                    model, input_seq, target_seq, beta=BETA, return_components=True
+                )
             loss = loss / gradient_accumulation_steps
         
         scaler.scale(loss).backward()
@@ -52,7 +162,10 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed
         log_frequency = gradient_accumulation_steps * 5 
         if (batch_idx + 1) % log_frequency == 0 or (batch_idx + 1) == total_batches:
             # Log individual unscaled losses for the current batch/step
-            logger.info(f"Epoch [{current_epoch_num}/{total_epochs}] Batch [{batch_idx + 1}/{total_batches}] ({progress:.1f}%)")
+            if encoder_idx is not None:
+                logger.info(f"Encoder {encoder_idx} - Epoch [{current_epoch_num}/{total_epochs}] Batch [{batch_idx + 1}/{total_batches}] ({progress:.1f}%)")
+            else:
+                logger.info(f"Epoch [{current_epoch_num}/{total_epochs}] Batch [{batch_idx + 1}/{total_batches}] ({progress:.1f}%)")
             logger.info(f"  Step Loss: {loss.item() * gradient_accumulation_steps:.4f} (Shape: {shape_loss_comp.item():.4f}, Grid: {grid_loss_comp.item():.4f}, KL: {kl_loss_comp.item():.4f})")
 
 
@@ -62,7 +175,10 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed
     avg_kl_loss = epoch_kl_loss_sum / total_batches
     
     logger.info("=" * 60)
-    logger.info(f"Epoch {current_epoch_num} Summary:")
+    if encoder_idx is not None:
+        logger.info(f"Encoder {encoder_idx} - Epoch {current_epoch_num} Summary:")
+    else:
+        logger.info(f"Epoch {current_epoch_num} Summary:")
     logger.info(f"  Final Avg Shape Loss: {avg_shape_loss:.4f}")
     logger.info(f"  Final Avg Grid Loss: {avg_grid_loss:.4f}")
     logger.info(f"  Final Avg KL Loss: {avg_kl_loss:.4f}")
@@ -155,12 +271,35 @@ def main_training(file_store_name):
     logger.info(f"Total generated {len(input_sequences)} pairs of sequences from {len(TRAINING_KEYS)} tasks.")
     print(f"Total generated {len(input_sequences)} pairs of sequences from {len(TRAINING_KEYS)} tasks.")
 
-    dataloader = prepare_dataloader(input_sequences, output_sequences, BATCH_SIZE)
+    # Check if multi-encoder training is enabled
+    NUM_ENCODERS = model_architecture.get('num_encoders', 1)
+    is_multi_encoder = NUM_ENCODERS > 1
+    
+    if is_multi_encoder:
+        logger.info(f"Multi-encoder training enabled with {NUM_ENCODERS} encoders")
+        print(f"Multi-encoder training enabled with {NUM_ENCODERS} encoders")
+        
+        # Split dataset for individual encoder training
+        dataset_splits = split_dataset_for_multi_encoder(
+            input_sequences, output_sequences, NUM_ENCODERS, 
+            shuffle=True, seed=data_settings['training_seed']
+        )
+        
+        # Create dataloaders for each encoder
+        encoder_dataloaders = []
+        for i, (enc_inputs, enc_outputs) in enumerate(dataset_splits):
+            dataloader = prepare_dataloader(enc_inputs, enc_outputs, BATCH_SIZE)
+            encoder_dataloaders.append(dataloader)
+            logger.info(f"Encoder {i}: {len(enc_inputs)} training samples")
+            print(f"Encoder {i}: {len(enc_inputs)} training samples")
+    else:
+        # Single encoder training
+        dataloader = prepare_dataloader(input_sequences, output_sequences, BATCH_SIZE)
 
     logger.info("Initializing model...")
     print("Initializing model...")
     # Model instantiation will pick up global LATENT_DIM, HIDDEN_DIM etc. which are now reloaded
-    model = LatentProgramNetwork().to(device) 
+    model = LatentProgramNetwork().to(device)
 
     optimizer_weight_decay = training_settings.get('optimizer_weight_decay', 0.0)
     optimizer = Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=optimizer_weight_decay)
@@ -230,102 +369,145 @@ def main_training(file_store_name):
         print(f"\\nEpoch {epoch+1}/{NUM_EPOCHS} started. LR: {current_lr}")
         logger.info("=" * 80)
 
-        avg_loss, avg_shape_loss, avg_grid_loss, avg_kl_loss = train_model(
-            model, dataloader, optimizer, run_dir, logger, 
-            scaler, use_mixed_precision, gradient_accumulation_steps,
-            current_epoch_num=epoch+1, total_epochs=NUM_EPOCHS
-        )
-        results['epoch_losses'].append(avg_loss)
-        results['epoch_metrics'].append({
-            'epoch': epoch + 1,
-            'avg_shape_loss': avg_shape_loss,
-            'avg_grid_loss': avg_grid_loss,
-            'avg_kl_loss': avg_kl_loss,
-            'avg_total_loss': avg_loss,
-            'learning_rate': current_lr
-        })
+        if is_multi_encoder:
+            # Multi-encoder training: train each encoder individually
+            epoch_losses = []
+            epoch_metrics_list = []
+            
+            for encoder_idx in range(NUM_ENCODERS):
+                logger.info(f"\\n--- Training Encoder {encoder_idx} ---")
+                print(f"Training Encoder {encoder_idx}...")
+                
+                avg_loss, avg_shape_loss, avg_grid_loss, avg_kl_loss = train_model(
+                    model, encoder_dataloaders[encoder_idx], optimizer, run_dir, logger, 
+                    scaler, use_mixed_precision, gradient_accumulation_steps,
+                    current_epoch_num=epoch+1, total_epochs=NUM_EPOCHS, encoder_idx=encoder_idx
+                )
+                
+                epoch_losses.append(avg_loss)
+                epoch_metrics_list.append({
+                    'encoder_idx': encoder_idx,
+                    'avg_shape_loss': avg_shape_loss,
+                    'avg_grid_loss': avg_grid_loss,
+                    'avg_kl_loss': avg_kl_loss,
+                    'avg_total_loss': avg_loss
+                })
+            
+            # Average losses across all encoders for epoch summary
+            avg_epoch_loss = sum(epoch_losses) / len(epoch_losses)
+            results['epoch_losses'].append(avg_epoch_loss)
+            results['epoch_metrics'].append({
+                'epoch': epoch + 1,
+                'multi_encoder_metrics': epoch_metrics_list,
+                'avg_total_loss': avg_epoch_loss,
+                'learning_rate': current_lr
+            })
+        else:
+            # Single encoder training
+            avg_loss, avg_shape_loss, avg_grid_loss, avg_kl_loss = train_model(
+                model, dataloader, optimizer, run_dir, logger, 
+                scaler, use_mixed_precision, gradient_accumulation_steps,
+                current_epoch_num=epoch+1, total_epochs=NUM_EPOCHS
+            )
+            results['epoch_losses'].append(avg_loss)
+            results['epoch_metrics'].append({
+                'epoch': epoch + 1,
+                'avg_shape_loss': avg_shape_loss,
+                'avg_grid_loss': avg_grid_loss,
+                'avg_kl_loss': avg_kl_loss,
+                'avg_total_loss': avg_loss,
+                'learning_rate': current_lr
+            })
         
         if scheduler:
             scheduler.step() # Step the scheduler each epoch
 
         logger.info(f"\\nEpoch {epoch+1}/{NUM_EPOCHS} completed.")
-        logger.info(f"Average Loss: {avg_loss:.4f}")
-        print(f"Epoch {epoch+1} completed. Average Loss: {avg_loss:.4f}")
+        if is_multi_encoder:
+            logger.info(f"Average Loss across encoders: {avg_epoch_loss:.4f}")
+            print(f"Epoch {epoch+1} completed. Average Loss across encoders: {avg_epoch_loss:.4f}")
+        else:
+            logger.info(f"Average Loss: {avg_loss:.4f}")
+            print(f"Epoch {epoch+1} completed. Average Loss: {avg_loss:.4f}")
 
         # Evaluate accuracy at the end of each epoch.
-        model.eval()
-        epoch_shape_correct = 0
-        epoch_shape_tokens = 0
-        epoch_grid_correct = 0
-        epoch_grid_tokens = 0
-        sample_exact_correct = 0
-        total_samples_eval = 0 # Use a different variable for clarity during evaluation
-
-        # We now leave the no_grad block for the latent optimization step if it's enabled for inference.
-        # The get_optimized_z function handles its own grad context.
-        for batch_input_eval, batch_target_eval in dataloader: # Can use a validation dataloader here if available
-            total_samples_eval += batch_input_eval.size(0)
-            batch_input_eval = batch_input_eval.to(device)
-            batch_target_eval = batch_target_eval.to(device)
-
-            # Use the appropriate latent optimization method for training
-            if OPTIMIZE_Z: # Check training specific flag
-                # Pass context='training' to use training-specific parameters
-                z_eval, losses_eval = get_optimized_z(model, batch_input_eval, batch_target_eval, 
-                                                      context='training')
-                if losses_eval is not None and isinstance(results.get('losses_gradient_ascent'), list):
-                    if not isinstance(losses_eval, list):
-                        losses_eval = [losses_eval]
-                    results['losses_gradient_ascent'].extend(losses_eval)
-            else:
-                with torch.no_grad(): # Ensure no grads if not optimizing z
-                    mu_eval, log_var_eval = model.encoder(batch_input_eval, batch_target_eval)
-                    z_eval = model.reparameterize(mu_eval, log_var_eval)
-
-            # Now, perform decoding with no_grad.
-            with torch.no_grad():
-                # The decoder's target_seq argument is for teacher forcing. 
-                # For true autoregressive generation during eval, it should be None
-                # or handle it differently if evaluating reconstruction of target.
-                # Current model.decoder uses target_seq for teacher-forced decoding.
-                shape_logits_eval, grid_logits_eval = model.decoder(z_eval, batch_input_eval, target_seq=batch_target_eval)
+        logger.info("\\n" + "=" * 40)
+        logger.info(f"Evaluating accuracy at end of Epoch {epoch+1}")
+        logger.info("=" * 40)
+        
+        if is_multi_encoder:
+            # Multi-encoder: evaluate each encoder individually + PoE
+            epoch_accuracy_data = {
+                'epoch': epoch + 1,
+                'individual_encoders': {},
+                'poe_accuracy': {}
+            }
+            
+            # Evaluate each encoder individually on its own data
+            for eval_encoder_idx in range(NUM_ENCODERS):
+                logger.info(f"\\n--- Evaluating Encoder {eval_encoder_idx} ---")
+                print(f"Evaluating Encoder {eval_encoder_idx}...")
                 
-                shape_pred_eval = shape_logits_eval.argmax(dim=-1)
-                grid_pred_eval = grid_logits_eval.argmax(dim=-1)
-                shape_tgt_eval = batch_target_eval[:, 900:902].long()
-                grid_tgt_eval = batch_target_eval[:, :900].long()
-
-            epoch_shape_correct += (shape_pred_eval == shape_tgt_eval).sum().item()
-            epoch_shape_tokens += shape_tgt_eval.numel()
-            for i in range(batch_input_eval.size(0)):
-                tgt_rows_eval = int(batch_target_eval[i, 900].item())
-                tgt_cols_eval = int(batch_target_eval[i, 901].item())
-                active_pixels_eval = tgt_rows_eval * tgt_cols_eval
-                if active_pixels_eval > 0:
-                    epoch_grid_correct += (grid_pred_eval[i, :active_pixels_eval] == grid_tgt_eval[i, :active_pixels_eval]).sum().item()
-                    epoch_grid_tokens += active_pixels_eval
-                    if torch.all(shape_pred_eval[i] == shape_tgt_eval[i]) and \
-                       torch.all(grid_pred_eval[i, :active_pixels_eval] == grid_tgt_eval[i, :active_pixels_eval]):
-                        sample_exact_correct += 1
-                elif torch.all(shape_pred_eval[i] == shape_tgt_eval[i]): # If grid is empty, only shape matters for exact
-                    sample_exact_correct += 1
-
-
-        epoch_shape_accuracy = epoch_shape_correct / epoch_shape_tokens if epoch_shape_tokens > 0 else 0.0
-        epoch_grid_accuracy = epoch_grid_correct / epoch_grid_tokens if epoch_grid_tokens > 0 else 0.0
-        epoch_overall_accuracy = (epoch_shape_correct + epoch_grid_correct) / (epoch_shape_tokens + epoch_grid_tokens) if (epoch_shape_tokens + epoch_grid_tokens) > 0 else 0.0
-        sample_level_accuracy = sample_exact_correct / total_samples_eval if total_samples_eval > 0 else 0.0
-
-        results['epoch_accuracies'].append({
-            'epoch': epoch + 1,
-            'shape_accuracy': epoch_shape_accuracy,
-            'grid_accuracy': epoch_grid_accuracy,
-            'overall_accuracy': epoch_overall_accuracy,
-            'sample_exact_accuracy': sample_level_accuracy
-        })
-
-        logger.info(f"Epoch {epoch+1} Accuracy -- Shape: {epoch_shape_accuracy:.4f}, Grid: {epoch_grid_accuracy:.4f}, Overall: {epoch_overall_accuracy:.4f}, Sample Exact: {sample_level_accuracy:.4f}")
-        print(f"Epoch {epoch+1} Accuracy: Shape: {epoch_shape_accuracy:.4f}, Grid: {epoch_grid_accuracy:.4f}, Overall: {epoch_overall_accuracy:.4f}, Sample Exact: {sample_level_accuracy:.4f}")
+                # Use the specific encoder's dataloader for individual evaluation
+                encoder_dataloader = encoder_dataloaders[eval_encoder_idx]
+                encoder_accuracy = evaluate_accuracy(
+                    model, encoder_dataloader, device, 
+                    is_multi_encoder=True, encoder_idx=eval_encoder_idx, 
+                    optimize_z=OPTIMIZE_Z, logger=logger
+                )
+                
+                epoch_accuracy_data['individual_encoders'][eval_encoder_idx] = encoder_accuracy
+                print(f"Encoder {eval_encoder_idx} - Shape: {encoder_accuracy['shape_accuracy']:.4f}, "
+                      f"Grid: {encoder_accuracy['grid_accuracy']:.4f}, "
+                      f"Overall: {encoder_accuracy['overall_accuracy']:.4f}, "
+                      f"Sample Exact: {encoder_accuracy['sample_exact_accuracy']:.4f}")
+            
+            # Evaluate PoE on first encoder's data (or could use full dataset)
+            logger.info("\\n--- Evaluating Product of Experts (PoE) ---")
+            print("Evaluating Product of Experts (PoE)...")
+            poe_dataloader = encoder_dataloaders[0]  # Use first encoder's data for consistency
+            poe_accuracy = evaluate_accuracy(
+                model, poe_dataloader, device,
+                is_multi_encoder=True, encoder_idx=None,
+                optimize_z=OPTIMIZE_Z, logger=logger
+            )
+            
+            epoch_accuracy_data['poe_accuracy'] = poe_accuracy
+            print(f"PoE - Shape: {poe_accuracy['shape_accuracy']:.4f}, "
+                  f"Grid: {poe_accuracy['grid_accuracy']:.4f}, "
+                  f"Overall: {poe_accuracy['overall_accuracy']:.4f}, "
+                  f"Sample Exact: {poe_accuracy['sample_exact_accuracy']:.4f}")
+            
+            # Store both detailed and summary accuracy data
+            results['epoch_accuracies'].append(epoch_accuracy_data)
+            
+            # Also store in legacy format for compatibility with existing visualizers
+            results['epoch_accuracies'].append({
+                'epoch': epoch + 1,
+                'shape_accuracy': poe_accuracy['shape_accuracy'],
+                'grid_accuracy': poe_accuracy['grid_accuracy'],
+                'overall_accuracy': poe_accuracy['overall_accuracy'],
+                'sample_exact_accuracy': poe_accuracy['sample_exact_accuracy']
+            })
+        else:
+            # Single encoder: standard evaluation
+            logger.info("\\n--- Evaluating Single Encoder ---")
+            print("Evaluating model...")
+            
+            single_accuracy = evaluate_accuracy(
+                model, dataloader, device,
+                is_multi_encoder=False, encoder_idx=None,
+                optimize_z=OPTIMIZE_Z, logger=logger
+            )
+            
+            # Store accuracy data (add epoch info)
+            single_accuracy['epoch'] = epoch + 1
+            results['epoch_accuracies'].append(single_accuracy)
+            
+            print(f"Model - Shape: {single_accuracy['shape_accuracy']:.4f}, "
+                  f"Grid: {single_accuracy['grid_accuracy']:.4f}, "
+                  f"Overall: {single_accuracy['overall_accuracy']:.4f}, "
+                  f"Sample Exact: {single_accuracy['sample_exact_accuracy']:.4f}")
 
         model.train() # Already called at the start of train_model function for the next epoch
 
@@ -366,14 +548,25 @@ def main_training(file_store_name):
                                         context='inference')
             # Get mu and log_var for storage
             with torch.no_grad():
-                mu, log_var = model.encoder(batch_input, batch_target)
+                if is_multi_encoder:
+                    mu, log_var = model(batch_input, batch_target)[1:3]
+                else:
+                    mu, log_var = model.encoder(batch_input, batch_target)
         else:
             with torch.no_grad():
-                mu, log_var = model.encoder(batch_input, batch_target)
-                z = model.reparameterize(mu, log_var)
+                if is_multi_encoder:
+                    # Use PoE inference mode
+                    mu, log_var = model(batch_input, batch_target)[1:3]
+                    z = model.reparameterize(mu, log_var)
+                else:
+                    mu, log_var = model.encoder(batch_input, batch_target)
+                    z = model.reparameterize(mu, log_var)
         
         with torch.no_grad(): # Ensure no grads for decoder pass
-            shape_logits, grid_logits = model.decoder(z, batch_input, target_seq=batch_target) # Using target_seq for reconstruction eval
+            if is_multi_encoder:
+                shape_logits, grid_logits = model.multi_encoder.decoder(z, batch_input, target_seq=batch_target)
+            else:
+                shape_logits, grid_logits = model.decoder(z, batch_input, target_seq=batch_target) # Using target_seq for reconstruction eval
             
             # Store only a subset of these potentially large tensors if memory is an issue
             if isinstance(results.get('latent_mus'), list):

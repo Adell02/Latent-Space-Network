@@ -40,3 +40,50 @@ def prepare_input_output_pair(input_grid, output_grid):
     cls_token = np.array([-1])
     full_sequence = np.concatenate([input_seq, output_seq, cls_token])
     return full_sequence
+
+
+def split_dataset_for_multi_encoder(input_sequences, output_sequences, num_encoders, shuffle=True, seed=42):
+    """
+    Split dataset into num_encoders subsets for individual encoder training.
+    
+    Args:
+        input_sequences: List of input sequences
+        output_sequences: List of output sequences  
+        num_encoders: Number of encoders (and thus number of splits)
+        shuffle: Whether to shuffle data before splitting
+        seed: Random seed for reproducible shuffling
+        
+    Returns:
+        List of tuples: [(inputs_0, outputs_0), (inputs_1, outputs_1), ...]
+    """
+    if shuffle:
+        # Create indices and shuffle them
+        indices = np.arange(len(input_sequences))
+        np.random.seed(seed)
+        np.random.shuffle(indices)
+        
+        # Apply shuffled indices
+        input_sequences = [input_sequences[i] for i in indices]
+        output_sequences = [output_sequences[i] for i in indices]
+    
+    # Calculate split sizes
+    total_samples = len(input_sequences)
+    base_size = total_samples // num_encoders
+    remainder = total_samples % num_encoders
+    
+    # Create splits
+    splits = []
+    start_idx = 0
+    
+    for i in range(num_encoders):
+        # Some splits get one extra sample if there's a remainder
+        split_size = base_size + (1 if i < remainder else 0)
+        end_idx = start_idx + split_size
+        
+        encoder_inputs = input_sequences[start_idx:end_idx]
+        encoder_outputs = output_sequences[start_idx:end_idx]
+        splits.append((encoder_inputs, encoder_outputs))
+        
+        start_idx = end_idx
+    
+    return splits

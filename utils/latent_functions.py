@@ -17,14 +17,25 @@ def optimize_latent_z(lpn, input_seq, target_seq, num_steps=None, lr=None, retur
     if lr is None:
         lr = latent_optimization['training']['learning_rate']
         
-    # Get initial latent parameters from the encoder and compute initial z.
-    mu, log_var = lpn.encoder(input_seq, target_seq)
+    # Get initial latent parameters from the model and compute initial z.
+    with torch.no_grad():
+        if hasattr(lpn, 'is_multi_encoder') and lpn.is_multi_encoder:
+            # For multi-encoder, use PoE inference mode
+            reconstruction, mu, log_var = lpn(input_seq, target_seq)
+        else:
+            # For single encoder
+            mu, log_var = lpn.encoder(input_seq, target_seq)
+    
     z = lpn.reparameterize(mu, log_var)
     initial_z = z.detach().clone()
 
     # Compute initial loss before optimization (step 0)
     with torch.no_grad():
-        shape_logits_init, grid_logits_init = lpn.decoder(z, input_seq, target_seq=target_seq)
+        if hasattr(lpn, 'is_multi_encoder') and lpn.is_multi_encoder:
+            shape_logits_init, grid_logits_init = lpn.multi_encoder.decoder(z, input_seq, target_seq=target_seq)
+        else:
+            shape_logits_init, grid_logits_init = lpn.decoder(z, input_seq, target_seq=target_seq)
+        
         shape_targets = target_seq[:, 900:902].long()
         shape_loss_init = F.cross_entropy(shape_logits_init.reshape(-1, 31), shape_targets.reshape(-1))
         
@@ -72,7 +83,10 @@ def optimize_latent_z(lpn, input_seq, target_seq, num_steps=None, lr=None, retur
     for step in pbar:
         optimizer_z.zero_grad()
         # Decode using the current z.
-        shape_logits, grid_logits = lpn.decoder(z, input_seq, target_seq=target_seq)
+        if hasattr(lpn, 'is_multi_encoder') and lpn.is_multi_encoder:
+            shape_logits, grid_logits = lpn.multi_encoder.decoder(z, input_seq, target_seq=target_seq)
+        else:
+            shape_logits, grid_logits = lpn.decoder(z, input_seq, target_seq=target_seq)
 
         # Compute loss on the shape tokens.
         shape_targets = target_seq[:, 900:902].long()
@@ -152,8 +166,15 @@ def evolutionary_optimize_latent_z(lpn, input_seq, target_seq, population_size=N
         
     device = input_seq.device
     with torch.no_grad():
-        mu, log_var = lpn.encoder(input_seq, target_seq)
-        initial_z = lpn.reparameterize(mu, log_var).detach()
+        if hasattr(lpn, 'is_multi_encoder') and lpn.is_multi_encoder:
+            # For multi-encoder, use PoE inference mode
+            reconstruction, mu, log_var = lpn(input_seq, target_seq)
+            initial_z = lpn.reparameterize(mu, log_var).detach()
+        else:
+            # For single encoder
+            mu, log_var = lpn.encoder(input_seq, target_seq)
+            initial_z = lpn.reparameterize(mu, log_var).detach()
+            
     population = initial_z.unsqueeze(0).repeat(population_size, 1, 1)
     population = population + torch.randn_like(population) * mutation_std
     best_candidate = None
@@ -165,7 +186,11 @@ def evolutionary_optimize_latent_z(lpn, input_seq, target_seq, population_size=N
         candidate_losses = []
         for i in range(population_size):
             candidate_z = population[i]
-            shape_logits, grid_logits = lpn.decoder(candidate_z, input_seq, target_seq=target_seq)
+            if hasattr(lpn, 'is_multi_encoder') and lpn.is_multi_encoder:
+                shape_logits, grid_logits = lpn.multi_encoder.decoder(candidate_z, input_seq, target_seq=target_seq)
+            else:
+                shape_logits, grid_logits = lpn.decoder(candidate_z, input_seq, target_seq=target_seq)
+                
             shape_targets = target_seq[:, 900:902].long()
             shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1), reduction='mean')
             grid_loss_list = []
@@ -228,8 +253,15 @@ def voronoi_optimize_latent_z(lpn, input_seq, target_seq, population_size=None,
         
     device = input_seq.device
     with torch.no_grad():
-        mu, log_var = lpn.encoder(input_seq, target_seq)
-        initial_z = lpn.reparameterize(mu, log_var).detach()
+        if hasattr(lpn, 'is_multi_encoder') and lpn.is_multi_encoder:
+            # For multi-encoder, use PoE inference mode
+            reconstruction, mu, log_var = lpn(input_seq, target_seq)
+            initial_z = lpn.reparameterize(mu, log_var).detach()
+        else:
+            # For single encoder
+            mu, log_var = lpn.encoder(input_seq, target_seq)
+            initial_z = lpn.reparameterize(mu, log_var).detach()
+            
     # Create an initial population
     population = initial_z.unsqueeze(0).repeat(population_size, 1, 1)
     population = population + torch.randn_like(population) * mutation_std
@@ -257,7 +289,11 @@ def voronoi_optimize_latent_z(lpn, input_seq, target_seq, population_size=None,
         candidate_losses = []
         for i in range(population_size):
             candidate_z = population[i]
-            shape_logits, grid_logits = lpn.decoder(candidate_z, input_seq, target_seq=target_seq)
+            if hasattr(lpn, 'is_multi_encoder') and lpn.is_multi_encoder:
+                shape_logits, grid_logits = lpn.multi_encoder.decoder(candidate_z, input_seq, target_seq=target_seq)
+            else:
+                shape_logits, grid_logits = lpn.decoder(candidate_z, input_seq, target_seq=target_seq)
+                
             shape_targets = target_seq[:, 900:902].long()
             shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1), reduction='mean')
             grid_loss_list = []
@@ -356,16 +392,30 @@ def get_optimized_z(lpn, input_seq, target_seq, num_steps=None, lr=None, context
                 return result
         else:
             # Unknown method, fall back to basic sampling
-            mu, log_var = lpn.encoder(input_seq, target_seq)
-            z = lpn.reparameterize(mu, log_var)
+            with torch.no_grad():
+                if hasattr(lpn, 'is_multi_encoder') and lpn.is_multi_encoder:
+                    # For multi-encoder, use PoE inference mode
+                    reconstruction, mu, log_var = lpn(input_seq, target_seq)
+                    z = lpn.reparameterize(mu, log_var)
+                else:
+                    # For single encoder
+                    mu, log_var = lpn.encoder(input_seq, target_seq)
+                    z = lpn.reparameterize(mu, log_var)
             if return_trajectory:
                 return z, None, None
             else:
                 return z, None
     else:
         # Optimization disabled, just use basic sampling
-        mu, log_var = lpn.encoder(input_seq, target_seq)
-        z = lpn.reparameterize(mu, log_var)
+        with torch.no_grad():
+            if hasattr(lpn, 'is_multi_encoder') and lpn.is_multi_encoder:
+                # For multi-encoder, use PoE inference mode
+                reconstruction, mu, log_var = lpn(input_seq, target_seq)
+                z = lpn.reparameterize(mu, log_var)
+            else:
+                # For single encoder
+                mu, log_var = lpn.encoder(input_seq, target_seq)
+                z = lpn.reparameterize(mu, log_var)
         if return_trajectory:
             return z, None, None
         else:

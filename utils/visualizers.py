@@ -15,6 +15,262 @@ evaluation_settings = settings.get_evaluation_settings()
 DEFAULT_VISUALIZE_N_VALUES = evaluation_settings['visualize_n_values']
 
 ##############################
+# MULTI-ENCODER SUPPORT FUNCTIONS
+##############################
+
+def extract_multi_encoder_metrics(results):
+    """
+    Extract and process multi-encoder training metrics for visualization.
+    Converts multi-encoder metrics structure to be compatible with existing visualizers.
+    
+    Args:
+        results: Training results dictionary
+        
+    Returns:
+        dict: Processed metrics for visualization
+    """
+    if 'epoch_metrics' not in results or not results['epoch_metrics']:
+        return results
+    
+    # Check if this is multi-encoder training
+    first_epoch_metrics = results['epoch_metrics'][0]
+    is_multi_encoder = 'multi_encoder_metrics' in first_epoch_metrics
+    
+    if not is_multi_encoder:
+        return results  # No processing needed for single encoder
+    
+    print("Processing multi-encoder metrics for visualization...")
+    
+    # Create processed results with additional multi-encoder specific data
+    processed_results = results.copy()
+    
+    # Extract per-encoder metrics across epochs
+    num_epochs = len(results['epoch_metrics'])
+    encoder_indices = set()
+    
+    # Find all encoder indices
+    for epoch_data in results['epoch_metrics']:
+        if 'multi_encoder_metrics' in epoch_data:
+            for encoder_data in epoch_data['multi_encoder_metrics']:
+                encoder_indices.add(encoder_data['encoder_idx'])
+    
+    num_encoders = len(encoder_indices)
+    print(f"Found {num_encoders} encoders across {num_epochs} epochs")
+    
+    # Initialize per-encoder metrics storage
+    encoder_metrics = {
+        'per_encoder_losses': {i: [] for i in encoder_indices},
+        'per_encoder_shape_losses': {i: [] for i in encoder_indices},
+        'per_encoder_grid_losses': {i: [] for i in encoder_indices},
+        'per_encoder_kl_losses': {i: [] for i in encoder_indices},
+        'epochs': list(range(1, num_epochs + 1))
+    }
+    
+    # Extract metrics for each encoder across epochs
+    for epoch_idx, epoch_data in enumerate(results['epoch_metrics']):
+        epoch_num = epoch_idx + 1
+        
+        if 'multi_encoder_metrics' in epoch_data:
+            # Create a mapping for this epoch
+            epoch_encoder_data = {enc_data['encoder_idx']: enc_data 
+                                for enc_data in epoch_data['multi_encoder_metrics']}
+            
+            # Fill in metrics for each encoder
+            for encoder_idx in encoder_indices:
+                if encoder_idx in epoch_encoder_data:
+                    enc_data = epoch_encoder_data[encoder_idx]
+                    encoder_metrics['per_encoder_losses'][encoder_idx].append(enc_data['avg_total_loss'])
+                    encoder_metrics['per_encoder_shape_losses'][encoder_idx].append(enc_data['avg_shape_loss'])
+                    encoder_metrics['per_encoder_grid_losses'][encoder_idx].append(enc_data['avg_grid_loss'])
+                    encoder_metrics['per_encoder_kl_losses'][encoder_idx].append(enc_data['avg_kl_loss'])
+                else:
+                    # Encoder didn't train in this epoch (shouldn't happen, but handle gracefully)
+                    encoder_metrics['per_encoder_losses'][encoder_idx].append(0.0)
+                    encoder_metrics['per_encoder_shape_losses'][encoder_idx].append(0.0)
+                    encoder_metrics['per_encoder_grid_losses'][encoder_idx].append(0.0)
+                    encoder_metrics['per_encoder_kl_losses'][encoder_idx].append(0.0)
+    
+    # Add multi-encoder specific data
+    processed_results['multi_encoder_data'] = encoder_metrics
+    processed_results['is_multi_encoder'] = True
+    processed_results['num_encoders'] = num_encoders
+    
+    # Create aggregated single-encoder compatible metrics for existing visualizers
+    processed_results['aggregated_epoch_metrics'] = []
+    for epoch_idx, epoch_data in enumerate(results['epoch_metrics']):
+        if 'multi_encoder_metrics' in epoch_data:
+            # Aggregate metrics across encoders
+            total_losses = [enc_data['avg_total_loss'] for enc_data in epoch_data['multi_encoder_metrics']]
+            shape_losses = [enc_data['avg_shape_loss'] for enc_data in epoch_data['multi_encoder_metrics']]
+            grid_losses = [enc_data['avg_grid_loss'] for enc_data in epoch_data['multi_encoder_metrics']]
+            kl_losses = [enc_data['avg_kl_loss'] for enc_data in epoch_data['multi_encoder_metrics']]
+            
+            aggregated_metrics = {
+                'epoch': epoch_idx + 1,
+                'avg_total_loss': sum(total_losses) / len(total_losses),
+                'avg_shape_loss': sum(shape_losses) / len(shape_losses),
+                'avg_grid_loss': sum(grid_losses) / len(grid_losses),
+                'avg_kl_loss': sum(kl_losses) / len(kl_losses),
+                'learning_rate': epoch_data.get('learning_rate', 0.0)
+            }
+            processed_results['aggregated_epoch_metrics'].append(aggregated_metrics)
+    
+    print(f"✓ Multi-encoder metrics processed: {num_encoders} encoders, {num_epochs} epochs")
+    return processed_results
+
+def plot_multi_encoder_training_losses(results, save_dir=None):
+    """
+    Plot detailed multi-encoder training losses showing per-encoder and aggregated metrics.
+    
+    Args:
+        results: Processed results dictionary with multi-encoder data
+        save_dir: Directory to save plots (optional)
+    """
+    if not results.get('is_multi_encoder', False):
+        print("Not a multi-encoder model, skipping multi-encoder loss plots")
+        return
+    
+    multi_encoder_data = results['multi_encoder_data']
+    epochs = multi_encoder_data['epochs']
+    num_encoders = results['num_encoders']
+    
+    # Create subplots for different loss components
+    fig, axs = plt.subplots(2, 2, figsize=(15, 10))
+    
+    # Colors for different encoders
+    colors = plt.cm.Set1(np.linspace(0, 1, num_encoders))
+    
+    # Plot total losses per encoder
+    axs[0, 0].set_title('Total Loss per Encoder', fontsize=14)
+    for i, (encoder_idx, losses) in enumerate(multi_encoder_data['per_encoder_losses'].items()):
+        axs[0, 0].plot(epochs, losses, marker='o', label=f'Encoder {encoder_idx}', 
+                      color=colors[i], linewidth=2)
+    axs[0, 0].plot(epochs, results['epoch_losses'], 'k--', linewidth=3, 
+                  label='Average', alpha=0.8)
+    axs[0, 0].set_xlabel('Epoch')
+    axs[0, 0].set_ylabel('Loss')
+    axs[0, 0].legend()
+    axs[0, 0].grid(True, alpha=0.3)
+    
+    # Plot shape losses per encoder
+    axs[0, 1].set_title('Shape Loss per Encoder', fontsize=14)
+    for i, (encoder_idx, losses) in enumerate(multi_encoder_data['per_encoder_shape_losses'].items()):
+        axs[0, 1].plot(epochs, losses, marker='s', label=f'Encoder {encoder_idx}', 
+                      color=colors[i], linewidth=2)
+    axs[0, 1].set_xlabel('Epoch')
+    axs[0, 1].set_ylabel('Shape Loss')
+    axs[0, 1].legend()
+    axs[0, 1].grid(True, alpha=0.3)
+    
+    # Plot grid losses per encoder
+    axs[1, 0].set_title('Grid Loss per Encoder', fontsize=14)
+    for i, (encoder_idx, losses) in enumerate(multi_encoder_data['per_encoder_grid_losses'].items()):
+        axs[1, 0].plot(epochs, losses, marker='^', label=f'Encoder {encoder_idx}', 
+                      color=colors[i], linewidth=2)
+    axs[1, 0].set_xlabel('Epoch')
+    axs[1, 0].set_ylabel('Grid Loss')
+    axs[1, 0].legend()
+    axs[1, 0].grid(True, alpha=0.3)
+    
+    # Plot KL losses per encoder
+    axs[1, 1].set_title('KL Loss per Encoder', fontsize=14)
+    for i, (encoder_idx, losses) in enumerate(multi_encoder_data['per_encoder_kl_losses'].items()):
+        axs[1, 1].plot(epochs, losses, marker='d', label=f'Encoder {encoder_idx}', 
+                      color=colors[i], linewidth=2)
+    axs[1, 1].set_xlabel('Epoch')
+    axs[1, 1].set_ylabel('KL Loss')
+    axs[1, 1].legend()
+    axs[1, 1].grid(True, alpha=0.3)
+    
+    plt.suptitle(f'Multi-Encoder Training Losses ({num_encoders} Encoders)', fontsize=16)
+    plt.tight_layout()
+    
+    if save_dir:
+        plt.savefig(os.path.join(save_dir, 'multi_encoder_training_losses.png'), dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"Multi-encoder training losses plot saved to {save_dir}/multi_encoder_training_losses.png")
+    else:
+        plt.show()
+
+def plot_multi_encoder_summary(results, save_dir=None):
+    """
+    Plot a summary view of multi-encoder training with key statistics.
+    
+    Args:
+        results: Processed results dictionary with multi-encoder data
+        save_dir: Directory to save plots (optional)
+    """
+    if not results.get('is_multi_encoder', False):
+        print("Not a multi-encoder model, skipping multi-encoder summary")
+        return
+    
+    multi_encoder_data = results['multi_encoder_data']
+    epochs = multi_encoder_data['epochs']
+    num_encoders = results['num_encoders']
+    
+    fig, axs = plt.subplots(1, 3, figsize=(18, 6))
+    
+    # 1. Final loss comparison across encoders
+    final_losses = []
+    encoder_labels = []
+    colors = plt.cm.Set1(np.linspace(0, 1, num_encoders))
+    
+    for encoder_idx, losses in multi_encoder_data['per_encoder_losses'].items():
+        final_losses.append(losses[-1])  # Last epoch loss
+        encoder_labels.append(f'Encoder {encoder_idx}')
+    
+    bars = axs[0].bar(encoder_labels, final_losses, color=colors[:len(final_losses)])
+    axs[0].set_title('Final Loss per Encoder', fontsize=14)
+    axs[0].set_ylabel('Final Loss')
+    axs[0].set_xticklabels(encoder_labels, rotation=45)
+    
+    # Add value labels on bars
+    for bar, loss in zip(bars, final_losses):
+        height = bar.get_height()
+        axs[0].text(bar.get_x() + bar.get_width()/2., height,
+                   f'{loss:.3f}', ha='center', va='bottom')
+    
+    # 2. Loss variance across encoders over time
+    loss_variances = []
+    for epoch_idx in range(len(epochs)):
+        epoch_losses = [multi_encoder_data['per_encoder_losses'][enc_idx][epoch_idx] 
+                       for enc_idx in multi_encoder_data['per_encoder_losses'].keys()]
+        loss_variances.append(np.var(epoch_losses))
+    
+    axs[1].plot(epochs, loss_variances, marker='o', linewidth=2, color='red')
+    axs[1].set_title('Loss Variance Across Encoders', fontsize=14)
+    axs[1].set_xlabel('Epoch')
+    axs[1].set_ylabel('Loss Variance')
+    axs[1].grid(True, alpha=0.3)
+    
+    # 3. Training progress comparison
+    axs[2].set_title('Training Progress: All vs Average', fontsize=14)
+    
+    # Plot individual encoder losses (thin lines)
+    for i, (encoder_idx, losses) in enumerate(multi_encoder_data['per_encoder_losses'].items()):
+        axs[2].plot(epochs, losses, color=colors[i], alpha=0.6, linewidth=1, 
+                   label=f'Encoder {encoder_idx}')
+    
+    # Plot average loss (thick line)
+    axs[2].plot(epochs, results['epoch_losses'], 'k-', linewidth=3, 
+               label='Average', alpha=0.9)
+    
+    axs[2].set_xlabel('Epoch')
+    axs[2].set_ylabel('Loss')
+    axs[2].legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    axs[2].grid(True, alpha=0.3)
+    
+    plt.suptitle(f'Multi-Encoder Training Summary ({num_encoders} Encoders)', fontsize=16)
+    plt.tight_layout()
+    
+    if save_dir:
+        plt.savefig(os.path.join(save_dir, 'multi_encoder_summary.png'), dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"Multi-encoder summary plot saved to {save_dir}/multi_encoder_summary.png")
+    else:
+        plt.show()
+
+##############################
 # LOAD LATENT REPRESENTATIONS
 ##############################
 
@@ -671,22 +927,47 @@ def plot_reconstructions(results, save_dir=None, filename_prefix=""):
 
 def visualize_all_results(results, save_dir=None):
     """Plot all visualizations for the results."""
+    
+    # First, check if this is multi-encoder training and process accordingly
+    processed_results = extract_multi_encoder_metrics(results)
+    
+    # Check if this is multi-encoder training
+    is_multi_encoder = processed_results.get('is_multi_encoder', False)
+    
+    if is_multi_encoder:
+        print("\nDetected multi-encoder training results")
+        print(f"Number of encoders: {processed_results['num_encoders']}")
+        
+        # Plot multi-encoder specific visualizations
+        print("\nPlotting multi-encoder training losses...")
+        plot_multi_encoder_training_losses(processed_results, save_dir)
+        
+        print("\nPlotting multi-encoder summary...")
+        plot_multi_encoder_summary(processed_results, save_dir)
+        
+        # Plot multi-encoder accuracy visualizations
+        print("\nPlotting multi-encoder accuracies...")
+        plot_multi_encoder_accuracies(processed_results, save_dir)
+        
+        print("\nPlotting multi-encoder accuracy summary...")
+        plot_multi_encoder_accuracy_summary(processed_results, save_dir)
+    
     print("\nPlotting training progress and latent space...")
-    plot_training_and_latent(results, save_dir)
+    plot_training_and_latent(processed_results, save_dir)
 
     print("\nPlotting latent space analysis...")
-    plot_latent_analysis(results, save_dir)
+    plot_latent_analysis(processed_results, save_dir)
 
     print("\nPlotting epoch accuracies over time...")
-    plot_epoch_accuracies(results, save_dir)
+    plot_epoch_accuracies(processed_results, save_dir)
 
-    if 'losses_gradient_ascent' in results:
-        if len(results['losses_gradient_ascent']) > 0:
+    if 'losses_gradient_ascent' in processed_results:
+        if len(processed_results['losses_gradient_ascent']) > 0:
             print("\nPlotting z optimization losses...")
-            plot_z_optimization_losses(results, save_dir)
+            plot_z_optimization_losses(processed_results, save_dir)
 
     # print("\nPlotting reconstructions...")
-    # plot_reconstructions(results, save_dir)
+    # plot_reconstructions(processed_results, save_dir)
 
 
 def plot_evaluation_results(results, save_dir=None):
@@ -895,6 +1176,13 @@ def visualize_stored_results(run_dir):
     if results is not None:
         print("\nVisualizing training results...")
         try:
+            # Check if this is multi-encoder training and add appropriate info
+            processed_results = extract_multi_encoder_metrics(results)
+            is_multi_encoder = processed_results.get('is_multi_encoder', False)
+            
+            if is_multi_encoder:
+                print(f"Detected multi-encoder training with {processed_results['num_encoders']} encoders")
+            
             visualize_all_results(results, run_dir)
         except Exception as e:
             print(f"⚠ Warning: Could not visualize training results: {e}")
@@ -961,7 +1249,18 @@ def plot_model_summary(results, model_params, save_dir=None):
     param_text += f"Dropout: {model_params.get('DROPOUT', 'N/A')}\n"
     param_text += f"Max Length: {model_params.get('MAX_LENGTH', 'N/A')}\n"
     param_text += f"Encoder Max Length: {model_params.get('ENCODER_MAX_LENGTH', 'N/A')}\n"
-    param_text += f"Decoder Max Length: {model_params.get('DECODER_MAX_LENGTH', 'N/A')}\n\n"
+    param_text += f"Decoder Max Length: {model_params.get('DECODER_MAX_LENGTH', 'N/A')}\n"
+    
+    # Add multi-encoder information if available
+    num_encoders = model_params.get('NUM_ENCODERS', 1)
+    if num_encoders > 1:
+        param_text += f"Number of Encoders: {num_encoders} (Multi-Encoder Mode)\n"
+        param_text += f"Training Strategy: Individual encoder training with shared latent space\n"
+        param_text += f"Inference Strategy: Product of Experts (PoE)\n"
+    else:
+        param_text += f"Number of Encoders: {num_encoders} (Single-Encoder Mode)\n"
+    
+    param_text += "\n"
     
     param_text += "Training Settings:\n"
     param_text += f"Batch Size: {model_params.get('BATCH_SIZE', 'N/A')}\n"
@@ -1018,34 +1317,56 @@ def plot_model_summary(results, model_params, save_dir=None):
     results_text = "Results Summary:\n\n"
     
     if results is not None:
-        # Training results
+        # Check for multi-encoder training
+        processed_results = extract_multi_encoder_metrics(results)
+        is_multi_encoder = processed_results.get('is_multi_encoder', False)
+        
+        if is_multi_encoder:
+            results_text += f"Multi-Encoder Training Results ({processed_results['num_encoders']} encoders):\\n\\n"
+            
+            # Show final losses for each encoder
+            if 'multi_encoder_data' in processed_results:
+                multi_data = processed_results['multi_encoder_data']
+                results_text += "Final Loss per Encoder:\\n"
+                for encoder_idx, losses in multi_data['per_encoder_losses'].items():
+                    final_loss = losses[-1] if losses else 0.0
+                    results_text += f"  Encoder {encoder_idx}: {final_loss:.4f}\\n"
+                
+                # Average final loss
+                avg_final_loss = processed_results['epoch_losses'][-1] if processed_results['epoch_losses'] else 0.0
+                results_text += f"  Average: {avg_final_loss:.4f}\\n\\n"
+        
+        # Training results (accuracy is same for both single and multi-encoder)
         if 'epoch_accuracies' in results and results['epoch_accuracies']:
             last_epoch = results['epoch_accuracies'][-1]
-            results_text += "Training Results (Last Epoch):\n"
-            results_text += f"Shape Accuracy: {last_epoch['shape_accuracy']:.4f}\n"
-            results_text += f"Grid Accuracy: {last_epoch['grid_accuracy']:.4f}\n"
-            results_text += f"Overall Accuracy: {last_epoch['overall_accuracy']:.4f}\n"
-            results_text += f"Sample Exact Accuracy: {last_epoch['sample_exact_accuracy']:.4f}\n\n"
+            if is_multi_encoder:
+                results_text += "Final Evaluation Results (PoE Inference):\\n"
+            else:
+                results_text += "Training Results (Last Epoch):\\n"
+            results_text += f"Shape Accuracy: {last_epoch['shape_accuracy']:.4f}\\n"
+            results_text += f"Grid Accuracy: {last_epoch['grid_accuracy']:.4f}\\n"
+            results_text += f"Overall Accuracy: {last_epoch['overall_accuracy']:.4f}\\n"
+            results_text += f"Sample Exact Accuracy: {last_epoch['sample_exact_accuracy']:.4f}\\n\\n"
         
         # Evaluation results (if embedded in training results)
         if 'evaluation_results' in results:
-            results_text += "Evaluation Results:\n"
+            results_text += "Evaluation Results:\\n"
             for key in results['evaluation_results']:
                 metrics = results['evaluation_results'][key]['metrics']
-                results_text += f"\nKey {key}:\n"
-                results_text += f"Support Loss: {metrics['support_loss']:.4f}\n"
-                results_text += f"Query Loss: {metrics['query_loss']:.4f}\n"
-                results_text += f"Shape Accuracy: {metrics['shape_accuracy']:.4f}\n"
-                results_text += f"Grid Accuracy: {metrics['grid_accuracy']:.4f}\n"
-                results_text += f"Overall Accuracy: {metrics['overall_accuracy']:.4f}\n"
-                results_text += f"Sample Exact Accuracy: {metrics['sample_exact_accuracy']:.4f}\n"
+                results_text += f"\\nKey {key}:\\n"
+                results_text += f"Support Loss: {metrics['support_loss']:.4f}\\n"
+                results_text += f"Query Loss: {metrics['query_loss']:.4f}\\n"
+                results_text += f"Shape Accuracy: {metrics['shape_accuracy']:.4f}\\n"
+                results_text += f"Grid Accuracy: {metrics['grid_accuracy']:.4f}\\n"
+                results_text += f"Overall Accuracy: {metrics['overall_accuracy']:.4f}\\n"
+                results_text += f"Sample Exact Accuracy: {metrics['sample_exact_accuracy']:.4f}\\n"
     else:
-        results_text += "No training results available.\n"
-        results_text += "Only model parameters are shown.\n\n"
-        results_text += "This could be because:\n"
-        results_text += "• Training hasn't been run yet\n"
-        results_text += "• Results file is missing or corrupted\n"
-        results_text += "• Only evaluation has been performed\n"
+        results_text += "No training results available.\\n"
+        results_text += "Only model parameters are shown.\\n\\n"
+        results_text += "This could be because:\\n"
+        results_text += "• Training hasn't been run yet\\n"
+        results_text += "• Results file is missing or corrupted\\n"
+        results_text += "• Only evaluation has been performed\\n"
     
     plt.text(0.05, 0.95, results_text, transform=plt.gca().transAxes,
              verticalalignment='top', fontfamily='monospace', fontsize=10)
@@ -1057,5 +1378,238 @@ def plot_model_summary(results, model_params, save_dir=None):
         plt.savefig(os.path.join(save_dir, 'model_summary.png'), dpi=150, bbox_inches='tight')
         plt.close()
         print(f"Model summary plot saved to {save_dir}/model_summary.png")
+    else:
+        plt.show()
+
+def extract_multi_encoder_accuracies(results):
+    """
+    Extract per-encoder and PoE accuracy data from multi-encoder training results.
+    
+    Args:
+        results: Training results dictionary
+        
+    Returns:
+        dict: Processed accuracy data for visualization
+    """
+    if 'epoch_accuracies' not in results or not results['epoch_accuracies']:
+        return None
+    
+    # Check if this includes detailed multi-encoder accuracy data
+    has_detailed_accuracy = False
+    for epoch_data in results['epoch_accuracies']:
+        if isinstance(epoch_data, dict) and 'individual_encoders' in epoch_data:
+            has_detailed_accuracy = True
+            break
+    
+    if not has_detailed_accuracy:
+        return None
+    
+    print("Processing multi-encoder accuracy data for visualization...")
+    
+    # Initialize accuracy storage
+    encoder_indices = set()
+    detailed_epochs = []
+    
+    # Find all encoder indices and detailed epochs
+    for epoch_data in results['epoch_accuracies']:
+        if isinstance(epoch_data, dict) and 'individual_encoders' in epoch_data:
+            detailed_epochs.append(epoch_data)
+            encoder_indices.update(epoch_data['individual_encoders'].keys())
+    
+    num_encoders = len(encoder_indices)
+    num_epochs = len(detailed_epochs)
+    
+    print(f"Found detailed accuracy data: {num_encoders} encoders, {num_epochs} epochs")
+    
+    # Initialize per-encoder accuracy storage
+    encoder_accuracies = {
+        'epochs': [ep['epoch'] for ep in detailed_epochs],
+        'individual_encoders': {
+            enc_idx: {
+                'shape_accuracy': [],
+                'grid_accuracy': [],
+                'overall_accuracy': [],
+                'sample_exact_accuracy': []
+            } for enc_idx in encoder_indices
+        },
+        'poe_accuracy': {
+            'shape_accuracy': [],
+            'grid_accuracy': [],
+            'overall_accuracy': [],
+            'sample_exact_accuracy': []
+        }
+    }
+    
+    # Extract accuracy data for each epoch
+    for epoch_data in detailed_epochs:
+        # Individual encoder accuracies
+        for enc_idx in encoder_indices:
+            if enc_idx in epoch_data['individual_encoders']:
+                enc_data = epoch_data['individual_encoders'][enc_idx]
+                encoder_accuracies['individual_encoders'][enc_idx]['shape_accuracy'].append(enc_data['shape_accuracy'])
+                encoder_accuracies['individual_encoders'][enc_idx]['grid_accuracy'].append(enc_data['grid_accuracy'])
+                encoder_accuracies['individual_encoders'][enc_idx]['overall_accuracy'].append(enc_data['overall_accuracy'])
+                encoder_accuracies['individual_encoders'][enc_idx]['sample_exact_accuracy'].append(enc_data['sample_exact_accuracy'])
+            else:
+                # Fill with zeros if encoder data missing
+                encoder_accuracies['individual_encoders'][enc_idx]['shape_accuracy'].append(0.0)
+                encoder_accuracies['individual_encoders'][enc_idx]['grid_accuracy'].append(0.0)
+                encoder_accuracies['individual_encoders'][enc_idx]['overall_accuracy'].append(0.0)
+                encoder_accuracies['individual_encoders'][enc_idx]['sample_exact_accuracy'].append(0.0)
+        
+        # PoE accuracy
+        if 'poe_accuracy' in epoch_data:
+            poe_data = epoch_data['poe_accuracy']
+            encoder_accuracies['poe_accuracy']['shape_accuracy'].append(poe_data['shape_accuracy'])
+            encoder_accuracies['poe_accuracy']['grid_accuracy'].append(poe_data['grid_accuracy'])
+            encoder_accuracies['poe_accuracy']['overall_accuracy'].append(poe_data['overall_accuracy'])
+            encoder_accuracies['poe_accuracy']['sample_exact_accuracy'].append(poe_data['sample_exact_accuracy'])
+        else:
+            # Fill with zeros if PoE data missing
+            encoder_accuracies['poe_accuracy']['shape_accuracy'].append(0.0)
+            encoder_accuracies['poe_accuracy']['grid_accuracy'].append(0.0)
+            encoder_accuracies['poe_accuracy']['overall_accuracy'].append(0.0)
+            encoder_accuracies['poe_accuracy']['sample_exact_accuracy'].append(0.0)
+    
+    print(f"✓ Multi-encoder accuracy data processed: {num_encoders} encoders, {num_epochs} epochs")
+    return encoder_accuracies
+
+def plot_multi_encoder_accuracies(results, save_dir=None):
+    """
+    Plot detailed multi-encoder accuracy curves showing per-encoder and PoE performance.
+    
+    Args:
+        results: Training results dictionary
+        save_dir: Directory to save plots (optional)
+    """
+    accuracy_data = extract_multi_encoder_accuracies(results)
+    
+    if accuracy_data is None:
+        print("No detailed multi-encoder accuracy data found, skipping accuracy plots")
+        return
+    
+    epochs = accuracy_data['epochs']
+    num_encoders = len(accuracy_data['individual_encoders'])
+    
+    # Create subplots for different accuracy metrics
+    fig, axs = plt.subplots(2, 2, figsize=(16, 12))
+    
+    # Colors for different encoders
+    colors = plt.cm.Set1(np.linspace(0, 1, num_encoders))
+    
+    metrics = ['shape_accuracy', 'grid_accuracy', 'overall_accuracy', 'sample_exact_accuracy']
+    metric_titles = ['Shape Accuracy', 'Grid Accuracy', 'Overall Accuracy', 'Sample Exact Accuracy']
+    
+    for idx, (metric, title) in enumerate(zip(metrics, metric_titles)):
+        ax = axs[idx // 2, idx % 2]
+        
+        # Plot individual encoder accuracies
+        for i, (encoder_idx, enc_data) in enumerate(accuracy_data['individual_encoders'].items()):
+            ax.plot(epochs, enc_data[metric], marker='o', label=f'Encoder {encoder_idx}', 
+                   color=colors[i], linewidth=2, alpha=0.7)
+        
+        # Plot PoE accuracy (thick line)
+        ax.plot(epochs, accuracy_data['poe_accuracy'][metric], 'k-', linewidth=4, 
+               label='Product of Experts (PoE)', alpha=0.9)
+        
+        ax.set_title(title, fontsize=14)
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Accuracy')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        ax.set_ylim(0, 1.05)  # Set consistent y-axis for accuracies
+    
+    plt.suptitle(f'Multi-Encoder Accuracy Comparison ({num_encoders} Encoders)', fontsize=16)
+    plt.tight_layout()
+    
+    if save_dir:
+        plt.savefig(os.path.join(save_dir, 'multi_encoder_accuracies.png'), dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"Multi-encoder accuracy plot saved to {save_dir}/multi_encoder_accuracies.png")
+    else:
+        plt.show()
+
+def plot_multi_encoder_accuracy_summary(results, save_dir=None):
+    """
+    Plot a summary view of multi-encoder accuracy showing final performance and convergence.
+    
+    Args:
+        results: Training results dictionary
+        save_dir: Directory to save plots (optional)
+    """
+    accuracy_data = extract_multi_encoder_accuracies(results)
+    
+    if accuracy_data is None:
+        print("No detailed multi-encoder accuracy data found, skipping accuracy summary")
+        return
+    
+    epochs = accuracy_data['epochs']
+    num_encoders = len(accuracy_data['individual_encoders'])
+    
+    fig, axs = plt.subplots(1, 3, figsize=(18, 6))
+    
+    # 1. Final accuracy comparison across encoders
+    final_overall_accuracies = []
+    encoder_labels = []
+    colors = plt.cm.Set1(np.linspace(0, 1, num_encoders + 1))  # +1 for PoE
+    
+    for encoder_idx, enc_data in accuracy_data['individual_encoders'].items():
+        final_overall_accuracies.append(enc_data['overall_accuracy'][-1])
+        encoder_labels.append(f'Encoder {encoder_idx}')
+    
+    # Add PoE final accuracy
+    final_overall_accuracies.append(accuracy_data['poe_accuracy']['overall_accuracy'][-1])
+    encoder_labels.append('PoE')
+    
+    bars = axs[0].bar(encoder_labels, final_overall_accuracies, color=colors[:len(final_overall_accuracies)])
+    axs[0].set_title('Final Overall Accuracy', fontsize=14)
+    axs[0].set_ylabel('Accuracy')
+    axs[0].set_xticklabels(encoder_labels, rotation=45)
+    axs[0].set_ylim(0, 1.05)
+    
+    # Add value labels on bars
+    for bar, acc in zip(bars, final_overall_accuracies):
+        height = bar.get_height()
+        axs[0].text(bar.get_x() + bar.get_width()/2., height + 0.01,
+                   f'{acc:.3f}', ha='center', va='bottom')
+    
+    # 2. Accuracy variance across encoders over time
+    accuracy_variances = []
+    for epoch_idx in range(len(epochs)):
+        epoch_accuracies = [accuracy_data['individual_encoders'][enc_idx]['overall_accuracy'][epoch_idx] 
+                          for enc_idx in accuracy_data['individual_encoders'].keys()]
+        accuracy_variances.append(np.var(epoch_accuracies))
+    
+    axs[1].plot(epochs, accuracy_variances, marker='o', linewidth=2, color='red')
+    axs[1].set_title('Accuracy Variance Across Encoders', fontsize=14)
+    axs[1].set_xlabel('Epoch')
+    axs[1].set_ylabel('Accuracy Variance')
+    axs[1].grid(True, alpha=0.3)
+    
+    # 3. Overall accuracy progress: Individual vs PoE
+    axs[2].set_title('Overall Accuracy Progress', fontsize=14)
+    
+    # Plot individual encoder overall accuracies (thin lines)
+    for i, (encoder_idx, enc_data) in enumerate(accuracy_data['individual_encoders'].items()):
+        axs[2].plot(epochs, enc_data['overall_accuracy'], color=colors[i], alpha=0.6, linewidth=1.5, 
+                   label=f'Encoder {encoder_idx}')
+    
+    # Plot PoE overall accuracy (thick line)
+    axs[2].plot(epochs, accuracy_data['poe_accuracy']['overall_accuracy'], 'k-', linewidth=3, 
+               label='PoE', alpha=0.9)
+    
+    axs[2].set_xlabel('Epoch')
+    axs[2].set_ylabel('Overall Accuracy')
+    axs[2].legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    axs[2].grid(True, alpha=0.3)
+    axs[2].set_ylim(0, 1.05)
+    
+    plt.suptitle(f'Multi-Encoder Accuracy Summary ({num_encoders} Encoders)', fontsize=16)
+    plt.tight_layout()
+    
+    if save_dir:
+        plt.savefig(os.path.join(save_dir, 'multi_encoder_accuracy_summary.png'), dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"Multi-encoder accuracy summary plot saved to {save_dir}/multi_encoder_accuracy_summary.png")
     else:
         plt.show()
