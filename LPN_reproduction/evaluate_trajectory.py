@@ -19,6 +19,7 @@ from models.base_model import LatentProgramNetwork
 from utils.settings_manager import settings
 from utils.model_utils import load_model, set_seed
 from utils.visualizers import load_evaluation_latent_data, get_comprehensive_latent_data_for_trajectory
+from utils.data_preparation import extract_grid_from_sequence
 
 def print_trajectory_info(trajectory_info):
     """
@@ -80,32 +81,6 @@ def print_trajectory_info(trajectory_info):
     print("Note: Reconstructions are computed on-demand during visualization using the model decoder.")
     print("Note: Trajectory now includes initial step (step 0) with encoder output and initial loss.")
 
-def extract_grid_from_sequence(sequence, max_rows=30, max_cols=30):
-    """
-    Extract grid from ARC sequence format and get actual dimensions.
-    This matches the approach in visualizers.py plot_reconstructions function.
-    """
-    sequence = np.array(sequence)
-    
-    if len(sequence) >= 902:
-        # ARC format: shape info is at the end, not at positions 900-901
-        rows = int(sequence[-2])
-        cols = int(sequence[-1])
-        
-        # Grid data is the first 900 elements
-        grid_flat = sequence[:900]
-        grid_full = grid_flat.reshape(30, 30)
-        actual_grid = grid_full[:rows, :cols]
-        return actual_grid, (rows, cols)
-    else:
-        # Try to infer from shape
-        grid_size = int(np.sqrt(len(sequence)))
-        if grid_size * grid_size == len(sequence):
-            grid = sequence.reshape(grid_size, grid_size)
-            return grid, (grid_size, grid_size)
-        else:
-            # Fallback: assume it's already the right shape
-            return sequence, sequence.shape
 
 def load_training_latent_data(run_dir):
     """

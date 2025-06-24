@@ -524,4 +524,73 @@ def load_evaluation_results(run_dir):
     return results
 
 
+##############################
+# Collect Latent Data Helper
+##############################
+def collect_latent_data(model, dataloader, device, encoder_idx=None, max_samples=100, data_type=None):
+    """Collect latent representations from a model.
 
+    Args:
+        model: The model providing the latent representations.
+        dataloader: DataLoader yielding input/output pairs.
+        device: Device to perform computation on.
+        encoder_idx: Optional index of the encoder to use (``None`` for PoE or single encoder).
+        max_samples: Maximum number of samples to collect.
+        data_type: Optional string describing the data being collected.
+
+    Returns:
+        dict: Dictionary containing latent statistics and metadata.
+    """
+    model.eval()
+
+    latent_data = {
+        'latent_mus': [],
+        'latent_log_vars': [],
+        'latent_zs': [],
+        'input_samples': [],
+        'output_samples': [],
+        'num_samples': 0
+    }
+
+    if encoder_idx is not None:
+        latent_data['encoder_idx'] = encoder_idx
+    if data_type is not None:
+        latent_data['data_type'] = data_type
+
+    with torch.no_grad():
+        sample_count = 0
+        for batch_input, batch_target in dataloader:
+            if sample_count >= max_samples:
+                break
+
+            batch_input = batch_input.to(device)
+            batch_target = batch_target.to(device)
+
+            if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
+                if encoder_idx is not None:
+                    mu, log_var = model(batch_input, batch_target, encoder_idx=encoder_idx)[1:3]
+                else:
+                    mu, log_var = model(batch_input, batch_target)[1:3]
+            else:
+                mu, log_var = model.encoder(batch_input, batch_target)
+
+            z = model.reparameterize(mu, log_var)
+
+            batch_size = min(batch_input.size(0), max_samples - sample_count)
+            latent_data['latent_mus'].append(mu[:batch_size].cpu().numpy())
+            latent_data['latent_log_vars'].append(log_var[:batch_size].cpu().numpy())
+            latent_data['latent_zs'].append(z[:batch_size].cpu().numpy())
+            latent_data['input_samples'].append(batch_input[:batch_size].cpu().numpy())
+            latent_data['output_samples'].append(batch_target[:batch_size].cpu().numpy())
+
+            sample_count += batch_size
+
+    if latent_data['latent_mus']:
+        latent_data['latent_mus'] = np.concatenate(latent_data['latent_mus'], axis=0)
+        latent_data['latent_log_vars'] = np.concatenate(latent_data['latent_log_vars'], axis=0)
+        latent_data['latent_zs'] = np.concatenate(latent_data['latent_zs'], axis=0)
+        latent_data['input_samples'] = np.concatenate(latent_data['input_samples'], axis=0)
+        latent_data['output_samples'] = np.concatenate(latent_data['output_samples'], axis=0)
+        latent_data['num_samples'] = len(latent_data['latent_mus'])
+
+    return latent_data

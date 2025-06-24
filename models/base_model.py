@@ -434,28 +434,28 @@ class LatentProgramNetwork(nn.Module):
         self.latent_dim = latent_dim
         self.num_encoders = num_encoders
         
-        if num_encoders == 1:
-            # Single encoder mode
-            self.encoder = TransformerEncoder(input_dim, encoder_hidden_dim, encoder_layers, encoder_heads,
-                                            dropout, max_length=encoder_max_length)
-            self.decoder = TransformerDecoder(input_dim, decoder_hidden_dim, decoder_layers, decoder_heads, dropout)
-            self.is_multi_encoder = False
-        else:
-            # Multi-encoder mode
-            self.multi_encoder = MultiEncoderLPN(
-                num_encoders=num_encoders,
-                latent_dim=latent_dim,
-                encoder_hidden_dim=encoder_hidden_dim,
-                decoder_hidden_dim=decoder_hidden_dim,
-                encoder_layers=encoder_layers,
-                decoder_layers=decoder_layers,
-                encoder_heads=encoder_heads,
-                decoder_heads=decoder_heads,
-                dropout=dropout,
-                encoder_max_length=encoder_max_length,
-                decoder_max_length=decoder_max_length
-            )
-            self.is_multi_encoder = True
+        # Always initialize the multi-encoder wrapper
+        self.multi_encoder = MultiEncoderLPN(
+            num_encoders=num_encoders,
+            latent_dim=latent_dim,
+            encoder_hidden_dim=encoder_hidden_dim,
+            decoder_hidden_dim=decoder_hidden_dim,
+            encoder_layers=encoder_layers,
+            decoder_layers=decoder_layers,
+            encoder_heads=encoder_heads,
+            decoder_heads=decoder_heads,
+            dropout=dropout,
+            encoder_max_length=encoder_max_length,
+            decoder_max_length=decoder_max_length
+        )
+
+        # Expose single‑encoder style attributes for backwards compatibility
+        self.encoder = self.multi_encoder.encoders[0]
+        self.decoder = self.multi_encoder.decoder
+
+        # Treat all configurations as multi‑encoder; track if originally single
+        self.is_multi_encoder = True
+        self.is_actually_single_encoder = (num_encoders == 1)
     
     def reparameterize(self, mu: torch.Tensor, log_var: torch.Tensor) -> torch.Tensor:
         std = torch.exp(0.5 * log_var)
@@ -463,20 +463,18 @@ class LatentProgramNetwork(nn.Module):
         return mu + eps * std
 
     def forward(self, input_seq: torch.Tensor, target_seq: torch.Tensor, encoder_idx: int = None) -> Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor]:
-        if self.is_multi_encoder:
-            if encoder_idx is not None:
-                # Individual encoder training mode
-                return self.multi_encoder.forward_single_encoder(encoder_idx, input_seq, target_seq, training=True, sample_latent=True)
-            else:
-                # Inference mode with PoE - create identical views for all encoders
-                input_views = [(input_seq, target_seq) for _ in range(self.num_encoders)]
-                return self.multi_encoder(input_views, training=False, sample_latent=False, use_poe=True)
-        else:
-            # Single encoder mode
-            mu, log_var = self.encoder(input_seq, target_seq)
-            z = self.reparameterize(mu, log_var)
-            shape_logits, grid_logits = self.decoder(z, input_seq, target_seq=target_seq)
-            return (shape_logits, grid_logits), mu, log_var
+        """Unified forward for both single and multi-encoder setups."""
+        if encoder_idx is not None:
+            # Individual encoder training/inference
+            return self.multi_encoder.forward_single_encoder(
+                encoder_idx, input_seq, target_seq, training=True, sample_latent=True
+            )
+
+        # PoE inference path – works even when num_encoders == 1
+        input_views = [(input_seq, target_seq) for _ in range(self.num_encoders)]
+        return self.multi_encoder(
+            input_views, training=False, sample_latent=False, use_poe=True
+        )
 
 # -------------------------------------------------
 #  Convenience loss wrapper (matches existing API)

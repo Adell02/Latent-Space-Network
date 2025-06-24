@@ -3,82 +3,50 @@ from torch.optim import Adam
 import json
 import numpy as np
 
-from utils.model_utils import set_seed, create_run_directory, setup_logging, prepare_dataloader, save_checkpoint, save_results, count_model_parameters,save_model_params
 from models.base_model import LatentProgramNetwork, compute_loss
 from utils.settings_manager import settings
 from re_arc.main import generate_and_process_tasks
 from utils.latent_functions import get_optimized_z
 from utils.data_preparation import split_dataset_for_multi_encoder
 
+from utils.model_utils import (
+    set_seed,
+    create_run_directory,
+    setup_logging,
+    prepare_dataloader,
+    save_checkpoint,
+    save_results,
+    count_model_parameters,
+    save_model_params,
+    collect_latent_data,
+)
+
 ##############################
 # Latent Data Collection Functions
 ##############################
 
 def collect_multi_encoder_latent_data(model, encoder_dataloaders, device, max_samples_per_encoder=50):
-    """
-    Collect latent representations from each encoder for visualization.
-    
-    Args:
-        model: Multi-encoder model
-        encoder_dataloaders: List of dataloaders for each encoder
-        device: Device to run on
-        max_samples_per_encoder: Maximum samples to collect per encoder
-        
-    Returns:
-        dict: Latent data organized by encoder
-    """
-    model.eval()
+    """Collect latent representations from each encoder for visualization."""    
     encoder_latent_data = {}
     
-    with torch.no_grad():
-        for encoder_idx, dataloader in enumerate(encoder_dataloaders):
-            print(f"  Collecting from Encoder {encoder_idx}...")
-            
-            latent_data = {
-                'latent_mus': [],
-                'latent_log_vars': [],
-                'latent_zs': [],
-                'input_samples': [],
-                'output_samples': [],
-                'encoder_idx': encoder_idx,
-                'data_type': f'training_encoder_{encoder_idx}',
-                'num_samples': 0
-            }
-            
-            sample_count = 0
-            for batch_input, batch_target in dataloader:
-                if sample_count >= max_samples_per_encoder:
-                    break
-                    
-                batch_input = batch_input.to(device)
-                batch_target = batch_target.to(device)
-                
-                # Get latent representations from specific encoder
-                mu, log_var = model(batch_input, batch_target, encoder_idx=encoder_idx)[1:3]
-                z = model.reparameterize(mu, log_var)
-                
-                # Store data
-                batch_size = min(batch_input.size(0), max_samples_per_encoder - sample_count)
-                latent_data['latent_mus'].append(mu[:batch_size].cpu().numpy())
-                latent_data['latent_log_vars'].append(log_var[:batch_size].cpu().numpy())
-                latent_data['latent_zs'].append(z[:batch_size].cpu().numpy())
-                latent_data['input_samples'].append(batch_input[:batch_size].cpu().numpy())
-                latent_data['output_samples'].append(batch_target[:batch_size].cpu().numpy())
-                
-                sample_count += batch_size
-            
-            # Concatenate all batches
-            if latent_data['latent_mus']:
-                latent_data['latent_mus'] = np.concatenate(latent_data['latent_mus'], axis=0)
-                latent_data['latent_log_vars'] = np.concatenate(latent_data['latent_log_vars'], axis=0)
-                latent_data['latent_zs'] = np.concatenate(latent_data['latent_zs'], axis=0)
-                latent_data['input_samples'] = np.concatenate(latent_data['input_samples'], axis=0)
-                latent_data['output_samples'] = np.concatenate(latent_data['output_samples'], axis=0)
-                latent_data['num_samples'] = len(latent_data['latent_mus'])
-                
-                print(f"    ✓ Collected {latent_data['num_samples']} samples from Encoder {encoder_idx}")
-            
-            encoder_latent_data[f'encoder_{encoder_idx}'] = latent_data
+    for encoder_idx, dataloader in enumerate(encoder_dataloaders):
+        print(f"  Collecting from Encoder {encoder_idx}...")
+
+        latent_data = collect_latent_data(
+            model,
+            dataloader,
+            device,
+            encoder_idx=encoder_idx,
+            max_samples=max_samples_per_encoder,
+            data_type=f"training_encoder_{encoder_idx}",
+        )
+
+        if latent_data.get('num_samples', 0) > 0:
+            print(
+                f"    ✓ Collected {latent_data['num_samples']} samples from Encoder {encoder_idx}"
+            )
+
+        encoder_latent_data[f"encoder_{encoder_idx}"] = latent_data
     
     return encoder_latent_data
 
@@ -197,10 +165,7 @@ def evaluate_accuracy(model, dataloader, device, is_multi_encoder=False, encoder
                     z_eval = model.reparameterize(mu_eval, log_var_eval)
 
             # Decode
-            if is_multi_encoder:
-                shape_logits_eval, grid_logits_eval = model.multi_encoder.decoder(z_eval, batch_input_eval, target_seq=batch_target_eval)
-            else:
-                shape_logits_eval, grid_logits_eval = model.decoder(z_eval, batch_input_eval, target_seq=batch_target_eval)
+            shape_logits_eval, grid_logits_eval = model.decoder(z_eval, batch_input_eval, target_seq=batch_target_eval)
             
             shape_pred_eval = shape_logits_eval.argmax(dim=-1)
             grid_pred_eval = grid_logits_eval.argmax(dim=-1)
@@ -401,7 +366,7 @@ def main_training(file_store_name):
 
     # Check if multi-encoder training is enabled
     NUM_ENCODERS = model_architecture.get('num_encoders', 1)
-    is_multi_encoder = NUM_ENCODERS > 1
+    is_multi_encoder = True
     
     if is_multi_encoder:
         logger.info(f"Multi-encoder training enabled with {NUM_ENCODERS} encoders")
@@ -638,18 +603,7 @@ def main_training(file_store_name):
         
         if should_evaluate:
             logger.info(f"Running intermediate evaluation at epoch {epoch+1}...")
-            
-            # Collect current latent data
-            if is_multi_encoder:
-                current_latent_data = collect_multi_encoder_latent_data(
-                    model, encoder_dataloaders, device, max_samples_per_encoder=25
-                )
-                results[f'epoch_{epoch+1}_latent_data'] = current_latent_data
-            else:
-                current_latent_data = collect_single_encoder_latent_data(
-                    model, dataloader, device, max_samples=50, data_type=f'training_epoch_{epoch+1}'
-                )
-                results[f'epoch_{epoch+1}_latent_data'] = current_latent_data
+            logger.info("Note: Latent data collection moved to evaluation phase for efficiency.")
         
         if should_save:
             logger.info(f"Saving checkpoint and results at epoch {epoch+1}...")
@@ -664,24 +618,7 @@ def main_training(file_store_name):
             logger.info(f"Checkpoint and results saved at epoch {epoch+1}.")
             print(f"Checkpoint and results saved at epoch {epoch+1}.")
 
-    print("Training complete. Collecting latent representations for visualization...")
-    model.eval()
-    
-    # Collect latent representations from each encoder for visualization
-    if is_multi_encoder:
-        print("Collecting latent representations for multi-encoder visualization...")
-        encoder_latent_data = collect_multi_encoder_latent_data(
-            model, encoder_dataloaders, device, max_samples_per_encoder=50
-        )
-        results['encoder_latent_data'] = encoder_latent_data
-        print(f"✓ Collected latent data for {len(encoder_latent_data)} encoders")
-    else:
-        print("Collecting latent representations for single encoder visualization...")
-        single_latent_data = collect_single_encoder_latent_data(
-            model, dataloader, device, max_samples=100, data_type='training'
-        )
-        results['single_encoder_latent_data'] = single_latent_data
-        print(f"✓ Collected latent data for {single_latent_data['num_samples']} samples")
+    print("Training complete.")
     
     # Legacy final evaluation loop (reduced scope)
     final_eval_batch_count = 0
@@ -714,11 +651,7 @@ def main_training(file_store_name):
                     z = model.reparameterize(mu, log_var)
         
         with torch.no_grad(): # Ensure no grads for decoder pass
-            if is_multi_encoder:
-                shape_logits, grid_logits = model.multi_encoder.decoder(z, batch_input, target_seq=batch_target)
-            else:
-                shape_logits, grid_logits = model.decoder(z, batch_input, target_seq=batch_target) # Using target_seq for reconstruction eval
-            
+            shape_logits, grid_logits = model.decoder(z, batch_input, target_seq=batch_target) 
             # Store only a subset of these potentially large tensors if memory is an issue
             if isinstance(results.get('latent_mus'), list):
                 mu_np = mu.cpu().numpy() if isinstance(mu, torch.Tensor) else mu

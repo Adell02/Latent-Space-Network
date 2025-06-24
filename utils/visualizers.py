@@ -1,27 +1,7 @@
-from utils.data_preparation import transform_grid_to_sequence
-
-# Import extract_grid_from_sequence from evaluate_trajectory
-def extract_grid_from_sequence(sequence, max_rows=30, max_cols=30):
-    """Extract grid from sequence using the same logic as evaluate_trajectory.py"""
-    try:
-        if isinstance(sequence, (list, tuple)):
-            sequence = np.array(sequence)
-        
-        # Shape information is stored at indices 900 and 901
-        rows = int(sequence[900]) if len(sequence) > 900 else max_rows
-        cols = int(sequence[901]) if len(sequence) > 901 else max_cols
-        
-        # Grid data is at the beginning of the sequence
-        grid_data = sequence[:900]
-        grid = grid_data.reshape(30, 30)
-        
-        # Extract the relevant portion
-        actual_grid = grid[:rows, :cols] if rows > 0 and cols > 0 else np.zeros((1, 1))
-        
-        return actual_grid, (rows, cols)
-    except Exception as e:
-        print(f"Error extracting grid from sequence: {e}")
-        return np.zeros((max_rows, max_cols)), (max_rows, max_cols)
+from utils.data_preparation import (
+    transform_grid_to_sequence,
+    extract_grid_from_sequence
+)
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -41,6 +21,33 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 import seaborn as sns
 from utils.model_utils import load_model
+
+# Unified color palette for latent space visualizations
+COLOR_PALETTE = {
+    'training_encoder_0': '#FF6B6B',    # Red
+    'training_encoder_1': '#4ECDC4',    # Teal
+    'training_encoder_2': '#45B7D1',    # Blue
+    'training_encoder_3': '#96CEB4',    # Green
+    'support_encoder_0': '#FFB6C1',     # Light Red
+    'support_encoder_1': '#B4E7E1',     # Light Teal
+    'support_encoder_2': '#B3D9FF',     # Light Blue
+    'support_encoder_3': '#C8E6C9',     # Light Green
+    'query_encoder_0': '#8B0000',       # Dark Red
+    'query_encoder_1': '#006666',       # Dark Teal
+    'query_encoder_2': '#0066CC',       # Dark Blue
+    'query_encoder_3': '#2E8B57',       # Dark Green
+    'support_poe': '#FFD700',           # Gold
+    'query_poe': '#FF8C00',             # Dark Orange
+    'training_poe': '#9370DB',          # Medium Purple
+    'training_encoded': '#DDA0DD',      # Plum - for encoded training latents
+    # Fallback colors for additional encoders
+    'training_encoder_4': '#FF69B4',    # Hot Pink
+    'training_encoder_5': '#20B2AA',    # Light Sea Green
+    'support_encoder_4': '#FFB6C1',     # Light Pink
+    'support_encoder_5': '#AFEEEE',     # Pale Turquoise
+    'query_encoder_4': '#C71585',       # Medium Violet Red
+    'query_encoder_5': '#008B8B',       # Dark Cyan
+}
 
 # Get settings from settings manager
 evaluation_settings = settings.get_evaluation_settings()
@@ -1374,8 +1381,8 @@ def plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir=None):
 
 def create_multi_encoder_trajectory_reconstruction(trajectory_info, model, save_path, device='cuda'):
     """
-    Create a comprehensive multi-encoder trajectory reconstruction visualization.
-    Shows individual encoder outputs (once) and PoE trajectory evolution (5 steps).
+    Create a comprehensive multi-encoder trajectory reconstruction visualization with error maps.
+    Shows individual encoder outputs (once) and PoE trajectory evolution (5 steps) plus error analysis.
     
     Args:
         trajectory_info: Dictionary containing trajectory data
@@ -1774,7 +1781,7 @@ def create_multi_encoder_trajectory_reconstruction(trajectory_info, model, save_
 
 def create_trajectory_visualization(trajectory_info, model, save_path, device='cuda'):
     """
-    Create a simplified trajectory visualization for a single sample.
+    Create a trajectory visualization for a single sample with error maps.
     
     Args:
         trajectory_info: Dictionary containing trajectory data
@@ -1795,10 +1802,27 @@ def create_trajectory_visualization(trajectory_info, model, save_path, device='c
         print("⚠ Warning: Insufficient trajectory data for visualization")
         return
     
-    # Create figure with subplots
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    # Create figure with 3x3 subplots for error maps
+    fig, axes = plt.subplots(3, 3, figsize=(18, 18))
     
-    # 1. Loss trajectory
+    def create_error_map(target_grid, pred_grid):
+        """Create error map showing differences between target and prediction."""
+        if target_grid.shape != pred_grid.shape:
+            return np.zeros_like(target_grid)
+        
+        # 0 = correct, 1 = error
+        error_map = (target_grid != pred_grid).astype(np.float32)
+        return error_map
+    
+    # Extract target grid for error calculations
+    target_grid = None
+    if target_sample is not None:
+        try:
+            target_grid = extract_grid_from_sequence(target_sample)
+        except:
+            target_grid = None
+    
+    # 1. Loss trajectory (top-left)
     ax = axes[0, 0]
     if losses:
         ax.plot(range(len(losses)), losses, 'b-o', linewidth=2, markersize=4)
@@ -1806,11 +1830,18 @@ def create_trajectory_visualization(trajectory_info, model, save_path, device='c
         ax.set_xlabel('Optimization Step')
         ax.set_ylabel('Loss')
         ax.grid(True, alpha=0.3)
+        
+        # Add improvement percentage
+        if len(losses) > 1:
+            improvement = ((losses[0] - losses[-1]) / losses[0]) * 100
+            ax.text(0.02, 0.98, f'Improvement: {improvement:.1f}%', 
+                   transform=ax.transAxes, va='top', ha='left',
+                   bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
     else:
         ax.text(0.5, 0.5, 'No loss data available', ha='center', va='center', transform=ax.transAxes)
         ax.set_title('Loss Trajectory (No Data)')
     
-    # 2. Latent space trajectory (2D projection)
+    # 2. Latent space trajectory (top-center)
     ax = axes[0, 1]
     try:
         z_array = np.array([z.flatten() if hasattr(z, 'flatten') else z for z in z_vectors])
@@ -1836,7 +1867,7 @@ def create_trajectory_visualization(trajectory_info, model, save_path, device='c
                ha='center', va='center', transform=ax.transAxes)
         ax.set_title('Latent Trajectory (Error)')
     
-    # 3. Input visualization
+    # 3. Input visualization (top-right)
     ax = axes[0, 2]
     if input_sample is not None:
         try:
@@ -1850,13 +1881,13 @@ def create_trajectory_visualization(trajectory_info, model, save_path, device='c
         except Exception as e:
             ax.text(0.5, 0.5, f'Input visualization error:\n{str(e)}', 
                    ha='center', va='center', transform=ax.transAxes)
-    ax.set_title('Input Sample')
+    else:
+        ax.set_title('Input Sample')
     
-    # 4. Target visualization  
+    # 4. Target visualization (middle-left)
     ax = axes[1, 0]
-    if target_sample is not None:
+    if target_sample is not None and target_grid is not None:
         try:
-            target_grid = extract_grid_from_sequence(target_sample)
             if target_grid.shape[0] > 0 and target_grid.shape[1] > 0:
                 im = ax.imshow(target_grid, cmap='tab20', vmin=0, vmax=9)
                 ax.set_title('Target Grid')
@@ -1866,10 +1897,12 @@ def create_trajectory_visualization(trajectory_info, model, save_path, device='c
         except Exception as e:
             ax.text(0.5, 0.5, f'Target visualization error:\n{str(e)}', 
                    ha='center', va='center', transform=ax.transAxes)
-    ax.set_title('Target Sample')
+    else:
+        ax.set_title('Target Sample')
     
-    # 5. Initial reconstruction
+    # 5. Initial reconstruction (middle-center)
     ax = axes[1, 1]
+    initial_pred_grid = None
     try:
         if input_sample is not None and len(z_vectors) > 0:
             # Use initial z vector for reconstruction
@@ -1889,10 +1922,17 @@ def create_trajectory_visualization(trajectory_info, model, save_path, device='c
                 cols = int(target_sample[901]) if len(target_sample) > 901 else 10
                 
                 if rows > 0 and cols > 0:
-                    pred_grid = grid_pred[:rows*cols].reshape(rows, cols)
-                    im = ax.imshow(pred_grid, cmap='tab20', vmin=0, vmax=9)
+                    initial_pred_grid = grid_pred[:rows*cols].reshape(rows, cols)
+                    im = ax.imshow(initial_pred_grid, cmap='tab20', vmin=0, vmax=9)
                     ax.set_title('Initial Reconstruction')
                     plt.colorbar(im, ax=ax, shrink=0.6)
+                    
+                    # Calculate accuracy
+                    if target_grid is not None and target_grid.shape == initial_pred_grid.shape:
+                        accuracy = np.mean(target_grid == initial_pred_grid) * 100
+                        ax.text(0.02, 0.98, f'Accuracy: {accuracy:.1f}%', 
+                               transform=ax.transAxes, va='top', ha='left',
+                               bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
                 else:
                     ax.text(0.5, 0.5, 'Invalid grid dimensions', ha='center', va='center', transform=ax.transAxes)
         else:
@@ -1900,10 +1940,11 @@ def create_trajectory_visualization(trajectory_info, model, save_path, device='c
     except Exception as e:
         ax.text(0.5, 0.5, f'Reconstruction error:\n{str(e)}', 
                ha='center', va='center', transform=ax.transAxes)
-    ax.set_title('Initial Reconstruction')
+        ax.set_title('Initial Reconstruction')
     
-    # 6. Final reconstruction
+    # 6. Final reconstruction (middle-right)
     ax = axes[1, 2]
+    final_pred_grid = None
     try:
         if input_sample is not None and len(z_vectors) > 0:
             # Use final z vector for reconstruction
@@ -1923,10 +1964,17 @@ def create_trajectory_visualization(trajectory_info, model, save_path, device='c
                 cols = int(target_sample[901]) if len(target_sample) > 901 else 10
                 
                 if rows > 0 and cols > 0:
-                    pred_grid = grid_pred[:rows*cols].reshape(rows, cols)
-                    im = ax.imshow(pred_grid, cmap='tab20', vmin=0, vmax=9)
+                    final_pred_grid = grid_pred[:rows*cols].reshape(rows, cols)
+                    im = ax.imshow(final_pred_grid, cmap='tab20', vmin=0, vmax=9)
                     ax.set_title('Final Reconstruction')
                     plt.colorbar(im, ax=ax, shrink=0.6)
+                    
+                    # Calculate accuracy
+                    if target_grid is not None and target_grid.shape == final_pred_grid.shape:
+                        accuracy = np.mean(target_grid == final_pred_grid) * 100
+                        ax.text(0.02, 0.98, f'Accuracy: {accuracy:.1f}%', 
+                               transform=ax.transAxes, va='top', ha='left',
+                               bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
                 else:
                     ax.text(0.5, 0.5, 'Invalid grid dimensions', ha='center', va='center', transform=ax.transAxes)
         else:
@@ -1934,7 +1982,112 @@ def create_trajectory_visualization(trajectory_info, model, save_path, device='c
     except Exception as e:
         ax.text(0.5, 0.5, f'Reconstruction error:\n{str(e)}', 
                ha='center', va='center', transform=ax.transAxes)
-    ax.set_title('Final Reconstruction')
+        ax.set_title('Final Reconstruction')
+    
+    # 7. Middle reconstruction (if trajectory is long enough)
+    ax = axes[2, 0]
+    middle_pred_grid = None
+    if len(z_vectors) > 4:  # Only show middle if we have enough steps
+        try:
+            if input_sample is not None:
+                # Use middle z vector for reconstruction
+                middle_idx = len(z_vectors) // 2
+                middle_z = torch.tensor(z_vectors[middle_idx], dtype=torch.float32).unsqueeze(0).to(device)
+                input_tensor = torch.tensor(input_sample, dtype=torch.float32).unsqueeze(0).to(device)
+                target_tensor = torch.tensor(target_sample, dtype=torch.float32).unsqueeze(0).to(device)
+                
+                with torch.no_grad():
+                    if hasattr(model, 'multi_encoder'):
+                        shape_logits, grid_logits = model.multi_encoder.decoder(middle_z, input_tensor, target_seq=target_tensor)
+                    else:
+                        shape_logits, grid_logits = model.decoder(middle_z, input_tensor, target_seq=target_tensor)
+                    
+                    # Extract predicted grid
+                    grid_pred = grid_logits.argmax(dim=-1).cpu().numpy()[0]
+                    rows = int(target_sample[900]) if len(target_sample) > 900 else 10
+                    cols = int(target_sample[901]) if len(target_sample) > 901 else 10
+                    
+                    if rows > 0 and cols > 0:
+                        middle_pred_grid = grid_pred[:rows*cols].reshape(rows, cols)
+                        im = ax.imshow(middle_pred_grid, cmap='tab20', vmin=0, vmax=9)
+                        ax.set_title(f'Middle Reconstruction (Step {middle_idx})')
+                        plt.colorbar(im, ax=ax, shrink=0.6)
+                        
+                        # Calculate accuracy
+                        if target_grid is not None and target_grid.shape == middle_pred_grid.shape:
+                            accuracy = np.mean(target_grid == middle_pred_grid) * 100
+                            ax.text(0.02, 0.98, f'Accuracy: {accuracy:.1f}%', 
+                                   transform=ax.transAxes, va='top', ha='left',
+                                   bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+                    else:
+                        ax.text(0.5, 0.5, 'Invalid grid dimensions', ha='center', va='center', transform=ax.transAxes)
+            else:
+                ax.text(0.5, 0.5, 'No data for reconstruction', ha='center', va='center', transform=ax.transAxes)
+        except Exception as e:
+            ax.text(0.5, 0.5, f'Reconstruction error:\n{str(e)}', 
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Middle Reconstruction')
+    else:
+        ax.text(0.5, 0.5, 'Trajectory too short\nfor middle reconstruction', 
+               ha='center', va='center', transform=ax.transAxes)
+        ax.set_title('Middle Reconstruction (N/A)')
+    
+    # 8. Initial error map (bottom-center)
+    ax = axes[2, 1]
+    if initial_pred_grid is not None and target_grid is not None:
+        try:
+            error_map = create_error_map(target_grid, initial_pred_grid)
+            im = ax.imshow(error_map, cmap='Reds', vmin=0, vmax=1)
+            ax.set_title('Initial Error Map')
+            plt.colorbar(im, ax=ax, shrink=0.6, label='Error (0=Correct, 1=Wrong)')
+            
+            # Add error statistics
+            total_pixels = error_map.size
+            error_pixels = np.sum(error_map)
+            error_rate = (error_pixels / total_pixels) * 100
+            ax.text(0.02, 0.98, f'Error Rate: {error_rate:.1f}%\n({int(error_pixels)}/{total_pixels} pixels)', 
+                   transform=ax.transAxes, va='top', ha='left',
+                   bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        except Exception as e:
+            ax.text(0.5, 0.5, f'Error map failed:\n{str(e)}', 
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Initial Error Map (Error)')
+    else:
+        ax.text(0.5, 0.5, 'No data for error map', ha='center', va='center', transform=ax.transAxes)
+        ax.set_title('Initial Error Map (N/A)')
+    
+    # 9. Final error map (bottom-right)
+    ax = axes[2, 2]
+    if final_pred_grid is not None and target_grid is not None:
+        try:
+            error_map = create_error_map(target_grid, final_pred_grid)
+            im = ax.imshow(error_map, cmap='Reds', vmin=0, vmax=1)
+            ax.set_title('Final Error Map')
+            plt.colorbar(im, ax=ax, shrink=0.6, label='Error (0=Correct, 1=Wrong)')
+            
+            # Add error statistics
+            total_pixels = error_map.size
+            error_pixels = np.sum(error_map)
+            error_rate = (error_pixels / total_pixels) * 100
+            ax.text(0.02, 0.98, f'Error Rate: {error_rate:.1f}%\n({int(error_pixels)}/{total_pixels} pixels)', 
+                   transform=ax.transAxes, va='top', ha='left',
+                   bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+                   
+            # Show improvement in error rate
+            if initial_pred_grid is not None:
+                initial_error_map = create_error_map(target_grid, initial_pred_grid)
+                initial_error_rate = (np.sum(initial_error_map) / initial_error_map.size) * 100
+                improvement = initial_error_rate - error_rate
+                ax.text(0.02, 0.02, f'Error Improvement: {improvement:+.1f}%', 
+                       transform=ax.transAxes, va='bottom', ha='left',
+                       bbox=dict(boxstyle='round', facecolor='lightgreen' if improvement > 0 else 'lightcoral', alpha=0.8))
+        except Exception as e:
+            ax.text(0.5, 0.5, f'Error map failed:\n{str(e)}', 
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Final Error Map (Error)')
+    else:
+        ax.text(0.5, 0.5, 'No data for error map', ha='center', va='center', transform=ax.transAxes)
+        ax.set_title('Final Error Map (N/A)')
     
     plt.suptitle('Trajectory Optimization Visualization', fontsize=16)
     plt.tight_layout()
@@ -2079,18 +2232,53 @@ def plot_model_summary(results, model_params, save_dir=None):
     summary_lines.append("=" * 45)
     summary_lines.append("")
     
-    # Model Architecture
+    # Model Architecture - get from settings if not in model_params
     num_encoders = model_params.get('NUM_ENCODERS', 1)
     is_multi_encoder = num_encoders > 1
+    
+    # Try to get architecture parameters from settings if not in model_params
+    try:
+        from utils.settings_manager import settings
+        model_architecture = settings.get_model_architecture()
+        latent_dim = model_architecture.get('latent_dim', 'N/A')
+        encoder_hidden_dim = model_architecture.get('encoder_hidden_dim', 'N/A')
+        decoder_hidden_dim = model_architecture.get('decoder_hidden_dim', 'N/A')
+        dropout = model_params.get('DROPOUT', model_architecture.get('dropout', 'N/A'))
+        max_length = model_params.get('MAX_LENGTH', model_architecture.get('max_length', 'N/A'))
+        encoder_layers = model_architecture.get('encoder_layers', 'N/A')
+        decoder_layers = model_architecture.get('decoder_layers', 'N/A')
+        encoder_heads = model_architecture.get('encoder_heads', 'N/A')
+        decoder_heads = model_architecture.get('decoder_heads', 'N/A')
+    except:
+        # Fallback if settings not available
+        latent_dim = 'N/A'
+        encoder_hidden_dim = 'N/A'
+        decoder_hidden_dim = 'N/A'
+        dropout = model_params.get('DROPOUT', 'N/A')
+        max_length = model_params.get('MAX_LENGTH', 'N/A')
+        encoder_layers = 'N/A'
+        decoder_layers = 'N/A'
+        encoder_heads = 'N/A'
+        decoder_heads = 'N/A'
     
     summary_lines.append("ARCHITECTURE:")
     summary_lines.append(f"  Type: {'Multi-Encoder' if is_multi_encoder else 'Single Encoder'}")
     if is_multi_encoder:
         summary_lines.append(f"  Number of encoders: {num_encoders}")
     
-    summary_lines.append(f"  Latent dimension: {model_params.get('LATENT_DIM', 'N/A')}")
-    summary_lines.append(f"  Hidden dimension: {model_params.get('ENCODER_HIDDEN_DIM', 'N/A')}")
-    summary_lines.append(f"  Dropout rate: {model_params.get('DROPOUT', 'N/A')}")
+    summary_lines.append(f"  Latent dimension: {latent_dim}")
+    summary_lines.append(f"  Encoder hidden dim: {encoder_hidden_dim}")
+    summary_lines.append(f"  Decoder hidden dim: {decoder_hidden_dim}")
+    summary_lines.append(f"  Dropout rate: {dropout}")
+    summary_lines.append(f"  Max sequence length: {max_length}")
+    summary_lines.append("")
+    
+    # Transformer details
+    summary_lines.append("TRANSFORMER DETAILS:")
+    summary_lines.append(f"  Encoder layers: {encoder_layers}")
+    summary_lines.append(f"  Decoder layers: {decoder_layers}")
+    summary_lines.append(f"  Encoder heads: {encoder_heads}")
+    summary_lines.append(f"  Decoder heads: {decoder_heads}")
     summary_lines.append("")
     
     # Parameters
@@ -2812,297 +3000,212 @@ def plot_single_encoder_evaluation_results(key, key_results, save_dir=None):
 
 def plot_multi_encoder_evaluation_results(key, key_results, save_dir=None):
     """
-    Enhanced multi-encoder evaluation visualization with training data distribution analysis.
+    Simplified multi-encoder evaluation visualization to prevent image size errors.
     
     Args:
         key: Problem key
         key_results: Evaluation results for this key
         save_dir: Directory to save plots (optional)
     """
-    metrics = key_results['metrics']
-    num_encoders = metrics['num_encoders']
-    
-    print(f"Creating enhanced multi-encoder evaluation analysis for {num_encoders} encoders...")
-    
-    # Create comprehensive multi-encoder evaluation plot with limited size
-    max_figure_size = (14, 10)  # Reduced to prevent oversized images
-    fig, axs = plt.subplots(3, 3, figsize=max_figure_size)
-    
-    # Extract individual encoder accuracies and PoE accuracies
-    individual_accuracies = metrics.get('individual_encoder_accuracies', {})
-    poe_metrics = metrics.get('poe_metrics', {})
-    
-    # Check if we have valid evaluation data
-    if not individual_accuracies or len(individual_accuracies) == 0:
-        # Fallback to simple single-encoder evaluation
-        print(f"⚠ Warning: No multi-encoder evaluation data found for {key}, using simple evaluation")
-        plot_single_encoder_evaluation_results(key, key_results, save_dir)
-        return
-    
-    # Colors for encoders
-    colors = plt.cm.Set1(np.linspace(0, 1, num_encoders + 1))
-    colors[-1] = [0, 0, 0, 1]  # Make PoE black
-    
-    # 1. Training Data Distribution Analysis (top-left)
-    ax = axs[0, 0]
-    
-    # Simulate training data distribution per encoder (since we split the data)
-    # This shows how the training data was distributed among encoders
-    encoder_names = list(individual_accuracies.keys()) + ['PoE']
-    
-    # Create a pie chart showing data distribution
-    data_per_encoder = [100/num_encoders] * num_encoders  # Equal split
-    wedges, texts, autotexts = ax.pie(data_per_encoder, labels=[f'Encoder {i}' for i in range(num_encoders)], 
-                                      colors=colors[:-1], autopct='%1.1f%%', startangle=90)
-    ax.set_title('Training Data Distribution\n(Multi-Encoder Split)', fontsize=12, weight='bold')
-    
-    # Add center text
-    ax.text(0, 0, f'{num_encoders}\nEncoders', ha='center', va='center', fontsize=10, weight='bold')
-    
-    # 2. Encoder Specialization Analysis (top-center)
-    ax = axs[0, 1]
-    
-    # Calculate specialization metrics
-    shape_accuracies = [individual_accuracies[enc]['shape_accuracy'] for enc in individual_accuracies.keys()]
-    grid_accuracies = [individual_accuracies[enc]['grid_accuracy'] for enc in individual_accuracies.keys()]
-    exact_accuracies = [individual_accuracies[enc]['sample_exact_accuracy'] for enc in individual_accuracies.keys()]
-    
-    # Specialization is measured by variance in performance
-    shape_var = np.var(shape_accuracies)
-    grid_var = np.var(grid_accuracies)
-    exact_var = np.var(exact_accuracies)
-    
-    specialization_metrics = ['Shape Accuracy', 'Grid Accuracy', 'Exact Accuracy']
-    variances = [shape_var, grid_var, exact_var]
-    
-    bars = ax.bar(specialization_metrics, variances, color=['lightcoral', 'lightblue', 'lightgreen'])
-    ax.set_title('Encoder Specialization\n(Performance Variance)', fontsize=12, weight='bold')
-    ax.set_ylabel('Variance')
-    ax.set_xticks(range(len(specialization_metrics)))
-    ax.set_xticklabels(specialization_metrics, rotation=45)
-    
-    # Add interpretation text
-    for i, (bar, var) in enumerate(zip(bars, variances)):
-        height = bar.get_height()
-        interpretation = "High" if var > 0.05 else "Moderate" if var > 0.01 else "Low"
-        ax.text(bar.get_x() + bar.get_width()/2., height + 0.001,
-               f'{var:.3f}\n({interpretation})', ha='center', va='bottom', fontsize=8)
-    
-    # 3. PoE Benefit Analysis (top-right)
-    ax = axs[0, 2]
-    
-    # Compare PoE vs best individual encoder
-    best_individual_shape = max(shape_accuracies)
-    best_individual_grid = max(grid_accuracies)
-    best_individual_exact = max(exact_accuracies)
-    
-    comparison_metrics = ['Shape', 'Grid', 'Exact']
-    best_individual = [best_individual_shape, best_individual_grid, best_individual_exact]
-    poe_results = [poe_metrics.get('shape_accuracy', 0.0), poe_metrics.get('grid_accuracy', 0.0), 
-                   poe_metrics.get('sample_exact_accuracy', 0.0)]
-    
-    x = np.arange(len(comparison_metrics))
-    width = 0.35
-    
-    bars1 = ax.bar(x - width/2, best_individual, width, label='Best Individual', alpha=0.8, color='lightblue')
-    bars2 = ax.bar(x + width/2, poe_results, width, label='PoE', alpha=0.8, color='darkblue')
-    
-    ax.set_title('PoE vs Best Individual Encoder', fontsize=12, weight='bold')
-    ax.set_ylabel('Accuracy')
-    ax.set_xlabel('Metric')
-    ax.set_xticks(x)
-    ax.set_xticklabels(comparison_metrics)
-    ax.legend()
-    ax.set_ylim(0, 1.05)
-    
-    # Add improvement indicators
-    for i, (best, poe) in enumerate(zip(best_individual, poe_results)):
-        ax.text(i - width/2, best + 0.01, f'{best:.3f}', ha='center', va='bottom', fontsize=9)
-        ax.text(i + width/2, poe + 0.01, f'{poe:.3f}', ha='center', va='bottom', fontsize=9)
+    try:
+        metrics = key_results['metrics']
+        num_encoders = metrics['num_encoders']
         
-        # Add improvement/degradation indicator
-        diff = poe - best
-        color = 'green' if diff > 0 else 'red' if diff < 0 else 'gray'
-        symbol = '↑' if diff > 0 else '↓' if diff < 0 else '='
-        ax.text(i, max(best, poe) + 0.05, f'{symbol}{abs(diff):.3f}', 
-               ha='center', va='bottom', fontsize=8, color=color, weight='bold')
-    
-    # 4. Individual Encoder Performance Heat Map (middle-left)
-    ax = axs[1, 0]
-    
-    # Create performance matrix
-    performance_matrix = []
-    encoder_labels = []
-    metric_labels = ['Shape', 'Grid', 'Overall', 'Exact']
-    
-    for enc_name in individual_accuracies.keys():
-        acc_data = individual_accuracies[enc_name]
-        performance_row = [
-            acc_data['shape_accuracy'],
-            acc_data['grid_accuracy'], 
-            acc_data['overall_accuracy'],
-            acc_data['sample_exact_accuracy']
+        print(f"Creating simplified multi-encoder evaluation analysis for {num_encoders} encoders...")
+        
+        # Extract individual encoder accuracies and PoE accuracies
+        individual_accuracies = metrics.get('individual_encoder_accuracies', {})
+        poe_metrics = metrics.get('poe_metrics', {})
+        
+        # Check if we have valid evaluation data
+        if not individual_accuracies or len(individual_accuracies) == 0:
+            # Fallback to simple single-encoder evaluation
+            print(f"⚠ Warning: No multi-encoder evaluation data found for {key}, using simple evaluation")
+            plot_single_encoder_evaluation_results(key, key_results, save_dir)
+            return
+        
+        # Create simplified 2x2 layout to prevent image size issues
+        fig, axs = plt.subplots(2, 2, figsize=(12, 8))  # Conservative size
+        
+        # Colors for encoders  
+        colors = plt.cm.Set1(np.linspace(0, 1, num_encoders + 1))
+        colors[-1] = [0, 0, 0, 1]  # Make PoE black
+        
+        # Extract performance data
+        shape_accuracies = [individual_accuracies[enc]['shape_accuracy'] for enc in individual_accuracies.keys()]
+        grid_accuracies = [individual_accuracies[enc]['grid_accuracy'] for enc in individual_accuracies.keys()]
+        exact_accuracies = [individual_accuracies[enc]['sample_exact_accuracy'] for enc in individual_accuracies.keys()]
+        
+        # 1. Individual Encoder Performance Comparison (top-left)
+        ax = axs[0, 0]
+        encoder_names_plot = list(individual_accuracies.keys()) + ['PoE']
+        exact_accuracies_plot = exact_accuracies + [poe_metrics.get('sample_exact_accuracy', 0.0)]
+        
+        bars = ax.bar(range(len(encoder_names_plot)), exact_accuracies_plot, 
+                      color=colors[:len(encoder_names_plot)])
+        ax.set_title('Sample Exact Accuracy Comparison', fontsize=12, weight='bold')
+        ax.set_ylabel('Accuracy')
+        ax.set_xticks(range(len(encoder_names_plot)))
+        ax.set_xticklabels([name.replace('encoder_', 'Enc ') for name in encoder_names_plot], rotation=45)
+        ax.set_ylim(0, 1.05)
+        
+        # Add value labels and rank indicators
+        sorted_accuracies = sorted(enumerate(exact_accuracies_plot), key=lambda x: x[1], reverse=True)
+        for rank, (idx, acc) in enumerate(sorted_accuracies):
+            bars[idx].set_alpha(0.8)
+            ax.text(idx, acc + 0.01, f'{acc:.3f}\n#{rank+1}', ha='center', va='bottom', fontsize=9)
+        
+        # 2. PoE vs Best Individual Encoder (top-right)
+        ax = axs[0, 1]
+        
+        # Compare PoE vs best individual encoder
+        best_individual_shape = max(shape_accuracies)
+        best_individual_grid = max(grid_accuracies)
+        best_individual_exact = max(exact_accuracies)
+        
+        comparison_metrics = ['Shape', 'Grid', 'Exact']
+        best_individual = [best_individual_shape, best_individual_grid, best_individual_exact]
+        poe_results = [poe_metrics.get('shape_accuracy', 0.0), poe_metrics.get('grid_accuracy', 0.0), 
+                       poe_metrics.get('sample_exact_accuracy', 0.0)]
+        
+        x = np.arange(len(comparison_metrics))
+        width = 0.35
+        
+        bars1 = ax.bar(x - width/2, best_individual, width, label='Best Individual', alpha=0.8, color='lightblue')
+        bars2 = ax.bar(x + width/2, poe_results, width, label='PoE', alpha=0.8, color='darkblue')
+        
+        ax.set_title('PoE vs Best Individual Encoder', fontsize=12, weight='bold')
+        ax.set_ylabel('Accuracy')
+        ax.set_xlabel('Metric')
+        ax.set_xticks(x)
+        ax.set_xticklabels(comparison_metrics)
+        ax.legend()
+        ax.set_ylim(0, 1.05)
+        
+        # Add values on bars
+        for i, (best, poe) in enumerate(zip(best_individual, poe_results)):
+            ax.text(i - width/2, best + 0.01, f'{best:.3f}', ha='center', va='bottom', fontsize=9)
+            ax.text(i + width/2, poe + 0.01, f'{poe:.3f}', ha='center', va='bottom', fontsize=9)
+            
+            # Add improvement/degradation indicator
+            diff = poe - best
+            color = 'green' if diff > 0 else 'red' if diff < 0 else 'gray'
+            symbol = '↑' if diff > 0 else '↓' if diff < 0 else '='
+            ax.text(i, max(best, poe) + 0.05, f'{symbol}{abs(diff):.3f}', 
+                   ha='center', va='bottom', fontsize=8, color=color, weight='bold')
+        
+        # 3. Encoder Specialization (Performance Variance) (bottom-left)
+        ax = axs[1, 0]
+        
+        # Calculate specialization metrics
+        shape_var = np.var(shape_accuracies)
+        grid_var = np.var(grid_accuracies)
+        exact_var = np.var(exact_accuracies)
+        
+        specialization_metrics = ['Shape', 'Grid', 'Exact']
+        variances = [shape_var, grid_var, exact_var]
+        
+        bars = ax.bar(specialization_metrics, variances, color=['lightcoral', 'lightblue', 'lightgreen'])
+        ax.set_title('Encoder Specialization\n(Performance Variance)', fontsize=12, weight='bold')
+        ax.set_ylabel('Variance')
+        ax.set_xticks(range(len(specialization_metrics)))
+        ax.set_xticklabels(specialization_metrics)
+        
+        # Add interpretation text
+        for i, (bar, var) in enumerate(zip(bars, variances)):
+            height = bar.get_height()
+            interpretation = "High" if var > 0.05 else "Mod" if var > 0.01 else "Low"
+            ax.text(bar.get_x() + bar.get_width()/2., height + 0.001,
+                   f'{var:.3f}\n({interpretation})', ha='center', va='bottom', fontsize=8)
+        
+        # 4. Performance Correlation Heatmap (bottom-right)
+        ax = axs[1, 1]
+        
+        # Create performance matrix with all metrics for all encoders + PoE
+        metric_names = ['Shape', 'Grid', 'Overall', 'Exact']
+        encoder_names = list(individual_accuracies.keys()) + ['PoE']
+        
+        # Build the performance matrix
+        performance_matrix = []
+        
+        # Add individual encoders
+        for enc_name in individual_accuracies.keys():
+            acc_data = individual_accuracies[enc_name]
+            row = [
+                acc_data['shape_accuracy'],
+                acc_data['grid_accuracy'], 
+                acc_data['overall_accuracy'],
+                acc_data['sample_exact_accuracy']
+            ]
+            performance_matrix.append(row)
+        
+        # Add PoE row
+        poe_row = [
+            poe_metrics.get('shape_accuracy', 0.0),
+            poe_metrics.get('grid_accuracy', 0.0),
+            poe_metrics.get('overall_accuracy', 0.0),
+            poe_metrics.get('sample_exact_accuracy', 0.0)
         ]
-        performance_matrix.append(performance_row)
-        encoder_labels.append(enc_name.replace('encoder_', 'Enc '))
-    
-    im = ax.imshow(performance_matrix, cmap='RdYlGn', aspect='auto', vmin=0, vmax=1)
-    ax.set_xticks(range(len(metric_labels)))
-    ax.set_xticklabels(metric_labels)
-    ax.set_yticks(range(len(encoder_labels)))
-    ax.set_yticklabels(encoder_labels)
-    ax.set_title('Individual Encoder Performance Matrix', fontsize=12, weight='bold')
-    
-    # Add text annotations
-    for i in range(len(encoder_labels)):
-        for j in range(len(metric_labels)):
-            text = ax.text(j, i, f'{performance_matrix[i][j]:.2f}',
-                          ha="center", va="center", color="black", fontsize=9)
-    
-    plt.colorbar(im, ax=ax, label='Accuracy')
-    
-    # 5. Sample Exact Accuracy Comparison (middle-center)
-    ax = axs[1, 1]
-    
-    encoder_names_plot = list(individual_accuracies.keys()) + ['PoE']
-    exact_accuracies_plot = exact_accuracies + [poe_metrics.get('sample_exact_accuracy', 0.0)]
-    
-    bars = ax.bar(range(len(encoder_names_plot)), exact_accuracies_plot, 
-                  color=colors[:len(encoder_names_plot)])
-    ax.set_title('Sample Exact Accuracy Comparison', fontsize=12, weight='bold')
-    ax.set_ylabel('Accuracy')
-    ax.set_xticks(range(len(encoder_names_plot)))
-    ax.set_xticklabels([name.replace('encoder_', 'Enc ') for name in encoder_names_plot], rotation=45)
-    ax.set_ylim(0, 1.05)
-    
-    # Add value labels and rank indicators
-    sorted_accuracies = sorted(enumerate(exact_accuracies_plot), key=lambda x: x[1], reverse=True)
-    for rank, (idx, acc) in enumerate(sorted_accuracies):
-        bars[idx].set_alpha(0.8)
-        ax.text(idx, acc + 0.01, f'{acc:.3f}\n#{rank+1}', ha='center', va='bottom', fontsize=9)
-    
-    # 6. Evaluation Strategy Analysis (middle-right)
-    ax = axs[1, 2]
-    ax.axis('off')
-    
-    # Analysis text
-    analysis_text = "EVALUATION STRATEGY ANALYSIS\n" + "="*35 + "\n\n"
-    analysis_text += f"Multi-Encoder Setup:\n"
-    analysis_text += f"• {num_encoders} encoders trained on separate data subsets\n"
-    analysis_text += f"• Each encoder sees {100/num_encoders:.1f}% of training data\n"
-    analysis_text += f"• PoE combines all {num_encoders} encoders during inference\n\n"
-    
-    analysis_text += f"Specialization Assessment:\n"
-    if exact_var > 0.05:
-        analysis_text += f"• HIGH specialization (variance={exact_var:.3f})\n"
-        analysis_text += f"• Encoders learned distinct strategies\n"
-    elif exact_var > 0.01:
-        analysis_text += f"• MODERATE specialization (variance={exact_var:.3f})\n"
-        analysis_text += f"• Some encoder differentiation\n"
-    else:
-        analysis_text += f"• LOW specialization (variance={exact_var:.3f})\n"
-        analysis_text += f"• Encoders learned similar strategies\n"
-    
-    analysis_text += f"\nPoE Performance:\n"
-    poe_exact = poe_metrics.get('sample_exact_accuracy', 0.0)
-    best_individual_exact = max(exact_accuracies)
-    improvement = poe_exact - best_individual_exact
-    
-    if improvement > 0.05:
-        analysis_text += f"• SIGNIFICANT improvement (+{improvement:.3f})\n"
-    elif improvement > 0.01:
-        analysis_text += f"• MODEST improvement (+{improvement:.3f})\n"
-    elif improvement > -0.01:
-        analysis_text += f"• NEUTRAL performance ({improvement:+.3f})\n"
-    else:
-        analysis_text += f"• DEGRADED performance ({improvement:+.3f})\n"
-    
-    ax.text(0.05, 0.95, analysis_text, transform=ax.transAxes,
-           verticalalignment='top', fontfamily='monospace', fontsize=10,
-           bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
-    
-    # 7. Training Data Impact Analysis (bottom-left)
-    ax = axs[2, 0]
-    
-    # Simulate effect of data splitting on encoder performance
-    # Show how performance might vary with different data split ratios
-    split_ratios = [0.1, 0.2, 0.3, 0.4, 0.5]  # Fraction of data per encoder
-    estimated_performance = []
-    
-    for ratio in split_ratios:
-        # Simple model: performance scales with sqrt of data amount, bounded by model capacity
-        relative_perf = min(1.0, np.sqrt(ratio) * 1.2)  # Assume current is at 0.5 ratio
-        estimated_performance.append(relative_perf * np.mean(exact_accuracies))
-    
-    ax.plot(split_ratios, estimated_performance, 'o-', linewidth=2, markersize=6)
-    ax.axvline(x=1/num_encoders, color='red', linestyle='--', alpha=0.7, 
-               label=f'Current Split\n(1/{num_encoders} = {1/num_encoders:.2f})')
-    ax.set_xlabel('Data Fraction per Encoder')
-    ax.set_ylabel('Estimated Performance')
-    ax.set_title('Data Split Impact Analysis', fontsize=12, weight='bold')
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-    
-    # Add current performance point
-    current_ratio = 1/num_encoders
-    current_perf = np.mean(exact_accuracies)
-    ax.plot(current_ratio, current_perf, 'ro', markersize=8, label='Actual')
-    
-    # 8. Analysis Summary Panel (bottom-center and right)
-    ax_combined = plt.subplot2grid((3, 3), (2, 1), colspan=2)
-    ax_combined.axis('off')
-    
-    summary_text = "ANALYSIS SUMMARY\n" + "="*30 + "\n\n"
-    
-    # Performance metrics
-    data_per_encoder = 100 / num_encoders
-    
-    # Add summary statistics
-    summary_text += f"PERFORMANCE METRICS:\n"
-    summary_text += f"• Best Individual Encoder: {max(exact_accuracies):.3f}\n"
-    summary_text += f"• PoE Performance: {poe_exact:.3f}\n"
-    summary_text += f"• PoE Improvement: {improvement:+.3f}\n"
-    summary_text += f"• Encoder Specialization: {exact_var:.3f}\n"
-    summary_text += f"• Data per Encoder: {data_per_encoder:.1f}%\n"
-    
-    # Configuration details
-    summary_text += f"\nCONFIGURATION:\n"
-    summary_text += f"• Number of Encoders: {num_encoders}\n"
-    summary_text += f"• Support Samples: {metrics.get('support_samples', 'N/A')}\n"
-    summary_text += f"• Query Samples: {metrics.get('query_samples', 'N/A')}\n"
-    summary_text += f"• Latent Optimization: {metrics.get('used_latent_optimization', 'N/A')}\n"
-    
-    # Performance analysis
-    summary_text += f"\nPERFORMANCE ANALYSIS:\n"
-    if improvement > 0.02:
-        summary_text += f"• PoE shows significant benefits\n"
-    elif improvement > -0.01:
-        summary_text += f"• PoE shows modest/neutral benefits\n"
-    else:
-        summary_text += f"• PoE underperforming vs individual encoders\n"
+        performance_matrix.append(poe_row)
         
-    if exact_var > 0.02:
-        summary_text += f"• High encoder specialization detected\n"
-    else:
-        summary_text += f"• Low encoder specialization detected\n"
+        # Convert to numpy array for easier handling
+        performance_matrix = np.array(performance_matrix)
+        
+        # Create the heatmap
+        im = ax.imshow(performance_matrix, cmap='RdYlGn', aspect='auto', vmin=0, vmax=1)
+        
+        # Set ticks and labels
+        ax.set_xticks(range(len(metric_names)))
+        ax.set_xticklabels(metric_names, fontsize=10)
+        ax.set_yticks(range(len(encoder_names)))
+        ax.set_yticklabels([name.replace('encoder_', 'Enc ') for name in encoder_names], fontsize=10)
+        
+        # Add title
+        ax.set_title('Performance Heatmap\n(All Encoders + PoE)', fontsize=12, weight='bold')
+        
+        # Add text annotations with values
+        for i in range(len(encoder_names)):
+            for j in range(len(metric_names)):
+                value = performance_matrix[i, j]
+                # Choose text color based on background
+                text_color = 'white' if value < 0.5 else 'black'
+                ax.text(j, i, f'{value:.3f}', ha="center", va="center", 
+                       color=text_color, fontsize=9, weight='bold')
+        
+        # Add colorbar
+        cbar = plt.colorbar(im, ax=ax, shrink=0.8)
+        cbar.set_label('Accuracy', rotation=270, labelpad=15)
+        
+        # Highlight PoE row with a border
+        poe_row_idx = len(encoder_names) - 1
+        for j in range(len(metric_names)):
+            rect = plt.Rectangle((j-0.5, poe_row_idx-0.5), 1, 1, 
+                               fill=False, edgecolor='black', linewidth=2)
+            ax.add_patch(rect)
+        
+        plt.suptitle(f'Multi-Encoder Evaluation Analysis: {key} ({num_encoders} Encoders)', 
+                     fontsize=14, y=0.96)
+        
+        # Use subplots_adjust instead of tight_layout to avoid warnings and control layout
+        plt.subplots_adjust(top=0.90, bottom=0.10, left=0.10, right=0.95, hspace=0.4, wspace=0.3)
+        
+        if save_dir:
+            filename = f'evaluation_enhanced_{key}_multi_encoder.png'
+            plt.savefig(os.path.join(save_dir, filename), dpi=100, bbox_inches='tight')  # Reduced DPI
+            plt.close()
+            print(f"Multi-encoder evaluation analysis saved to {save_dir}/{filename}")
+        else:
+            plt.show()
     
-    ax_combined.text(0.02, 0.98, summary_text, transform=ax_combined.transAxes,
-                    verticalalignment='top', fontfamily='monospace', fontsize=10,
-                    bbox=dict(boxstyle='round', facecolor='lightcyan', alpha=0.8))
-    
-    plt.suptitle(f'Enhanced Multi-Encoder Evaluation Analysis: {key} ({num_encoders} Encoders)', 
-                 fontsize=14, y=0.96)
-    
-    # Use subplots_adjust instead of tight_layout to avoid warnings
-    plt.subplots_adjust(top=0.93, bottom=0.05, left=0.05, right=0.95, hspace=0.4, wspace=0.3)
-    
-    if save_dir:
-        filename = f'evaluation_enhanced_{key}_multi_encoder.png'
-        plt.savefig(os.path.join(save_dir, filename), dpi=150, bbox_inches='tight')
-        plt.close()
-        print(f"Enhanced multi-encoder evaluation analysis saved to {save_dir}/{filename}")
-    else:
-        plt.show()
+    except Exception as e:
+        print(f"❌ Error in multi-encoder evaluation visualization: {str(e)}")
+        print(f"   Falling back to single-encoder evaluation for {key}")
+        # Fallback to simple single-encoder evaluation
+        try:
+            plot_single_encoder_evaluation_results(key, key_results, save_dir)
+        except Exception as fallback_error:
+            print(f"❌ Fallback also failed: {str(fallback_error)}")
+            print(f"   Skipping visualization for {key}")
 
 # Multi-encoder detailed comparison plot removed - point (11) from evaluation
 
@@ -3146,25 +3249,50 @@ def plot_enhanced_model_summary(results, model_params, save_dir=None):
         num_encoders = model_params.get('NUM_ENCODERS', 1)
         is_multi_encoder = num_encoders > 1
         
+        # Get architecture parameters from settings if not in model_params
+        try:
+            from utils.settings_manager import settings
+            model_architecture = settings.get_model_architecture()
+            latent_dim = model_architecture.get('latent_dim', 'N/A')
+            encoder_hidden_dim = model_architecture.get('encoder_hidden_dim', 'N/A')
+            decoder_hidden_dim = model_architecture.get('decoder_hidden_dim', 'N/A')
+            dropout = model_params.get('DROPOUT', model_architecture.get('dropout', 'N/A'))
+            max_length = model_params.get('MAX_LENGTH', model_architecture.get('max_length', 'N/A'))
+            encoder_layers = model_architecture.get('encoder_layers', 'N/A')
+            decoder_layers = model_architecture.get('decoder_layers', 'N/A')
+            encoder_heads = model_architecture.get('encoder_heads', 'N/A')
+            decoder_heads = model_architecture.get('decoder_heads', 'N/A')
+        except:
+            # Fallback if settings not available
+            latent_dim = 'N/A'
+            encoder_hidden_dim = 'N/A'
+            decoder_hidden_dim = 'N/A'
+            dropout = model_params.get('DROPOUT', 'N/A')
+            max_length = model_params.get('MAX_LENGTH', 'N/A')
+            encoder_layers = 'N/A'
+            decoder_layers = 'N/A'
+            encoder_heads = 'N/A'
+            decoder_heads = 'N/A'
+        
         arch_lines = [
             "🏗️ MODEL ARCHITECTURE",
             "─" * 25,
             "",
-            f"📐 Latent Dimension: {model_params.get('LATENT_DIM', 'N/A')}",
-            f"🔧 Dropout Rate: {model_params.get('DROPOUT', 'N/A')}",
-            f"📏 Max Sequence Length: {model_params.get('MAX_LENGTH', 'N/A')}",
+            f"📐 Latent Dimension: {latent_dim}",
+            f"🔧 Dropout Rate: {dropout}",
+            f"📏 Max Sequence Length: {max_length}",
             "",
         ]
         
         if is_multi_encoder:
             arch_lines.extend([
                 f"🔄 MULTI-ENCODER ({num_encoders} encoders)",
-                f"├─ Enc Hidden Dim: {model_params.get('ENCODER_HIDDEN_DIM', 'N/A')}",
-                f"├─ Dec Hidden Dim: {model_params.get('DECODER_HIDDEN_DIM', 'N/A')}",
-                f"├─ Encoder Layers: {model_params.get('ENCODER_LAYERS', 'N/A')}",
-                f"├─ Decoder Layers: {model_params.get('DECODER_LAYERS', 'N/A')}",
-                f"├─ Encoder Heads: {model_params.get('ENCODER_HEADS', 'N/A')}",
-                f"└─ Decoder Heads: {model_params.get('DECODER_HEADS', 'N/A')}",
+                f"├─ Enc Hidden Dim: {encoder_hidden_dim}",
+                f"├─ Dec Hidden Dim: {decoder_hidden_dim}",
+                f"├─ Encoder Layers: {encoder_layers}",
+                f"├─ Decoder Layers: {decoder_layers}",
+                f"├─ Encoder Heads: {encoder_heads}",
+                f"└─ Decoder Heads: {decoder_heads}",
                 "",
                 "⚙️ TRAINING: Individual encoders",
                 "🔀 INFERENCE: Product of Experts",
@@ -3172,9 +3300,9 @@ def plot_enhanced_model_summary(results, model_params, save_dir=None):
         else:
             arch_lines.extend([
                 f"🔄 SINGLE ENCODER",
-                f"├─ Hidden Dimension: {model_params.get('ENCODER_HIDDEN_DIM', model_params.get('HIDDEN_DIM', 'N/A'))}",
-                f"├─ Transformer Layers: {model_params.get('ENCODER_LAYERS', model_params.get('NUM_LAYERS', 'N/A'))}",
-                f"└─ Attention Heads: {model_params.get('ENCODER_HEADS', model_params.get('NUM_HEADS', 'N/A'))}",
+                f"├─ Hidden Dimension: {encoder_hidden_dim}",
+                f"├─ Transformer Layers: {encoder_layers}",
+                f"└─ Attention Heads: {encoder_heads}",
             ])
         
         ax1.text(0.05, 0.95, "\n".join(arch_lines), transform=ax1.transAxes,
@@ -3508,7 +3636,7 @@ def plot_enhanced_model_summary(results, model_params, save_dir=None):
 def plot_comprehensive_latent_space(results, eval_results=None, save_dir=None):
     """
     Create a comprehensive latent space visualization using t-SNE with color-coded clusters.
-    Handles both training and evaluation data, single and multi-encoder models.
+    Unified processing for both single and multi-encoder models.
     
     Args:
         results: Training results containing encoder latent data
@@ -3517,146 +3645,84 @@ def plot_comprehensive_latent_space(results, eval_results=None, save_dir=None):
     """
     print("Creating comprehensive latent space visualization...")
     
-    # Determine if this is multi-encoder
-    is_multi_encoder = 'encoder_latent_data' in results
+    # Determine number of encoders (treat single-encoder as multi-encoder with 1 encoder)
+    num_encoders = 1
+    if results:
+        if 'encoder_latent_data' in results:
+            num_encoders = len([k for k in results['encoder_latent_data'].keys() if not k.endswith('_info')])
+        elif 'single_encoder_latent_data' in results:
+            num_encoders = 1
+    
+    print(f"  Processing unified encoder latent data ({num_encoders} encoder{'s' if num_encoders != 1 else ''})...")
     
     # Collect all latent data
     all_latent_data = []
     all_labels = []
     all_colors = []
     legend_elements = []
+    color_palette = COLOR_PALETTE
     
-    # Color palette for different data types
-    color_palette = {
-        'training_encoder_0': '#FF6B6B',    # Red
-        'training_encoder_1': '#4ECDC4',    # Teal  
-        'training_encoder_2': '#45B7D1',    # Blue
-        'training_encoder_3': '#96CEB4',    # Green
-        'support_encoder_0': '#FFB6C1',     # Light Red
-        'support_encoder_1': '#B4E7E1',     # Light Teal
-        'support_encoder_2': '#B3D9FF',     # Light Blue
-        'support_encoder_3': '#C8E6C9',     # Light Green
-        'query_encoder_0': '#8B0000',       # Dark Red
-        'query_encoder_1': '#006666',       # Dark Teal
-        'query_encoder_2': '#0066CC',       # Dark Blue
-        'query_encoder_3': '#2E8B57',       # Dark Green
-        'support_poe': '#FFD700',           # Gold
-        'query_poe': '#FF8C00',             # Dark Orange
-        'training_single': '#9370DB',       # Medium Purple
-        'support_single': '#DDA0DD',        # Plum
-        'query_single': '#4B0082'           # Indigo
-    }
+    def add_latent_data(latent_z, data_type):
+        """Helper function to add latent data with consistent processing."""
+        if len(latent_z) > 0:
+            all_latent_data.append(latent_z)
+            color = color_palette.get(data_type, '#808080')
+            all_colors.extend([color] * len(latent_z))
+            all_labels.extend([data_type] * len(latent_z))
+            legend_elements.append(mpatches.Patch(color=color, label=f'{data_type} (n={len(latent_z)})'))
+            print(f"    ✓ Added {len(latent_z)} samples from {data_type}")
     
-    if is_multi_encoder:
-        print("  Processing multi-encoder latent data...")
-        
-        # Process training data from encoders
+    # Process training data from results.pkl (legacy)
+    if results:
         if 'encoder_latent_data' in results:
+            # Multi-encoder format
             for encoder_key, encoder_data in results['encoder_latent_data'].items():
-                if encoder_data['num_samples'] > 0:
-                    latent_z = encoder_data['latent_zs']
-                    all_latent_data.append(latent_z)
-                    
-                    data_type = encoder_data['data_type']
-                    color = color_palette.get(data_type, '#808080')
-                    all_colors.extend([color] * len(latent_z))
-                    all_labels.extend([data_type] * len(latent_z))
-                    
-                    # Add to legend
-                    legend_elements.append(mpatches.Patch(color=color, label=f'{data_type} (n={len(latent_z)})'))
-                    print(f"    ✓ Added {len(latent_z)} samples from {data_type}")
-        
-        # Process evaluation data if available
-        if eval_results:
-            for key, key_results in eval_results.items():
-                if 'evaluation_latent_data' in key_results:
-                    eval_data = key_results['evaluation_latent_data']
-                    
-                    # Process support data
-                    if 'support' in eval_data:
-                        for encoder_key, encoder_data in eval_data['support'].items():
-                            if encoder_data['num_samples'] > 0:
-                                latent_z = encoder_data['latent_zs']
-                                all_latent_data.append(latent_z)
-                                
-                                data_type = encoder_data['data_type']
-                                color = color_palette.get(data_type, '#808080')
-                                all_colors.extend([color] * len(latent_z))
-                                all_labels.extend([data_type] * len(latent_z))
-                                
-                                legend_elements.append(mpatches.Patch(color=color, label=f'{data_type} (n={len(latent_z)})'))
-                                print(f"    ✓ Added {len(latent_z)} samples from {data_type}")
-                    
-                    # Process query data
-                    if 'query' in eval_data:
-                        for encoder_key, encoder_data in eval_data['query'].items():
-                            if encoder_data['num_samples'] > 0:
-                                latent_z = encoder_data['latent_zs']
-                                all_latent_data.append(latent_z)
-                                
-                                data_type = encoder_data['data_type']
-                                color = color_palette.get(data_type, '#808080')
-                                all_colors.extend([color] * len(latent_z))
-                                all_labels.extend([data_type] * len(latent_z))
-                                
-                                legend_elements.append(mpatches.Patch(color=color, label=f'{data_type} (n={len(latent_z)})'))
-                                print(f"    ✓ Added {len(latent_z)} samples from {data_type}")
-                break  # Only process first key for now
-        
-    else:
-        print("  Processing single-encoder latent data...")
-        
-        # Process training data
-        if 'single_encoder_latent_data' in results:
+                if encoder_data.get('num_samples', 0) > 0:
+                    add_latent_data(encoder_data['latent_zs'], encoder_data['data_type'])
+        elif 'single_encoder_latent_data' in results:
+            # Single-encoder format - convert to unified format
             latent_data = results['single_encoder_latent_data']
-            if latent_data['num_samples'] > 0:
-                latent_z = latent_data['latent_zs']
-                all_latent_data.append(latent_z)
+            if latent_data.get('num_samples', 0) > 0:
+                add_latent_data(latent_data['latent_zs'], 'training_single')
+    
+    # Process evaluation data (unified format for both single and multi-encoder)
+    if eval_results:
+        for key, key_results in eval_results.items():
+            # Process training latent data collected during evaluation
+            if 'training_latent_data' in key_results:
+                training_data = key_results['training_latent_data']
+                print(f"    Processing training latent data from evaluation results...")
                 
-                data_type = 'training_single'
-                color = color_palette[data_type]
-                all_colors.extend([color] * len(latent_z))
-                all_labels.extend([data_type] * len(latent_z))
+                for encoder_key, encoder_data in training_data.items():
+                    if encoder_key == 'collection_info':  # Skip metadata
+                        continue
+                    if encoder_data.get('num_samples', 0) > 0:
+                        add_latent_data(encoder_data['latent_zs'], encoder_data['data_type'])
+            
+            # ALSO Process encoded training latents (new format)
+            if 'encoded_training_latents' in key_results:
+                encoded_data = key_results['encoded_training_latents']
+                print(f"    Processing encoded training latents from evaluation results...")
                 
-                legend_elements.append(mpatches.Patch(color=color, label=f'Training (n={len(latent_z)})'))
-                print(f"    ✓ Added {len(latent_z)} samples from training")
-        
-        # Process evaluation data if available
-        if eval_results:
-            for key, key_results in eval_results.items():
-                if 'evaluation_latent_data' in key_results:
-                    eval_data = key_results['evaluation_latent_data']
-                    
-                    # Process support data
-                    if 'support' in eval_data and 'single_encoder' in eval_data['support']:
-                        encoder_data = eval_data['support']['single_encoder']
-                        if encoder_data['num_samples'] > 0:
-                            latent_z = encoder_data['latent_zs']
-                            all_latent_data.append(latent_z)
-                            
-                            data_type = 'support_single'
-                            color = color_palette[data_type]
-                            all_colors.extend([color] * len(latent_z))
-                            all_labels.extend([data_type] * len(latent_z))
-                            
-                            legend_elements.append(mpatches.Patch(color=color, label=f'Support (n={len(latent_z)})'))
-                            print(f"    ✓ Added {len(latent_z)} samples from support")
-                    
-                    # Process query data
-                    if 'query' in eval_data and 'single_encoder' in eval_data['query']:
-                        encoder_data = eval_data['query']['single_encoder']
-                        if encoder_data['num_samples'] > 0:
-                            latent_z = encoder_data['latent_zs']
-                            all_latent_data.append(latent_z)
-                            
-                            data_type = 'query_single'
-                            color = color_palette[data_type]
-                            all_colors.extend([color] * len(latent_z))
-                            all_labels.extend([data_type] * len(latent_z))
-                            
-                            legend_elements.append(mpatches.Patch(color=color, label=f'Query (n={len(latent_z)})'))
-                            print(f"    ✓ Added {len(latent_z)} samples from query")
-                break  # Only process first key for now
+                # Handle both numpy arrays and lists
+                latent_zs = encoded_data.get('latent_zs', [])
+                if isinstance(latent_zs, list):
+                    latent_zs = np.array(latent_zs)
+                
+                if isinstance(latent_zs, np.ndarray) and len(latent_zs) > 0:
+                    add_latent_data(latent_zs, 'training_encoded')
+            
+            # Process evaluation latent data (support/query)
+            if 'evaluation_latent_data' in key_results:
+                eval_data = key_results['evaluation_latent_data']
+                
+                # Process both support and query phases
+                for phase in ['support', 'query']:
+                    if phase in eval_data:
+                        for encoder_key, encoder_data in eval_data[phase].items():
+                            if encoder_data.get('num_samples', 0) > 0:
+                                add_latent_data(encoder_data['latent_zs'], encoder_data['data_type'])
+            break  # Only process first key for now
     
     if not all_latent_data:
         print("⚠ Warning: No latent data found for visualization")
@@ -3690,7 +3756,7 @@ def plot_comprehensive_latent_space(results, eval_results=None, save_dir=None):
                         c=all_colors, alpha=0.6, s=20, edgecolors='black', linewidth=0.1)
     
     # Customize the plot
-    model_type = "Multi-Encoder" if is_multi_encoder else "Single Encoder"
+    model_type = f"{num_encoders} Encoder{'s' if num_encoders != 1 else ''}"
     title = f'Comprehensive Latent Space Visualization ({model_type})'
     if eval_results:
         title += '\nTraining + Evaluation Data'
@@ -3726,9 +3792,8 @@ def plot_comprehensive_latent_space(results, eval_results=None, save_dir=None):
 
 def get_comprehensive_latent_data_for_trajectory(run_dir):
     """
-    Get comprehensive latent data (encoders + PoE) for trajectory visualization background.
-    This reuses the same logic as plot_comprehensive_latent_space but returns the data
-    instead of creating a plot.
+    Get comprehensive latent data for trajectory visualization background.
+    Unified processing for both single and multi-encoder models.
     
     Args:
         run_dir: Directory containing training and evaluation results
@@ -3754,92 +3819,69 @@ def get_comprehensive_latent_data_for_trajectory(run_dir):
         if not results and not eval_results:
             return None, None, None, None
         
-        # Use the same logic as plot_comprehensive_latent_space
-        is_multi_encoder = results and 'encoder_latent_data' in results
-        
-        # Collect all latent data
+        # Collect all latent data using unified approach
         all_latent_data = []
         all_labels = []
         all_colors = []
+        color_palette = COLOR_PALETTE
         
-        # Color palette for different data types
-        color_palette = {
-            'training_encoder_0': '#FF6B6B',    'training_encoder_1': '#4ECDC4',
-            'training_encoder_2': '#45B7D1',    'training_encoder_3': '#96CEB4',
-            'support_encoder_0': '#FFB6C1',     'support_encoder_1': '#B4E7E1',
-            'support_encoder_2': '#B3D9FF',     'support_encoder_3': '#C8E6C9',
-            'query_encoder_0': '#8B0000',       'query_encoder_1': '#006666',
-            'query_encoder_2': '#0066CC',       'query_encoder_3': '#2E8B57',
-            'support_poe': '#FFD700',           'query_poe': '#FF8C00',
-            'training_single': '#9370DB',       'support_single': '#DDA0DD',
-            'query_single': '#4B0082'
-        }
+        def add_latent_data(latent_z, data_type):
+            """Helper function to add latent data with consistent processing."""
+            if len(latent_z) > 0:
+                all_latent_data.append(latent_z)
+                color = color_palette.get(data_type, '#808080')
+                all_colors.extend([color] * len(latent_z))
+                all_labels.extend([data_type] * len(latent_z))
         
-        if is_multi_encoder and results:
-            # Process training data from encoders
+        # Process training data from results.pkl (legacy)
+        if results:
             if 'encoder_latent_data' in results:
+                # Multi-encoder format
                 for encoder_key, encoder_data in results['encoder_latent_data'].items():
-                    if encoder_data['num_samples'] > 0:
-                        latent_z = encoder_data['latent_zs']
-                        all_latent_data.append(latent_z)
-                        
-                        data_type = encoder_data['data_type']
-                        color = color_palette.get(data_type, '#808080')
-                        all_colors.extend([color] * len(latent_z))
-                        all_labels.extend([data_type] * len(latent_z))
-            
-            # Process evaluation data if available
-            if eval_results:
-                for key, key_results in eval_results.items():
-                    if 'evaluation_latent_data' in key_results:
-                        eval_data = key_results['evaluation_latent_data']
-                        
-                        # Process support and query data
-                        for phase in ['support', 'query']:
-                            if phase in eval_data:
-                                for encoder_key, encoder_data in eval_data[phase].items():
-                                    if encoder_data['num_samples'] > 0:
-                                        latent_z = encoder_data['latent_zs']
-                                        all_latent_data.append(latent_z)
-                                        
-                                        data_type = encoder_data['data_type']
-                                        color = color_palette.get(data_type, '#808080')
-                                        all_colors.extend([color] * len(latent_z))
-                                        all_labels.extend([data_type] * len(latent_z))
-                    break  # Only process first key
-        
-        elif results:  # Single encoder
-            # Process training data
-            if 'single_encoder_latent_data' in results:
+                    if encoder_data.get('num_samples', 0) > 0:
+                        add_latent_data(encoder_data['latent_zs'], encoder_data['data_type'])
+            elif 'single_encoder_latent_data' in results:
+                # Single-encoder format - convert to unified format
                 latent_data = results['single_encoder_latent_data']
-                if latent_data['num_samples'] > 0:
-                    latent_z = latent_data['latent_zs']
-                    all_latent_data.append(latent_z)
+                if latent_data.get('num_samples', 0) > 0:
+                    add_latent_data(latent_data['latent_zs'], 'training_single')
+        
+        # Process evaluation data (unified format for both single and multi-encoder)
+        if eval_results:
+            for key, key_results in eval_results.items():
+                # Process training latent data collected during evaluation
+                if 'training_latent_data' in key_results:
+                    training_data = key_results['training_latent_data']
                     
-                    data_type = 'training_single'
-                    color = color_palette[data_type]
-                    all_colors.extend([color] * len(latent_z))
-                    all_labels.extend([data_type] * len(latent_z))
-            
-            # Process evaluation data if available
-            if eval_results:
-                for key, key_results in eval_results.items():
-                    if 'evaluation_latent_data' in key_results:
-                        eval_data = key_results['evaluation_latent_data']
-                        
-                        # Process support and query data
-                        for phase in ['support', 'query']:
-                            if phase in eval_data and 'single_encoder' in eval_data[phase]:
-                                encoder_data = eval_data[phase]['single_encoder']
-                                if encoder_data['num_samples'] > 0:
-                                    latent_z = encoder_data['latent_zs']
-                                    all_latent_data.append(latent_z)
-                                    
-                                    data_type = f'{phase}_single'
-                                    color = color_palette[data_type]
-                                    all_colors.extend([color] * len(latent_z))
-                                    all_labels.extend([data_type] * len(latent_z))
-                    break
+                    for encoder_key, encoder_data in training_data.items():
+                        if encoder_key == 'collection_info':  # Skip metadata
+                            continue
+                        if encoder_data.get('num_samples', 0) > 0:
+                            add_latent_data(encoder_data['latent_zs'], encoder_data['data_type'])
+                
+                # ALSO Process encoded training latents (new format)
+                if 'encoded_training_latents' in key_results:
+                    encoded_data = key_results['encoded_training_latents']
+                    
+                    # Handle both numpy arrays and lists
+                    latent_zs = encoded_data.get('latent_zs', [])
+                    if isinstance(latent_zs, list):
+                        latent_zs = np.array(latent_zs)
+                    
+                    if isinstance(latent_zs, np.ndarray) and len(latent_zs) > 0:
+                        add_latent_data(latent_zs, 'training_encoded')
+                
+                # Process evaluation latent data (support/query)
+                if 'evaluation_latent_data' in key_results:
+                    eval_data = key_results['evaluation_latent_data']
+                    
+                    # Process both support and query phases
+                    for phase in ['support', 'query']:
+                        if phase in eval_data:
+                            for encoder_key, encoder_data in eval_data[phase].items():
+                                if encoder_data.get('num_samples', 0) > 0:
+                                    add_latent_data(encoder_data['latent_zs'], encoder_data['data_type'])
+                break  # Only process first key
         
         if not all_latent_data:
             return None, None, None, None

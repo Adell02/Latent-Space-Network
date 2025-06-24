@@ -87,3 +87,23 @@ def split_dataset_for_multi_encoder(input_sequences, output_sequences, num_encod
         start_idx = end_idx
     
     return splits
+
+def extract_grid_from_sequence(sequence, max_rows=30, max_cols=30):
+    """Extract the 2D grid and its shape from an ARC sequence."""
+    sequence = np.array(sequence)
+
+    if len(sequence) >= 902:
+        rows = int(sequence[-2])
+        cols = int(sequence[-1])
+
+        grid_flat = sequence[:900]
+        grid_full = grid_flat.reshape(30, 30)
+        actual_grid = grid_full[:rows, :cols]
+        return actual_grid, (rows, cols)
+
+    grid_size = int(np.sqrt(len(sequence)))
+    if grid_size * grid_size == len(sequence):
+        grid = sequence.reshape(grid_size, grid_size)
+        return grid, (grid_size, grid_size)
+
+    return sequence, getattr(sequence, 'shape', (max_rows, max_cols))

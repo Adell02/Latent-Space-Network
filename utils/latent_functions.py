@@ -147,9 +147,9 @@ def optimize_latent_z(lpn, input_seq, target_seq, num_steps=None, lr=None, retur
         return z, losses
 
 def evolutionary_optimize_latent_z(lpn, input_seq, target_seq, population_size=None,
-                                   num_generations=None, mutation_std=None):
+                                   num_generations=None, mutation_std=None, return_trajectory=False):
     """
-    Optimize latent z using an evolutionary algorithm with progress bar.
+    Optimize latent z using an evolutionary algorithm with progress bar and trajectory logging.
     """
     # Use settings if parameters are not provided
     evolutionary_settings = latent_optimization['evolutionary']
@@ -174,16 +174,56 @@ def evolutionary_optimize_latent_z(lpn, input_seq, target_seq, population_size=N
             # For single encoder
             mu, log_var = lpn.encoder(input_seq, target_seq)
             initial_z = lpn.reparameterize(mu, log_var).detach()
+    
+    # Compute initial loss
+    with torch.no_grad():
+        if hasattr(lpn, 'is_multi_encoder') and lpn.is_multi_encoder:
+            shape_logits_init, grid_logits_init = lpn.multi_encoder.decoder(initial_z, input_seq, target_seq=target_seq)
+        else:
+            shape_logits_init, grid_logits_init = lpn.decoder(initial_z, input_seq, target_seq=target_seq)
+        
+        shape_targets = target_seq[:, 900:902].long()
+        shape_loss_init = F.cross_entropy(shape_logits_init.reshape(-1, 31), shape_targets.reshape(-1))
+        
+        grid_loss_list_init = []
+        for i in range(batch_size):
+            tgt_rows = int(target_seq[i, 900].item())
+            tgt_cols = int(target_seq[i, 901].item())
+            active_pixels = tgt_rows * tgt_cols
+            if active_pixels > 0:
+                loss_i = F.cross_entropy(grid_logits_init[i, :active_pixels],
+                                       target_seq[i, :active_pixels].long())
+                grid_loss_list_init.append(loss_i)
+
+        grid_loss_init = sum(grid_loss_list_init) / len(grid_loss_list_init) if grid_loss_list_init else \
+                       torch.tensor(0.0, device=device)
+        initial_loss = (shape_loss_init + grid_loss_init).item()
             
     population = initial_z.unsqueeze(0).repeat(population_size, 1, 1)
     population = population + torch.randn_like(population) * mutation_std
     best_candidate = None
+    
+    # Track trajectory information if requested
+    trajectory = {
+        'z_vectors': [initial_z.detach().clone()],
+        'losses': [initial_loss],
+        'best_fitness_per_generation': [initial_loss],
+        'population_diversity': [],
+        'encoder_mu': mu.detach().clone(),
+        'encoder_log_var': log_var.detach().clone(),
+        'initial_z': initial_z.detach().clone(),
+        'method': 'evolutionary'
+    } if return_trajectory else None
+    
+    print(f"    Initial loss: {initial_loss:.4f}")
     
     # Create progress bar for generations
     pbar = tqdm(range(num_generations), desc="Evolutionary", unit="gen", leave=False)
     
     for gen in pbar:
         candidate_losses = []
+        generation_candidates = []
+        
         for i in range(population_size):
             candidate_z = population[i]
             if hasattr(lpn, 'is_multi_encoder') and lpn.is_multi_encoder:
@@ -204,13 +244,31 @@ def evolutionary_optimize_latent_z(lpn, input_seq, target_seq, population_size=N
             grid_loss = sum(grid_loss_list) / len(grid_loss_list) if grid_loss_list else torch.tensor(0.0, device=device)
             reconstruction_loss = shape_loss + grid_loss
             candidate_losses.append(reconstruction_loss.item())
+            generation_candidates.append(candidate_z.detach().clone())
         
         sorted_indices = sorted(range(population_size), key=lambda i: candidate_losses[i])
         best_loss = candidate_losses[sorted_indices[0]]
         best_candidate = population[sorted_indices[0]].detach()
         
+        # Track trajectory information
+        if return_trajectory:
+            trajectory['z_vectors'].append(best_candidate.detach().clone())
+            trajectory['losses'].append(best_loss)
+            trajectory['best_fitness_per_generation'].append(best_loss)
+            
+            # Calculate population diversity (average pairwise distance)
+            pop_flat = torch.stack(generation_candidates).view(population_size, -1)
+            pairwise_dists = torch.cdist(pop_flat, pop_flat, p=2)
+            # Get upper triangular part (excluding diagonal) to avoid double counting
+            upper_tri_mask = torch.triu(torch.ones_like(pairwise_dists, dtype=bool), diagonal=1)
+            diversity = pairwise_dists[upper_tri_mask].mean().item()
+            trajectory['population_diversity'].append(diversity)
+        
         # Update progress bar
-        pbar.set_postfix({'best_loss': f'{best_loss:.4f}'})
+        pbar.set_postfix({
+            'best_loss': f'{best_loss:.4f}',
+            'avg_loss': f'{sum(candidate_losses)/len(candidate_losses):.4f}'
+        })
         
         num_selected = population_size // 2
         selected_candidates = population[sorted_indices[:num_selected]]
@@ -223,17 +281,25 @@ def evolutionary_optimize_latent_z(lpn, input_seq, target_seq, population_size=N
             population = torch.cat([population, extra], dim=0)
     
     pbar.close()
-    print(f"    ✓ Evolutionary optimization complete: Best loss: {best_loss:.4f}")
-    return best_candidate, None
+    
+    loss_improvement = initial_loss - best_loss
+    print(f"    ✓ Evolutionary optimization complete: "
+          f"Loss {initial_loss:.4f} → {best_loss:.4f} "
+          f"(Δ: {loss_improvement:+.4f})")
+    
+    if return_trajectory:
+        return best_candidate, trajectory['losses'], trajectory
+    else:
+        return best_candidate, None
 
 ##############################
 # New: Optimize latent z via a Voronoi‑Inspired Search
 ##############################
 def voronoi_optimize_latent_z(lpn, input_seq, target_seq, population_size=None,
                               num_generations=None, diversity_weight=None,
-                              mutation_std=None):
+                              mutation_std=None, return_trajectory=False):
     """
-    Optimize latent z using a Voronoi-inspired approach with progress bar.
+    Optimize latent z using a Voronoi-inspired approach with progress bar and trajectory logging.
     """
     # Use settings if parameters are not provided
     voronoi_settings = latent_optimization['voronoi']
@@ -261,6 +327,30 @@ def voronoi_optimize_latent_z(lpn, input_seq, target_seq, population_size=None,
             # For single encoder
             mu, log_var = lpn.encoder(input_seq, target_seq)
             initial_z = lpn.reparameterize(mu, log_var).detach()
+    
+    # Compute initial loss
+    with torch.no_grad():
+        if hasattr(lpn, 'is_multi_encoder') and lpn.is_multi_encoder:
+            shape_logits_init, grid_logits_init = lpn.multi_encoder.decoder(initial_z, input_seq, target_seq=target_seq)
+        else:
+            shape_logits_init, grid_logits_init = lpn.decoder(initial_z, input_seq, target_seq=target_seq)
+        
+        shape_targets = target_seq[:, 900:902].long()
+        shape_loss_init = F.cross_entropy(shape_logits_init.reshape(-1, 31), shape_targets.reshape(-1))
+        
+        grid_loss_list_init = []
+        for i in range(batch_size):
+            tgt_rows = int(target_seq[i, 900].item())
+            tgt_cols = int(target_seq[i, 901].item())
+            active_pixels = tgt_rows * tgt_cols
+            if active_pixels > 0:
+                loss_i = F.cross_entropy(grid_logits_init[i, :active_pixels],
+                                       target_seq[i, :active_pixels].long())
+                grid_loss_list_init.append(loss_i)
+
+        grid_loss_init = sum(grid_loss_list_init) / len(grid_loss_list_init) if grid_loss_list_init else \
+                       torch.tensor(0.0, device=device)
+        initial_loss = (shape_loss_init + grid_loss_init).item()
             
     # Create an initial population
     population = initial_z.unsqueeze(0).repeat(population_size, 1, 1)
@@ -282,11 +372,29 @@ def voronoi_optimize_latent_z(lpn, input_seq, target_seq, population_size=None,
 
     best_candidate = None
     
+    # Track trajectory information if requested
+    trajectory = {
+        'z_vectors': [initial_z.detach().clone()],
+        'losses': [initial_loss],
+        'combined_scores': [initial_loss],  # For Voronoi, track both loss and combined score
+        'diversity_scores': [],
+        'population_diversity': [],
+        'encoder_mu': mu.detach().clone(),
+        'encoder_log_var': log_var.detach().clone(),
+        'initial_z': initial_z.detach().clone(),
+        'method': 'voronoi',
+        'diversity_weight': diversity_weight
+    } if return_trajectory else None
+    
+    print(f"    Initial loss: {initial_loss:.4f}")
+    
     # Create progress bar for generations
     pbar = tqdm(range(num_generations), desc="Voronoi", unit="gen", leave=False)
     
     for gen in pbar:
         candidate_losses = []
+        generation_candidates = []
+        
         for i in range(population_size):
             candidate_z = population[i]
             if hasattr(lpn, 'is_multi_encoder') and lpn.is_multi_encoder:
@@ -307,6 +415,7 @@ def voronoi_optimize_latent_z(lpn, input_seq, target_seq, population_size=None,
             grid_loss = sum(grid_loss_list) / len(grid_loss_list) if grid_loss_list else torch.tensor(0.0, device=device)
             reconstruction_loss = shape_loss + grid_loss
             candidate_losses.append(reconstruction_loss.item())
+            generation_candidates.append(candidate_z.detach().clone())
         
         diversity_scores = compute_diversity(population)
         # Combine reconstruction loss and diversity. Lower is better.
@@ -316,10 +425,26 @@ def voronoi_optimize_latent_z(lpn, input_seq, target_seq, population_size=None,
         best_loss = candidate_losses[sorted_indices[0]]
         best_candidate = population[sorted_indices[0]].detach()
         
+        # Track trajectory information
+        if return_trajectory:
+            trajectory['z_vectors'].append(best_candidate.detach().clone())
+            trajectory['losses'].append(best_loss)
+            trajectory['combined_scores'].append(best_score)
+            trajectory['diversity_scores'].append(diversity_scores[sorted_indices[0]])
+            
+            # Calculate population diversity (average pairwise distance)
+            pop_flat = torch.stack(generation_candidates).view(population_size, -1)
+            pairwise_dists = torch.cdist(pop_flat, pop_flat, p=2)
+            # Get upper triangular part (excluding diagonal) to avoid double counting
+            upper_tri_mask = torch.triu(torch.ones_like(pairwise_dists, dtype=bool), diagonal=1)
+            pop_diversity = pairwise_dists[upper_tri_mask].mean().item()
+            trajectory['population_diversity'].append(pop_diversity)
+        
         # Update progress bar
         pbar.set_postfix({
             'loss': f'{best_loss:.4f}',
-            'score': f'{best_score:.4f}'
+            'score': f'{best_score:.4f}',
+            'diversity': f'{diversity_scores[sorted_indices[0]]:.3f}'
         })
         
         # Selection: take the top half based on combined score.
@@ -334,8 +459,16 @@ def voronoi_optimize_latent_z(lpn, input_seq, target_seq, population_size=None,
             population = torch.cat([population, extra], dim=0)
     
     pbar.close()
-    print(f"    ✓ Voronoi optimization complete: Best loss: {best_loss:.4f}, Best score: {best_score:.4f}")
-    return best_candidate, None
+    
+    loss_improvement = initial_loss - best_loss
+    print(f"    ✓ Voronoi optimization complete: "
+          f"Loss {initial_loss:.4f} → {best_loss:.4f} "
+          f"(Δ: {loss_improvement:+.4f}), Best score: {best_score:.4f}")
+    
+    if return_trajectory:
+        return best_candidate, trajectory['losses'], trajectory
+    else:
+        return best_candidate, None
 
 ##############################
 # Helper: Choose Optimization Method
@@ -379,17 +512,11 @@ def get_optimized_z(lpn, input_seq, target_seq, num_steps=None, lr=None, context
         elif optimization_method == "evolutionary":
             # For evolutionary and voronoi, we don't use num_steps/lr but their own parameters
             # However, we could map num_steps to num_generations if needed
-            result = evolutionary_optimize_latent_z(lpn, input_seq, target_seq)
-            if return_trajectory:
-                return result[0], result[1], None  # No trajectory for evolutionary
-            else:
-                return result
+            return evolutionary_optimize_latent_z(lpn, input_seq, target_seq, 
+                                                return_trajectory=return_trajectory)
         elif optimization_method == "voronoi":
-            result = voronoi_optimize_latent_z(lpn, input_seq, target_seq)
-            if return_trajectory:
-                return result[0], result[1], None  # No trajectory for voronoi
-            else:
-                return result
+            return voronoi_optimize_latent_z(lpn, input_seq, target_seq,
+                                           return_trajectory=return_trajectory)
         else:
             # Unknown method, fall back to basic sampling
             with torch.no_grad():

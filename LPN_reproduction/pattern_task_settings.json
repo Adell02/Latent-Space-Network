@@ -9,12 +9,12 @@
         "run_base_dir": "runs_re_arc"
     },
     "model_architecture": {
-        "num_encoders": 4,
+        "num_encoders": 1,
         "encoder_layers" : 2,
         "decoder_layers" : 2,
         "encoder_heads" : 6,
         "decoder_heads" : 6,
-        "encoder_hidden_dim" : 96,
+        "encoder_hidden_dim" : 204,
         "decoder_hidden_dim" : 96,
         "latent_dim": 128,
         "dropout": 1e-6,
@@ -51,12 +51,12 @@
         },
         "method": "gradient",
         "evolutionary": {
-            "population_size": 20,
+            "population_size": 25,
             "num_generations": 15,
             "mutation_std": 0.1
         },
         "voronoi": {
-            "population_size": 20,
+            "population_size": 10,
             "num_generations": 15,
             "diversity_weight": 0.5,
             "mutation_std": 0.1

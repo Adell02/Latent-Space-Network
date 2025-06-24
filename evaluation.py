@@ -5,7 +5,7 @@ import pickle
 import os
 import numpy as np
 
-from utils.model_utils import set_seed, prepare_dataloader
+from utils.model_utils import set_seed, prepare_dataloader, collect_latent_data
 from re_arc.main import generate_and_process_tasks
 from utils.settings_manager import settings
 from utils.latent_functions import get_optimized_z
@@ -21,6 +21,7 @@ MAX_BATCH_SIZE = 16
 def collect_evaluation_latent_data(model, samples_dataloader, queries_dataloader, device, is_multi_encoder, num_encoders):
     """
     Collect latent representations from support and query samples for visualization.
+    Unified approach: single encoder is treated as multi-encoder with num_encoders=1.
     
     Args:
         model: The model to collect latent data from
@@ -28,7 +29,7 @@ def collect_evaluation_latent_data(model, samples_dataloader, queries_dataloader
         queries_dataloader: Query samples dataloader
         device: Device to run on
         is_multi_encoder: Whether this is a multi-encoder model
-        num_encoders: Number of encoders (if multi-encoder)
+        num_encoders: Number of encoders (1 for single encoder)
         
     Returns:
         dict: Latent data organized by data type (support/query) and encoder
@@ -37,191 +38,252 @@ def collect_evaluation_latent_data(model, samples_dataloader, queries_dataloader
     evaluation_latent_data = {}
     
     print("  Collecting support samples latent data...")
-    if is_multi_encoder:
-        # For multi-encoder: collect both individual encoder and PoE latents
-        support_data = collect_multi_encoder_evaluation_latents(
-            model, samples_dataloader, device, num_encoders, data_type='support'
-        )
-    else:
-        # For single encoder
-        support_data = collect_single_encoder_evaluation_latents(
-            model, samples_dataloader, device, data_type='support'
-        )
+    support_data = collect_unified_evaluation_latents(
+        model, samples_dataloader, device, is_multi_encoder, num_encoders, data_type='support'
+    )
     evaluation_latent_data['support'] = support_data
     
     print("  Collecting query samples latent data...")
-    if is_multi_encoder:
-        # For multi-encoder: collect both individual encoder and PoE latents
-        query_data = collect_multi_encoder_evaluation_latents(
-            model, queries_dataloader, device, num_encoders, data_type='query'
-        )
-    else:
-        # For single encoder
-        query_data = collect_single_encoder_evaluation_latents(
-            model, queries_dataloader, device, data_type='query'
-        )
+    query_data = collect_unified_evaluation_latents(
+        model, queries_dataloader, device, is_multi_encoder, num_encoders, data_type='query'
+    )
     evaluation_latent_data['query'] = query_data
     
     return evaluation_latent_data
 
-def collect_multi_encoder_evaluation_latents(model, dataloader, device, num_encoders, data_type='support', max_samples=100):
+def collect_unified_evaluation_latents(model, dataloader, device, is_multi_encoder, num_encoders, data_type='support', max_samples=100):
     """
-    Collect latent representations from multi-encoder model for evaluation data.
+    Unified evaluation latent collection for both single and multi-encoder models.
+    Single encoder (num_encoders=1) is treated as a special case of multi-encoder.
+    
+    For evaluation: ALL encoders process the SAME support/query dataset.
     """
-    encoder_latent_data = {}
+    print(f"    Collecting {data_type} latents from {num_encoders}-encoder model...")
+    print(f"      Processing same {data_type} dataset with {num_encoders} encoder{'s' if num_encoders != 1 else ''}...")
+    
+    # Get the data samples first (same for all encoders)
+    input_samples = []
+    output_samples = []
     
     with torch.no_grad():
-        # Collect individual encoder latents
-        for encoder_idx in range(num_encoders):
-            print(f"    Collecting {data_type} latents from Encoder {encoder_idx}...")
-            
-            latent_data = {
-                'latent_mus': [],
-                'latent_log_vars': [],
-                'latent_zs': [],
-                'input_samples': [],
-                'output_samples': [],
-                'encoder_idx': encoder_idx,
-                'data_type': f'{data_type}_encoder_{encoder_idx}',
-                'num_samples': 0
-            }
-            
-            sample_count = 0
-            for batch_input, batch_target in dataloader:
-                if sample_count >= max_samples:
-                    break
-                    
-                batch_input = batch_input.to(device)
-                batch_target = batch_target.to(device)
-                
-                # Get latent representations from specific encoder
-                mu, log_var = model(batch_input, batch_target, encoder_idx=encoder_idx)[1:3]
-                z = model.reparameterize(mu, log_var)
-                
-                # Store data
-                batch_size = min(batch_input.size(0), max_samples - sample_count)
-                latent_data['latent_mus'].append(mu[:batch_size].cpu().numpy())
-                latent_data['latent_log_vars'].append(log_var[:batch_size].cpu().numpy())
-                latent_data['latent_zs'].append(z[:batch_size].cpu().numpy())
-                latent_data['input_samples'].append(batch_input[:batch_size].cpu().numpy())
-                latent_data['output_samples'].append(batch_target[:batch_size].cpu().numpy())
-                
-                sample_count += batch_size
-            
-            # Concatenate all batches
-            if latent_data['latent_mus']:
-                latent_data['latent_mus'] = np.concatenate(latent_data['latent_mus'], axis=0)
-                latent_data['latent_log_vars'] = np.concatenate(latent_data['latent_log_vars'], axis=0)
-                latent_data['latent_zs'] = np.concatenate(latent_data['latent_zs'], axis=0)
-                latent_data['input_samples'] = np.concatenate(latent_data['input_samples'], axis=0)
-                latent_data['output_samples'] = np.concatenate(latent_data['output_samples'], axis=0)
-                latent_data['num_samples'] = len(latent_data['latent_mus'])
-                
-                print(f"      ✓ Collected {latent_data['num_samples']} {data_type} samples from Encoder {encoder_idx}")
-            
-            encoder_latent_data[f'encoder_{encoder_idx}'] = latent_data
-        
-        # Collect PoE latents
-        print(f"    Collecting {data_type} latents from PoE...")
-        poe_latent_data = {
-            'latent_mus': [],
-            'latent_log_vars': [],
-            'latent_zs': [],
-            'input_samples': [],
-            'output_samples': [],
-            'data_type': f'{data_type}_poe',
-            'num_samples': 0
-        }
-        
         sample_count = 0
         for batch_input, batch_target in dataloader:
             if sample_count >= max_samples:
                 break
                 
-            batch_input = batch_input.to(device)
-            batch_target = batch_target.to(device)
+            batch_size = min(batch_input.size(0), max_samples - sample_count)
+            input_samples.append(batch_input[:batch_size])
+            output_samples.append(batch_target[:batch_size])
+            sample_count += batch_size
+    
+    if not input_samples:
+        print(f"      ⚠ No {data_type} samples found")
+        return {}
+    
+    # Combine all batches
+    all_inputs = torch.cat(input_samples, dim=0).to(device)
+    all_outputs = torch.cat(output_samples, dim=0).to(device)
+    
+    print(f"      Processing {len(all_inputs)} {data_type} samples...")
+    
+    encoder_latent_data = {}
+    
+    # Process with each individual encoder (works for both single and multi-encoder)
+    for encoder_idx in range(num_encoders):
+        print(f"        Encoder {encoder_idx}...")
+        
+        with torch.no_grad():
+            if is_multi_encoder:
+                # Multi-encoder: use specific encoder
+                mu, log_var = model(all_inputs, all_outputs, encoder_idx=encoder_idx)[1:3]
+            else:
+                # Single encoder: there's only one encoder (encoder_idx should be 0)
+                assert encoder_idx == 0, f"Single encoder but encoder_idx={encoder_idx}"
+                mu, log_var = model.encoder(all_inputs, all_outputs)
             
-            # Get PoE latent representations
-            mu, log_var = model(batch_input, batch_target)[1:3]  # No encoder_idx = PoE
             z = model.reparameterize(mu, log_var)
             
-            # Store data
-            batch_size = min(batch_input.size(0), max_samples - sample_count)
-            poe_latent_data['latent_mus'].append(mu[:batch_size].cpu().numpy())
-            poe_latent_data['latent_log_vars'].append(log_var[:batch_size].cpu().numpy())
-            poe_latent_data['latent_zs'].append(z[:batch_size].cpu().numpy())
-            poe_latent_data['input_samples'].append(batch_input[:batch_size].cpu().numpy())
-            poe_latent_data['output_samples'].append(batch_target[:batch_size].cpu().numpy())
+            latent_data = {
+                'latent_mus': mu.cpu().numpy(),
+                'latent_log_vars': log_var.cpu().numpy(),
+                'latent_zs': z.cpu().numpy(),
+                'input_samples': all_inputs.cpu().numpy(),
+                'output_samples': all_outputs.cpu().numpy(),
+                'data_type': f"{data_type}_encoder_{encoder_idx}",
+                'num_samples': len(z),
+                'encoder_idx': encoder_idx
+            }
             
-            sample_count += batch_size
-        
-        # Concatenate all batches for PoE
-        if poe_latent_data['latent_mus']:
-            poe_latent_data['latent_mus'] = np.concatenate(poe_latent_data['latent_mus'], axis=0)
-            poe_latent_data['latent_log_vars'] = np.concatenate(poe_latent_data['latent_log_vars'], axis=0)
-            poe_latent_data['latent_zs'] = np.concatenate(poe_latent_data['latent_zs'], axis=0)
-            poe_latent_data['input_samples'] = np.concatenate(poe_latent_data['input_samples'], axis=0)
-            poe_latent_data['output_samples'] = np.concatenate(poe_latent_data['output_samples'], axis=0)
-            poe_latent_data['num_samples'] = len(poe_latent_data['latent_mus'])
+            encoder_latent_data[f"encoder_{encoder_idx}"] = latent_data
+            print(f"          ✓ Collected {len(z)} samples from Encoder {encoder_idx}")
+    
+    # Process with PoE (Product of Experts) - only for multi-encoder
+    if is_multi_encoder and num_encoders > 1:
+        print(f"        PoE (Product of Experts)...")
+        with torch.no_grad():
+            # Get PoE latent representations (combining all encoders)
+            mu, log_var = model(all_inputs, all_outputs)[1:3]  # No encoder_idx = PoE
+            z = model.reparameterize(mu, log_var)
             
-            print(f"      ✓ Collected {poe_latent_data['num_samples']} {data_type} samples from PoE")
+            poe_latent_data = {
+                'latent_mus': mu.cpu().numpy(),
+                'latent_log_vars': log_var.cpu().numpy(),
+                'latent_zs': z.cpu().numpy(),
+                'input_samples': all_inputs.cpu().numpy(),
+                'output_samples': all_outputs.cpu().numpy(),
+                'data_type': f"{data_type}_poe",
+                'num_samples': len(z)
+            }
+            
+            encoder_latent_data['poe'] = poe_latent_data
+            print(f"          ✓ Collected {len(z)} samples from PoE")
+    else:
+        print(f"        PoE skipped (single encoder - PoE = Encoder 0)")
+    
+    print(f"      ✓ {num_encoders}-encoder {data_type} collection complete")
+    return encoder_latent_data
+
+##############################
+# Training Latent Data Collection
+##############################
+
+def collect_training_latent_representations(model, run_dir, device='cuda'):
+    """
+    Collect training latent representations for visualization.
+    Unified approach: single encoder is treated as multi-encoder with num_encoders=1.
+    
+    Args:
+        model: Trained model to use for encoding
+        run_dir: Directory containing results.pkl with training data
+        device: Device to run encoding on
         
+    Returns:
+        dict: Contains training latent representations and metadata
+    """
+    print("  Loading training data from results.pkl...")
+    
+    # First, try to load training sequences from results.pkl
+    results_file = os.path.join(run_dir, 'results.pkl')
+    if not os.path.exists(results_file):
+        print(f"  Warning: No training results file found at {results_file}")
+        return None
+    
+    try:
+        with open(results_file, 'rb') as f:
+            training_results = pickle.load(f)
+        
+        # Extract training sequences
+        input_sequences = training_results.get('input_sequences', [])
+        output_sequences = training_results.get('output_sequences', [])
+        
+        if not input_sequences or not output_sequences:
+            print("  Warning: No training sequences found in results.pkl")
+            return None
+        
+        print(f"  Found {len(input_sequences)} training sequences")
+        
+        # Check model type (unified approach)
+        is_multi_encoder = hasattr(model, 'is_multi_encoder') and model.is_multi_encoder
+        num_encoders = getattr(model, 'num_encoders', 1) if is_multi_encoder else 1
+        
+        print(f"  Model type: {num_encoders}-encoder ({'Multi' if is_multi_encoder else 'Single'})")
+        
+        # Limit samples for memory efficiency
+        max_samples = 200
+        if len(input_sequences) > max_samples:
+            input_sequences = input_sequences[:max_samples]
+            output_sequences = output_sequences[:max_samples]
+            print(f"  Limited to {max_samples} samples for memory efficiency")
+        
+        # Encode using the trained model (unified approach)
+        model.eval()
+        batch_size = 16
+        
+        print(f"  Encoding {len(input_sequences)} training samples...")
+        
+        # Use unified training latent collection
+        training_latent_data = collect_unified_training_latents(
+            model, input_sequences, output_sequences, device, is_multi_encoder, num_encoders, batch_size
+        )
+        
+        if training_latent_data:
+            training_latent_data['collection_info'] = {
+                'total_available_samples': len(training_results.get('input_sequences', [])),
+                'collected_samples': len(input_sequences),
+                'max_samples_limit': max_samples,
+                'batch_size': batch_size,
+                'device': str(device),
+                'is_multi_encoder': is_multi_encoder,
+                'num_encoders': num_encoders
+            }
+            
+            print(f"  ✓ Successfully collected training latent representations")
+        
+        return training_latent_data
+        
+    except Exception as e:
+        print(f"  Error collecting training latent representations: {e}")
+        return None
+
+def collect_unified_training_latents(model, input_sequences, output_sequences, device, is_multi_encoder, num_encoders, batch_size=16):
+    """
+    Unified training latent collection for both single and multi-encoder models.
+    Single encoder (num_encoders=1) is treated as a special case of multi-encoder.
+    
+    For training: Each encoder may have trained on different data subsets (multi-encoder),
+    or the same data (single encoder).
+    """
+    from utils.data_preparation import prepare_dataloader
+    
+    print(f"    Collecting training latents from {num_encoders}-encoder model...")
+    
+    # Create dataloader
+    dataloader = prepare_dataloader(input_sequences, output_sequences, batch_size, shuffle=False)
+    
+    encoder_latent_data = {}
+    
+    # Collect individual encoder latents (works for both single and multi-encoder)
+    for encoder_idx in range(num_encoders):
+        print(f"      Encoder {encoder_idx}...")
+        
+        # Use unified collect_latent_data function
+        latent_data = collect_latent_data(
+            model,
+            dataloader,
+            device,
+            encoder_idx=encoder_idx if is_multi_encoder else None,  # None for single encoder
+            max_samples=len(input_sequences),
+            data_type=f"training_encoder_{encoder_idx}",
+        )
+
+        if latent_data.get('num_samples', 0) > 0:
+            print(f"        ✓ Collected {latent_data['num_samples']} samples from Encoder {encoder_idx}")
+
+        encoder_latent_data[f"encoder_{encoder_idx}"] = latent_data
+
+    # Collect PoE latents - only for multi-encoder with more than 1 encoder
+    if is_multi_encoder and num_encoders > 1:
+        print(f"      PoE (Product of Experts)...")
+        poe_latent_data = collect_latent_data(
+            model,
+            dataloader,
+            device,
+            encoder_idx=None,  # PoE mode
+            max_samples=len(input_sequences),
+            data_type="training_poe",
+        )
+
+        if poe_latent_data.get('num_samples', 0) > 0:
+            print(f"        ✓ Collected {poe_latent_data['num_samples']} samples from PoE")
+
         encoder_latent_data['poe'] = poe_latent_data
+    else:
+        print(f"      PoE skipped (single encoder - PoE = Encoder 0)")
     
     return encoder_latent_data
 
-def collect_single_encoder_evaluation_latents(model, dataloader, device, data_type='support', max_samples=100):
-    """
-    Collect latent representations from single encoder model for evaluation data.
-    """
-    latent_data = {
-        'latent_mus': [],
-        'latent_log_vars': [],
-        'latent_zs': [],
-        'input_samples': [],
-        'output_samples': [],
-        'data_type': data_type,
-        'num_samples': 0
-    }
-    
-    with torch.no_grad():
-        sample_count = 0
-        for batch_input, batch_target in dataloader:
-            if sample_count >= max_samples:
-                break
-                
-            batch_input = batch_input.to(device)
-            batch_target = batch_target.to(device)
-            
-            # Get latent representations
-            mu, log_var = model.encoder(batch_input, batch_target)
-            z = model.reparameterize(mu, log_var)
-            
-            # Store data
-            batch_size = min(batch_input.size(0), max_samples - sample_count)
-            latent_data['latent_mus'].append(mu[:batch_size].cpu().numpy())
-            latent_data['latent_log_vars'].append(log_var[:batch_size].cpu().numpy())
-            latent_data['latent_zs'].append(z[:batch_size].cpu().numpy())
-            latent_data['input_samples'].append(batch_input[:batch_size].cpu().numpy())
-            latent_data['output_samples'].append(batch_target[:batch_size].cpu().numpy())
-            
-            sample_count += batch_size
-    
-    # Concatenate all batches
-    if latent_data['latent_mus']:
-        latent_data['latent_mus'] = np.concatenate(latent_data['latent_mus'], axis=0)
-        latent_data['latent_log_vars'] = np.concatenate(latent_data['latent_log_vars'], axis=0)
-        latent_data['latent_zs'] = np.concatenate(latent_data['latent_zs'], axis=0)
-        latent_data['input_samples'] = np.concatenate(latent_data['input_samples'], axis=0)
-        latent_data['output_samples'] = np.concatenate(latent_data['output_samples'], axis=0)
-        latent_data['num_samples'] = len(latent_data['latent_mus'])
-        
-        print(f"    ✓ Collected {latent_data['num_samples']} {data_type} samples")
-    
-    return {'single_encoder': latent_data}
-
 ##############################
-# Encode Training Sequences
+# Legacy Encode Training Sequences (kept for compatibility)
 ##############################
 
 def encode_training_sequences(model, run_dir, device='cuda', max_samples=500, batch_size=16):
@@ -368,7 +430,7 @@ def encode_training_sequences(model, run_dir, device='cuda', max_samples=500, ba
 def main_test(model, keys, run_dir, n_samples, n_queries, seed, device='cuda'):
     """
     Generate new data and evaluate the model on it.
-    Also encodes training sequences for latent space visualization.
+    Collects training latent representations at the beginning for visualization.
     
     Args:
         model: The trained model
@@ -392,6 +454,14 @@ def main_test(model, keys, run_dir, n_samples, n_queries, seed, device='cuda'):
     print(f"Device: {device}")
     print(f"Random seed: {seed}")
     print("=" * 50)
+    
+    # Collect training latent representations at the beginning of evaluation
+    print(f"\n>>> COLLECTING TRAINING LATENT REPRESENTATIONS <<<")
+    training_latent_data = collect_training_latent_representations(model, run_dir, device)
+    if training_latent_data:
+        print(f"✓ Collected training latent data: {training_latent_data.get('collection_info', {})}")
+    else:
+        print("⚠ Warning: Could not collect training latent representations")
     
     for key_idx, key in enumerate(keys):
         results[key] = {}
@@ -433,6 +503,10 @@ def main_test(model, keys, run_dir, n_samples, n_queries, seed, device='cuda'):
         results[key]['reconstruction_results']['input_queries_sequences'] = input_queries_sequences
         results[key]['reconstruction_results']['output_queries_sequences'] = output_queries_sequences
         
+        # Add training latent data to each key result (same model for all keys)
+        if training_latent_data:
+            results[key]['training_latent_data'] = training_latent_data
+        
         # Store data for clustered latent visualization
         results[key]['latent_clustering_data'] = {
             'support_data': {
@@ -466,18 +540,7 @@ def main_test(model, keys, run_dir, n_samples, n_queries, seed, device='cuda'):
 
     print(f"\n=== EVALUATION COMPLETE ===")
     print(f"Processed {len(keys)} keys successfully")
-    
-    # Encode training sequences for latent space visualization
-    print(f"\n>>> ENCODING TRAINING SEQUENCES FOR VISUALIZATION <<<")
-    encoded_training_data = encode_training_sequences(model, run_dir, device=device, max_samples=200, batch_size=16)
-    if encoded_training_data:
-        print(f"✓ Encoded {encoded_training_data['encoding_info']['encoded_samples']} training samples for visualization")
-        
-        # Add encoded training data to results for the first key (they use the same model)
-        first_key = list(results.keys())[0]
-        results[first_key]['encoded_training_latents'] = encoded_training_data
-    else:
-        print("⚠ Warning: Could not encode training sequences for visualization")
+    print(f"Training latent data collected at start and included in all key results")
     
     return results
 
