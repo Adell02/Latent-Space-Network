@@ -1,0 +1,1 @@
+python LPN_reproduction/main_pattern_task.py --mode train --epoch 20 --file_name test_multiencoder_4_25s_small_model

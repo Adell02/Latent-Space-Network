@@ -17,21 +17,144 @@ import json
 ##############################
 # Count Model Parameters
 ##############################
-def count_model_parameters(model: nn.Module) -> None:
+def count_model_parameters(model: nn.Module, logger=None) -> dict:
+    """
+    Count model parameters with detailed breakdown and return parameter information.
+    
+    Args:
+        model: PyTorch model to analyze
+        logger: Optional logger for detailed logging
+        
+    Returns:
+        dict: Parameter count information including totals and breakdowns
+    """
     total_params = 0
+    trainable_params = 0
     breakdown = {}
+    detailed_breakdown = {}
+    
+    # Count all parameters (trainable and non-trainable)
     for name, param in model.named_parameters():
+        num_params = param.numel()
+        total_params += num_params
+        
         if param.requires_grad:
+            trainable_params += num_params
+        
+        # Component breakdown (first level)
+        component = name.split('.')[0]
+        breakdown[component] = breakdown.get(component, 0) + num_params
+        
+        # Detailed breakdown (full parameter name)
+        detailed_breakdown[name] = {
+            'shape': list(param.shape),
+            'parameters': num_params,
+            'trainable': param.requires_grad
+        }
+    
+    # Calculate multi-encoder specific breakdown if applicable
+    encoder_breakdown = {}
+    decoder_params = 0
+    shared_params = 0
+    
+    if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
+        # Multi-encoder model analysis
+        for name, param in model.named_parameters():
             num_params = param.numel()
-            total_params += num_params
-            component = name.split('.')[0]
-            breakdown[component] = breakdown.get(component, 0) + num_params
-
-    print("=== Model Parameter Count ===")
-    print(f"Total trainable parameters: {total_params:,}")
+            if 'multi_encoder.encoders' in name:
+                # Extract encoder index
+                encoder_idx = name.split('.')[2]  # multi_encoder.encoders.0.something
+                encoder_key = f'encoder_{encoder_idx}'
+                encoder_breakdown[encoder_key] = encoder_breakdown.get(encoder_key, 0) + num_params
+            elif 'multi_encoder.decoder' in name or 'decoder' in name:
+                decoder_params += num_params
+            else:
+                shared_params += num_params
+    
+    # Create parameter info dictionary
+    param_info = {
+        'total_params': total_params,
+        'trainable_params': trainable_params,
+        'non_trainable_params': total_params - trainable_params,
+        'component_breakdown': breakdown,
+        'detailed_breakdown': detailed_breakdown,
+        'is_multi_encoder': hasattr(model, 'is_multi_encoder') and model.is_multi_encoder,
+        'num_encoders': getattr(model, 'num_encoders', 1) if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder else 1
+    }
+    
+    # Add multi-encoder specific info
+    if param_info['is_multi_encoder']:
+        param_info['encoder_breakdown'] = encoder_breakdown
+        param_info['decoder_params'] = decoder_params
+        param_info['shared_params'] = shared_params
+        
+        # Calculate per-encoder average
+        if encoder_breakdown:
+            total_encoder_params = sum(encoder_breakdown.values())
+            avg_encoder_params = total_encoder_params / len(encoder_breakdown)
+            param_info['avg_encoder_params'] = avg_encoder_params
+            param_info['total_encoder_params'] = total_encoder_params
+    
+    # Print detailed information
+    print("=" * 60)
+    print("MODEL PARAMETER ANALYSIS")
+    print("=" * 60)
+    print(f"Total parameters: {total_params:,}")
+    print(f"Trainable parameters: {trainable_params:,}")
+    print(f"Non-trainable parameters: {total_params - trainable_params:,}")
+    print(f"Model type: {'Multi-encoder' if param_info['is_multi_encoder'] else 'Single encoder'}")
+    
+    if param_info['is_multi_encoder']:
+        print(f"Number of encoders: {param_info['num_encoders']}")
+        print(f"Decoder parameters: {decoder_params:,}")
+        print(f"Shared parameters: {shared_params:,}")
+        print()
+        print("Per-encoder breakdown:")
+        for encoder_name, count in encoder_breakdown.items():
+            print(f"  {encoder_name}: {count:,} parameters")
+        if 'avg_encoder_params' in param_info:
+            print(f"  Average per encoder: {param_info['avg_encoder_params']:,.0f} parameters")
+        print()
+    
+    print("Component breakdown:")
     for component, count in breakdown.items():
-        print(f"{component}: {count:,} parameters")
-    print("=============================")
+        percentage = (count / total_params) * 100
+        print(f"  {component}: {count:,} parameters ({percentage:.1f}%)")
+    
+    # Log detailed breakdown if logger is provided
+    if logger:
+        logger.info("=" * 60)
+        logger.info("DETAILED MODEL PARAMETER ANALYSIS")
+        logger.info("=" * 60)
+        logger.info(f"Total parameters: {total_params:,}")
+        logger.info(f"Trainable parameters: {trainable_params:,}")
+        logger.info(f"Non-trainable parameters: {total_params - trainable_params:,}")
+        logger.info(f"Model type: {'Multi-encoder' if param_info['is_multi_encoder'] else 'Single encoder'}")
+        
+        if param_info['is_multi_encoder']:
+            logger.info(f"Number of encoders: {param_info['num_encoders']}")
+            logger.info(f"Decoder parameters: {decoder_params:,}")
+            logger.info(f"Shared parameters: {shared_params:,}")
+            logger.info("Per-encoder breakdown:")
+            for encoder_name, count in encoder_breakdown.items():
+                logger.info(f"  {encoder_name}: {count:,} parameters")
+            if 'avg_encoder_params' in param_info:
+                logger.info(f"  Average per encoder: {param_info['avg_encoder_params']:,.0f} parameters")
+        
+        logger.info("Component breakdown:")
+        for component, count in breakdown.items():
+            percentage = (count / total_params) * 100
+            logger.info(f"  {component}: {count:,} parameters ({percentage:.1f}%)")
+        
+        # Log top 10 largest parameter groups
+        sorted_detailed = sorted(detailed_breakdown.items(), key=lambda x: x[1]['parameters'], reverse=True)
+        logger.info("Top 10 largest parameter groups:")
+        for name, info in sorted_detailed[:10]:
+            logger.info(f"  {name}: {info['parameters']:,} parameters {info['shape']}")
+    
+    print("=" * 60)
+    
+    return param_info
 
 
 ##############################
@@ -130,12 +253,13 @@ def save_checkpoint(model, optimizer, epoch, loss, run_dir):
 ##############################
 # Save Model Parameters
 ##############################
-def save_model_params(run_dir):
+def save_model_params(run_dir, param_info=None):
     """
     Save model parameters to a pickle file.
     
     Args:
         run_dir: Directory to save parameters in
+        param_info: Optional parameter count information from count_model_parameters()
     """
     from utils.settings_manager import settings
     
@@ -146,20 +270,28 @@ def save_model_params(run_dir):
     latent_optimization = settings.get_latent_optimization()
     evaluation_settings = settings.get_evaluation_settings()
     
+    # Try to load parameter info from results if not provided
+    if param_info is None:
+        try:
+            results_file = os.path.join(run_dir, 'results.pkl')
+            if os.path.exists(results_file):
+                with open(results_file, 'rb') as f:
+                    results = pickle.load(f)
+                param_info = results.get('model_parameter_info', {})
+        except Exception:
+            param_info = {}
+    
     # Basic model parameters
     model_params = {
         # 'KEY': data_settings['key'], # Old: single key
         'TRAINING_KEYS': data_settings.get('training_keys', [data_settings.get('key')]), # New: list of keys
         'TRAINING_SEED': data_settings['training_seed'],
         'EVAL_SEED': data_settings['eval_seed'],
-        'LATENT_DIM': model_architecture['latent_dim'],
-        'HIDDEN_DIM': model_architecture['hidden_dim'],
-        'NUM_LAYERS': model_architecture['num_layers'],
-        'NUM_HEADS': model_architecture['num_heads'],
         'DROPOUT': model_architecture['dropout'],
         'MAX_LENGTH': model_architecture['max_length'],
         'ENCODER_MAX_LENGTH': model_architecture['encoder_max_length'],
         'DECODER_MAX_LENGTH': model_architecture['decoder_max_length'],
+        'NUM_ENCODERS': model_architecture.get('num_encoders', 1),  # Add NUM_ENCODERS parameter
         'BATCH_SIZE': training_settings.get('batch_size', 16),
         'NUM_EPOCHS': training_settings['num_epochs'],
         'LEARNING_RATE': training_settings['learning_rate'],
@@ -176,6 +308,27 @@ def save_model_params(run_dir):
         'DEFAULT_EVAL_N_QUERIES': evaluation_settings['eval_n_queries'],
         'DEFAULT_EVAL_EPOCH': evaluation_settings['eval_epoch']
     }
+    
+    # Add parameter count information if available
+    if param_info:
+        model_params.update({
+            'total_params': param_info.get('total_params', 'N/A'),
+            'trainable_params': param_info.get('trainable_params', 'N/A'),
+            'non_trainable_params': param_info.get('non_trainable_params', 'N/A'),
+            'is_multi_encoder_model': param_info.get('is_multi_encoder', False),
+            'num_encoders_actual': param_info.get('num_encoders', 1),
+            'component_breakdown': param_info.get('component_breakdown', {}),
+        })
+        
+        # Add multi-encoder specific parameters
+        if param_info.get('is_multi_encoder', False):
+            model_params.update({
+                'encoder_breakdown': param_info.get('encoder_breakdown', {}),
+                'decoder_params': param_info.get('decoder_params', 'N/A'),
+                'shared_params': param_info.get('shared_params', 'N/A'),
+                'avg_encoder_params': param_info.get('avg_encoder_params', 'N/A'),
+                'total_encoder_params': param_info.get('total_encoder_params', 'N/A')
+            })
     
     # Add optimization method
     if 'method' in latent_optimization:
@@ -254,7 +407,9 @@ def save_results(results, run_dir):
     save_training_json(results, run_dir) # Call the new JSON saving function
     
     # Also save model parameters (this already saves settings.json)
-    save_model_params(run_dir)
+    # Pass parameter info if available in results
+    param_info = results.get('model_parameter_info', None)
+    save_model_params(run_dir, param_info)
 
 
 ##############################
@@ -284,24 +439,20 @@ def load_model(run_dir, epoch=None, device='cuda', model_type='lpn'):
         run_dir (str): Path to the run directory
         epoch (int, optional): Specific epoch to load. If None, loads the latest checkpoint.
         device (str): Device to load the model on ('cuda' or 'cpu')
+        model_type (str): Model type (legacy parameter - now automatically determined from settings)
     
     Returns:
-        model: Loaded model
+        model: Loaded model (automatically configured for single or multi-encoder)
         optimizer: Loaded optimizer
         epoch: Epoch number of the loaded checkpoint
         loss: Loss value of the loaded checkpoint
     """
     from models.base_model import LatentProgramNetwork, compute_loss
-    from models.multi_encoder_lpn import MultiEncoderLPN
     from torch.optim import Adam
     
-    # Initialize model and optimizer
-    if model_type == 'lpn':
-        model = LatentProgramNetwork().to(device)
-    elif model_type == 'multi_encoder_lpn':
-        model = MultiEncoderLPN().to(device)
-    else:
-        raise ValueError(f"Invalid model type: {model_type}")
+    # LatentProgramNetwork automatically handles both single and multi-encoder configurations
+    # based on the settings, so we don't need separate model types anymore
+    model = LatentProgramNetwork().to(device)
     optimizer = Adam(model.parameters(), lr=1e-4)  # Default learning rate
     
     if epoch is None:
@@ -326,6 +477,13 @@ def load_model(run_dir, epoch=None, device='cuda', model_type='lpn'):
     
     # Set to evaluation mode
     model.eval()
+    
+    # Print model configuration for debugging
+    if hasattr(model, 'is_multi_encoder'):
+        if model.is_multi_encoder:
+            print(f"Loaded multi-encoder model with {model.num_encoders} encoders")
+        else:
+            print("Loaded single-encoder model")
     
     return model, optimizer, epoch, loss
 

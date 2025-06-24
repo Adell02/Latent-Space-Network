@@ -66,20 +66,40 @@ set_seed(TRAINING_SEED)
 #  Low‑level helper: diagonal‑Gaussian PoE
 # -------------------------------------------------
 
-def gaussian_poe(mu: torch.Tensor, logvar: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+def gaussian_poe(mu: torch.Tensor, logvar: torch.Tensor, debug=False) -> Tuple[torch.Tensor, torch.Tensor]:
     """Multiply K diagonal Gaussians.
     Args
     -----
     mu      : (K, B, D)
     logvar  : (K, B, D)
+    debug   : bool, whether to print debugging information
     Returns
     -------
     fused_mu, fused_logvar : (B, D)
     """
+    if debug:
+        print(f"PoE Debug: Input shapes - mu: {mu.shape}, logvar: {logvar.shape}")
+        print(f"PoE Debug: mu stats - min: {mu.min():.4f}, max: {mu.max():.4f}, mean: {mu.mean():.4f}")
+        print(f"PoE Debug: logvar stats - min: {logvar.min():.4f}, max: {logvar.max():.4f}, mean: {logvar.mean():.4f}")
+        
+        # Check if encoders are producing identical outputs
+        if mu.shape[0] > 1:
+            mu_diff = torch.abs(mu[0] - mu[1]).mean()
+            logvar_diff = torch.abs(logvar[0] - logvar[1]).mean()
+            print(f"PoE Debug: Encoder differences - mu_diff: {mu_diff:.6f}, logvar_diff: {logvar_diff:.6f}")
+            
+            if mu_diff < 1e-6 and logvar_diff < 1e-6:
+                print("WARNING: Encoders are producing nearly identical outputs!")
+    
     precision   = torch.exp(-logvar)            # Σ⁻¹
     fused_var   = 1. / precision.sum(0)         # (B,D)
     fused_mu    = fused_var * (precision * mu).sum(0)
     fused_logvar = fused_var.log()
+    
+    if debug:
+        print(f"PoE Debug: Output shapes - fused_mu: {fused_mu.shape}, fused_logvar: {fused_logvar.shape}")
+        print(f"PoE Debug: fused_mu stats - min: {fused_mu.min():.4f}, max: {fused_mu.max():.4f}, mean: {fused_mu.mean():.4f}")
+    
     return fused_mu, fused_logvar
 
 ##############################
@@ -378,7 +398,15 @@ class MultiEncoderLPN(nn.Module):
                 logvar_list.append(logσ2)
             mu_stack     = torch.stack(mu_list)        # (K,B,D)
             logvar_stack = torch.stack(logvar_list)
-            mu_star, logvar_star = gaussian_poe(mu_stack, logvar_stack)
+            
+            # Enable debug for first batch to check for identical encoders
+            debug_poe = (hasattr(self, '_debug_counter') and self._debug_counter < 3)
+            if not hasattr(self, '_debug_counter'):
+                self._debug_counter = 0
+            if debug_poe:
+                self._debug_counter += 1
+                
+            mu_star, logvar_star = gaussian_poe(mu_stack, logvar_stack, debug=debug_poe)
             z = self._reparam(mu_star, logvar_star, sample_latent and training)
             x0, y0 = input_views[0]                   # decoder always conditions on *one* input grid
             # Always provide target_seq for proper loss computation, even during inference

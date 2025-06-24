@@ -15,6 +15,212 @@ from models.base_model import compute_loss
 MAX_BATCH_SIZE = 16
 
 ##############################
+# Evaluation Latent Data Collection
+##############################
+
+def collect_evaluation_latent_data(model, samples_dataloader, queries_dataloader, device, is_multi_encoder, num_encoders):
+    """
+    Collect latent representations from support and query samples for visualization.
+    
+    Args:
+        model: The model to collect latent data from
+        samples_dataloader: Support samples dataloader
+        queries_dataloader: Query samples dataloader
+        device: Device to run on
+        is_multi_encoder: Whether this is a multi-encoder model
+        num_encoders: Number of encoders (if multi-encoder)
+        
+    Returns:
+        dict: Latent data organized by data type (support/query) and encoder
+    """
+    model.eval()
+    evaluation_latent_data = {}
+    
+    print("  Collecting support samples latent data...")
+    if is_multi_encoder:
+        # For multi-encoder: collect both individual encoder and PoE latents
+        support_data = collect_multi_encoder_evaluation_latents(
+            model, samples_dataloader, device, num_encoders, data_type='support'
+        )
+    else:
+        # For single encoder
+        support_data = collect_single_encoder_evaluation_latents(
+            model, samples_dataloader, device, data_type='support'
+        )
+    evaluation_latent_data['support'] = support_data
+    
+    print("  Collecting query samples latent data...")
+    if is_multi_encoder:
+        # For multi-encoder: collect both individual encoder and PoE latents
+        query_data = collect_multi_encoder_evaluation_latents(
+            model, queries_dataloader, device, num_encoders, data_type='query'
+        )
+    else:
+        # For single encoder
+        query_data = collect_single_encoder_evaluation_latents(
+            model, queries_dataloader, device, data_type='query'
+        )
+    evaluation_latent_data['query'] = query_data
+    
+    return evaluation_latent_data
+
+def collect_multi_encoder_evaluation_latents(model, dataloader, device, num_encoders, data_type='support', max_samples=100):
+    """
+    Collect latent representations from multi-encoder model for evaluation data.
+    """
+    encoder_latent_data = {}
+    
+    with torch.no_grad():
+        # Collect individual encoder latents
+        for encoder_idx in range(num_encoders):
+            print(f"    Collecting {data_type} latents from Encoder {encoder_idx}...")
+            
+            latent_data = {
+                'latent_mus': [],
+                'latent_log_vars': [],
+                'latent_zs': [],
+                'input_samples': [],
+                'output_samples': [],
+                'encoder_idx': encoder_idx,
+                'data_type': f'{data_type}_encoder_{encoder_idx}',
+                'num_samples': 0
+            }
+            
+            sample_count = 0
+            for batch_input, batch_target in dataloader:
+                if sample_count >= max_samples:
+                    break
+                    
+                batch_input = batch_input.to(device)
+                batch_target = batch_target.to(device)
+                
+                # Get latent representations from specific encoder
+                mu, log_var = model(batch_input, batch_target, encoder_idx=encoder_idx)[1:3]
+                z = model.reparameterize(mu, log_var)
+                
+                # Store data
+                batch_size = min(batch_input.size(0), max_samples - sample_count)
+                latent_data['latent_mus'].append(mu[:batch_size].cpu().numpy())
+                latent_data['latent_log_vars'].append(log_var[:batch_size].cpu().numpy())
+                latent_data['latent_zs'].append(z[:batch_size].cpu().numpy())
+                latent_data['input_samples'].append(batch_input[:batch_size].cpu().numpy())
+                latent_data['output_samples'].append(batch_target[:batch_size].cpu().numpy())
+                
+                sample_count += batch_size
+            
+            # Concatenate all batches
+            if latent_data['latent_mus']:
+                latent_data['latent_mus'] = np.concatenate(latent_data['latent_mus'], axis=0)
+                latent_data['latent_log_vars'] = np.concatenate(latent_data['latent_log_vars'], axis=0)
+                latent_data['latent_zs'] = np.concatenate(latent_data['latent_zs'], axis=0)
+                latent_data['input_samples'] = np.concatenate(latent_data['input_samples'], axis=0)
+                latent_data['output_samples'] = np.concatenate(latent_data['output_samples'], axis=0)
+                latent_data['num_samples'] = len(latent_data['latent_mus'])
+                
+                print(f"      ✓ Collected {latent_data['num_samples']} {data_type} samples from Encoder {encoder_idx}")
+            
+            encoder_latent_data[f'encoder_{encoder_idx}'] = latent_data
+        
+        # Collect PoE latents
+        print(f"    Collecting {data_type} latents from PoE...")
+        poe_latent_data = {
+            'latent_mus': [],
+            'latent_log_vars': [],
+            'latent_zs': [],
+            'input_samples': [],
+            'output_samples': [],
+            'data_type': f'{data_type}_poe',
+            'num_samples': 0
+        }
+        
+        sample_count = 0
+        for batch_input, batch_target in dataloader:
+            if sample_count >= max_samples:
+                break
+                
+            batch_input = batch_input.to(device)
+            batch_target = batch_target.to(device)
+            
+            # Get PoE latent representations
+            mu, log_var = model(batch_input, batch_target)[1:3]  # No encoder_idx = PoE
+            z = model.reparameterize(mu, log_var)
+            
+            # Store data
+            batch_size = min(batch_input.size(0), max_samples - sample_count)
+            poe_latent_data['latent_mus'].append(mu[:batch_size].cpu().numpy())
+            poe_latent_data['latent_log_vars'].append(log_var[:batch_size].cpu().numpy())
+            poe_latent_data['latent_zs'].append(z[:batch_size].cpu().numpy())
+            poe_latent_data['input_samples'].append(batch_input[:batch_size].cpu().numpy())
+            poe_latent_data['output_samples'].append(batch_target[:batch_size].cpu().numpy())
+            
+            sample_count += batch_size
+        
+        # Concatenate all batches for PoE
+        if poe_latent_data['latent_mus']:
+            poe_latent_data['latent_mus'] = np.concatenate(poe_latent_data['latent_mus'], axis=0)
+            poe_latent_data['latent_log_vars'] = np.concatenate(poe_latent_data['latent_log_vars'], axis=0)
+            poe_latent_data['latent_zs'] = np.concatenate(poe_latent_data['latent_zs'], axis=0)
+            poe_latent_data['input_samples'] = np.concatenate(poe_latent_data['input_samples'], axis=0)
+            poe_latent_data['output_samples'] = np.concatenate(poe_latent_data['output_samples'], axis=0)
+            poe_latent_data['num_samples'] = len(poe_latent_data['latent_mus'])
+            
+            print(f"      ✓ Collected {poe_latent_data['num_samples']} {data_type} samples from PoE")
+        
+        encoder_latent_data['poe'] = poe_latent_data
+    
+    return encoder_latent_data
+
+def collect_single_encoder_evaluation_latents(model, dataloader, device, data_type='support', max_samples=100):
+    """
+    Collect latent representations from single encoder model for evaluation data.
+    """
+    latent_data = {
+        'latent_mus': [],
+        'latent_log_vars': [],
+        'latent_zs': [],
+        'input_samples': [],
+        'output_samples': [],
+        'data_type': data_type,
+        'num_samples': 0
+    }
+    
+    with torch.no_grad():
+        sample_count = 0
+        for batch_input, batch_target in dataloader:
+            if sample_count >= max_samples:
+                break
+                
+            batch_input = batch_input.to(device)
+            batch_target = batch_target.to(device)
+            
+            # Get latent representations
+            mu, log_var = model.encoder(batch_input, batch_target)
+            z = model.reparameterize(mu, log_var)
+            
+            # Store data
+            batch_size = min(batch_input.size(0), max_samples - sample_count)
+            latent_data['latent_mus'].append(mu[:batch_size].cpu().numpy())
+            latent_data['latent_log_vars'].append(log_var[:batch_size].cpu().numpy())
+            latent_data['latent_zs'].append(z[:batch_size].cpu().numpy())
+            latent_data['input_samples'].append(batch_input[:batch_size].cpu().numpy())
+            latent_data['output_samples'].append(batch_target[:batch_size].cpu().numpy())
+            
+            sample_count += batch_size
+    
+    # Concatenate all batches
+    if latent_data['latent_mus']:
+        latent_data['latent_mus'] = np.concatenate(latent_data['latent_mus'], axis=0)
+        latent_data['latent_log_vars'] = np.concatenate(latent_data['latent_log_vars'], axis=0)
+        latent_data['latent_zs'] = np.concatenate(latent_data['latent_zs'], axis=0)
+        latent_data['input_samples'] = np.concatenate(latent_data['input_samples'], axis=0)
+        latent_data['output_samples'] = np.concatenate(latent_data['output_samples'], axis=0)
+        latent_data['num_samples'] = len(latent_data['latent_mus'])
+        
+        print(f"    ✓ Collected {latent_data['num_samples']} {data_type} samples")
+    
+    return {'single_encoder': latent_data}
+
+##############################
 # Encode Training Sequences
 ##############################
 
@@ -82,11 +288,24 @@ def encode_training_sequences(model, run_dir, device='cuda', max_samples=500, ba
                 batch_output = torch.tensor(output_sequences[i:end_idx]).float().to(device)
                 
                 # Encode (equivalent to initial step of trajectory)
-                mu, log_var = model.encoder(batch_input, batch_output)
-                z = model.reparameterize(mu, log_var)
+                # Handle both single and multi-encoder models
+                if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
+                    # Multi-encoder: use PoE inference
+                    mu, log_var = model(batch_input, batch_output)[1:3]
+                    z = model.reparameterize(mu, log_var)
+                else:
+                    # Single encoder
+                    mu, log_var = model.encoder(batch_input, batch_output)
+                    z = model.reparameterize(mu, log_var)
                 
                 # Compute loss for this encoded latent (equivalent to initial trajectory loss)
-                shape_logits, grid_logits = model.decoder(z, batch_input, target_seq=batch_output)
+                # Handle both single and multi-encoder models for decoding
+                if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
+                    # Multi-encoder: use shared decoder
+                    shape_logits, grid_logits = model.multi_encoder.decoder(z, batch_input, target_seq=batch_output)
+                else:
+                    # Single encoder
+                    shape_logits, grid_logits = model.decoder(z, batch_input, target_seq=batch_output)
                 shape_targets = batch_output[:, 900:902].long()
                 shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
                 
@@ -146,7 +365,7 @@ def encode_training_sequences(model, run_dir, device='cuda', max_samples=500, ba
 # Run Inference
 ##############################
 
-def main_test(model, keys, n_samples, n_queries, seed, device='cuda'):
+def main_test(model, keys, run_dir, n_samples, n_queries, seed, device='cuda'):
     """
     Generate new data and evaluate the model on it.
     Also encodes training sequences for latent space visualization.
@@ -214,6 +433,23 @@ def main_test(model, keys, n_samples, n_queries, seed, device='cuda'):
         results[key]['reconstruction_results']['input_queries_sequences'] = input_queries_sequences
         results[key]['reconstruction_results']['output_queries_sequences'] = output_queries_sequences
         
+        # Store data for clustered latent visualization
+        results[key]['latent_clustering_data'] = {
+            'support_data': {
+                'inputs': input_samples_sequences,
+                'outputs': output_samples_sequences,
+                'data_type': 'support',
+                'num_samples': len(input_samples_sequences)
+            },
+            'query_data': {
+                'inputs': input_queries_sequences,
+                'outputs': output_queries_sequences,
+                'data_type': 'query', 
+                'num_samples': len(input_queries_sequences)
+            },
+            'task_key': key
+        }
+        
         # Print summary for this key
         print(f"\n[KEY {key_idx+1}/{len(keys)}] '{key}' RESULTS:")
         if 'error' not in metrics['metrics']:
@@ -230,15 +466,29 @@ def main_test(model, keys, n_samples, n_queries, seed, device='cuda'):
 
     print(f"\n=== EVALUATION COMPLETE ===")
     print(f"Processed {len(keys)} keys successfully")
+    
+    # Encode training sequences for latent space visualization
+    print(f"\n>>> ENCODING TRAINING SEQUENCES FOR VISUALIZATION <<<")
+    encoded_training_data = encode_training_sequences(model, run_dir, device=device, max_samples=200, batch_size=16)
+    if encoded_training_data:
+        print(f"✓ Encoded {encoded_training_data['encoding_info']['encoded_samples']} training samples for visualization")
+        
+        # Add encoded training data to results for the first key (they use the same model)
+        first_key = list(results.keys())[0]
+        results[first_key]['encoded_training_latents'] = encoded_training_data
+    else:
+        print("⚠ Warning: Could not encode training sequences for visualization")
+    
     return results
 
 
 def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda'):
     """
     Evaluate model performance on dataloaders.
+    For multi-encoder models: each encoder processes the same sample, then PoE combines them.
     
     Args:
-        model: The trained model to evaluate
+        model: The trained model to evaluate (single or multi-encoder)
         samples_dataloader: DataLoader containing support samples for latent optimization
         queries_dataloader: DataLoader containing query samples for evaluation
         device: Device to run evaluation on
@@ -249,23 +499,57 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
     latent_optimization = settings.get_latent_optimization()
     optimize_z_inference = latent_optimization['inference']['enabled']
     
+    # Check if this is a multi-encoder model
+    is_multi_encoder = hasattr(model, 'is_multi_encoder') and model.is_multi_encoder
+    num_encoders = getattr(model, 'num_encoders', 1) if is_multi_encoder else 1
+    
+    print(f"=== EVALUATION SETUP ===")
+    print(f"Model type: {'Multi-encoder' if is_multi_encoder else 'Single encoder'}")
+    if is_multi_encoder:
+        print(f"Number of encoders: {num_encoders}")
     print(f"Latent optimization enabled: {optimize_z_inference}")
     if optimize_z_inference:
         print(f"Optimization steps: {latent_optimization['inference']['num_steps']}")
         print(f"Optimization learning rate: {latent_optimization['inference']['learning_rate']}")
 
     model.eval()
-    shape_correct, shape_tokens = 0, 0
-    grid_correct, grid_tokens = 0, 0
-    sample_exact_correct = 0
-    total_samples = 0
+    
+    # Initialize metrics storage
+    if is_multi_encoder:
+        # For multi-encoder: track individual encoder metrics + PoE metrics
+        individual_encoder_metrics = {
+            f'encoder_{i}': {
+                'shape_correct': 0, 'shape_tokens': 0,
+                'grid_correct': 0, 'grid_tokens': 0,
+                'sample_exact_correct': 0, 'total_samples': 0
+            } for i in range(num_encoders)
+        }
+        poe_metrics = {
+            'shape_correct': 0, 'shape_tokens': 0,
+            'grid_correct': 0, 'grid_tokens': 0,
+            'sample_exact_correct': 0, 'total_samples': 0
+        }
+    else:
+        # For single encoder: use existing structure
+        single_metrics = {
+            'shape_correct': 0, 'shape_tokens': 0,
+            'grid_correct': 0, 'grid_tokens': 0,
+            'sample_exact_correct': 0, 'total_samples': 0
+        }
     
     support_losses = []
     query_losses = []
     support_reconstructions = []
     query_reconstructions = []
     z_optimization_logs = []
-    trajectory_info = []  # Store trajectory information for each sample
+    trajectory_info = []
+    
+    # Store encoder-specific results for multi-encoder
+    if is_multi_encoder:
+        individual_support_reconstructions = {f'encoder_{i}': [] for i in range(num_encoders)}
+        individual_query_reconstructions = {f'encoder_{i}': [] for i in range(num_encoders)}
+        poe_support_reconstructions = []
+        poe_query_reconstructions = []
 
     # Collect all support samples and their optimized z vectors
     all_support_z_vectors = []
@@ -286,58 +570,172 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
         support_pbar.set_description(f"Support batch {batch_idx+1}/{len(samples_dataloader)} (size: {batch_size})")
         
         current_z_for_this_sample_batch = None
+        
         if optimize_z_inference:
-            # Create progress bar for gradient ascent steps for this batch
-            print(f"\nOptimizing latent space for support batch {batch_idx+1} ({batch_size} samples)...")
-            
-            # Request trajectory information during optimization
-            current_z_for_this_sample_batch, losses_opt, trajectory = get_optimized_z(
-                model, batch_input_s, batch_target_s, context='inference', return_trajectory=True
+            print(f"  Optimizing latent z for support batch {batch_idx+1}...")
+            # Latent optimization - works for both single and multi-encoder
+            z_optimized, losses, trajectory = get_optimized_z(
+                model, batch_input_s, batch_target_s, 
+                num_steps=latent_optimization['inference']['num_steps'],
+                lr=latent_optimization['inference']['learning_rate'],
+                context='inference',
+                return_trajectory=True
             )
+            current_z_for_this_sample_batch = z_optimized
+            z_optimization_logs.append(trajectory.get('losses', []) if trajectory else losses)
             
-            if losses_opt is not None:
-                z_optimization_logs.extend(losses_opt if isinstance(losses_opt, list) else [losses_opt])
-                print(f"Gradient ascent completed. Final loss: {losses_opt[-1] if isinstance(losses_opt, list) else losses_opt:.4f}")
-                
-                # Store trajectory information for each sample in the batch
-                for i in range(batch_input_s.size(0)):
+            # Store trajectory information for each sample
+            if trajectory:
+                for i in range(batch_size):
                     sample_trajectory = {
                         'input_sample': batch_input_s[i].detach().cpu().numpy(),
                         'target_sample': batch_target_s[i].detach().cpu().numpy(),
                         'z_vectors': [],
-                        'losses': trajectory.get('losses', losses_opt) if trajectory else losses_opt,
-                        'encoder_mu': None,
-                        'encoder_log_var': None,
-                        'initial_z': None
+                        'losses': [],
+                        'is_multi_encoder': True,  # Always True for unified processing
+                        'num_encoders': num_encoders if is_multi_encoder else 1,
+                        'is_actually_single_encoder': not is_multi_encoder,
+                        'batch_idx': batch_idx,
+                        'sample_idx_in_batch': i
                     }
                     
-                    # Process trajectory if available
-                    if trajectory is not None:
-                        # Store encoder information for equivalent data to training
-                        if 'encoder_mu' in trajectory:
-                            sample_trajectory['encoder_mu'] = trajectory['encoder_mu'][i].detach().cpu().numpy()
-                        if 'encoder_log_var' in trajectory:
-                            sample_trajectory['encoder_log_var'] = trajectory['encoder_log_var'][i].detach().cpu().numpy()
-                        if 'initial_z' in trajectory:
-                            sample_trajectory['initial_z'] = trajectory['initial_z'][i].detach().cpu().numpy()
-                        
-                        # Convert z vectors to numpy
-                        if 'z_vectors' in trajectory:
-                            for z_step in trajectory['z_vectors']:
-                                sample_trajectory['z_vectors'].append(z_step[i].detach().cpu().numpy())
-                            print(f"  Sample {processed_support_samples + i + 1}: {len(sample_trajectory['z_vectors'])} trajectory steps stored")
-                        
-                        # Use trajectory losses if available
-                        if 'losses' in trajectory:
-                            sample_trajectory['losses'] = trajectory['losses']
+                    # Always create individual encoder trajectories for unified processing
+                    sample_trajectory['individual_encoder_trajectories'] = {}
                     
+                    if is_multi_encoder:
+                        # Get individual encoder z vectors for this sample during optimization
+                        with torch.no_grad():
+                            for enc_idx in range(num_encoders):
+                                enc_mu, enc_log_var = model.multi_encoder.encoders[enc_idx](
+                                    batch_input_s[i:i+1], batch_target_s[i:i+1]
+                                )
+                                enc_z = enc_mu  # Use mean for deterministic inference
+                                
+                                sample_trajectory['individual_encoder_trajectories'][f'encoder_{enc_idx}'] = {
+                                    'mu': enc_mu.cpu().numpy(),
+                                    'log_var': enc_log_var.cpu().numpy(),
+                                    'z': enc_z.cpu().numpy()
+                                }
+                        
+                        # Store individual encoder reconstructions for comparison
+                        sample_trajectory['individual_encoder_reconstructions'] = {}
+                        with torch.no_grad():
+                            for enc_idx in range(num_encoders):
+                                enc_data = sample_trajectory['individual_encoder_trajectories'][f'encoder_{enc_idx}']
+                                enc_z_tensor = torch.tensor(enc_data['z']).to(device)
+                                
+                                try:
+                                    # Generate reconstruction using individual encoder z
+                                    enc_shape_logits, enc_grid_logits = model.multi_encoder.decoder(
+                                        enc_z_tensor, batch_input_s[i:i+1], target_seq=batch_target_s[i:i+1]
+                                    )
+                                    
+                                    sample_trajectory['individual_encoder_reconstructions'][f'encoder_{enc_idx}'] = {
+                                        'shape_logits': enc_shape_logits.cpu().numpy(),
+                                        'grid_logits': enc_grid_logits.cpu().numpy()
+                                    }
+                                except Exception as e:
+                                    print(f"    Warning: Could not generate reconstruction for encoder {enc_idx}: {e}")
+                                    sample_trajectory['individual_encoder_reconstructions'][f'encoder_{enc_idx}'] = None
+                    else:
+                        # Single encoder: create encoder_0 entry for unified processing
+                        with torch.no_grad():
+                            enc_mu, enc_log_var = model.encoder(batch_input_s[i:i+1], batch_target_s[i:i+1])
+                            enc_z = enc_mu  # Use mean for deterministic inference
+                            
+                            sample_trajectory['individual_encoder_trajectories']['encoder_0'] = {
+                                'mu': enc_mu.cpu().numpy(),
+                                'log_var': enc_log_var.cpu().numpy(),
+                                'z': enc_z.cpu().numpy()
+                            }
+                        
+                        # Store single encoder reconstruction as encoder_0
+                        sample_trajectory['individual_encoder_reconstructions'] = {}
+                        with torch.no_grad():
+                            enc_data = sample_trajectory['individual_encoder_trajectories']['encoder_0']
+                            enc_z_tensor = torch.tensor(enc_data['z']).to(device)
+                            
+                            try:
+                                # Generate reconstruction using single encoder z
+                                enc_shape_logits, enc_grid_logits = model.decoder(
+                                    enc_z_tensor, batch_input_s[i:i+1], target_seq=batch_target_s[i:i+1]
+                                )
+                                
+                                sample_trajectory['individual_encoder_reconstructions']['encoder_0'] = {
+                                    'shape_logits': enc_shape_logits.cpu().numpy(),
+                                    'grid_logits': enc_grid_logits.cpu().numpy()
+                                }
+                            except Exception as e:
+                                print(f"    Warning: Could not generate reconstruction for single encoder: {e}")
+                                sample_trajectory['individual_encoder_reconstructions']['encoder_0'] = None
+                    
+                    # Convert PoE z vectors to numpy (main trajectory)
+                    if 'z_vectors' in trajectory:
+                        for z_step in trajectory['z_vectors']:
+                            sample_trajectory['z_vectors'].append(z_step[i].detach().cpu().numpy())
+                        print(f"  Sample {processed_support_samples + i + 1}: {len(sample_trajectory['z_vectors'])} trajectory steps stored")
+                        
+                        # Store trajectory reconstructions at key points (PoE for multi-encoder, main trajectory for single-encoder)
+                        if len(sample_trajectory['z_vectors']) > 1:
+                            sample_trajectory['poe_trajectory_reconstructions'] = {}
+                            key_indices = [0, len(sample_trajectory['z_vectors'])//2, len(sample_trajectory['z_vectors'])-1]
+                            key_labels = ['initial', 'middle', 'final']
+                            
+                            with torch.no_grad():
+                                for idx, label in zip(key_indices, key_labels):
+                                    if idx < len(sample_trajectory['z_vectors']):
+                                        try:
+                                            traj_z = torch.tensor(sample_trajectory['z_vectors'][idx]).unsqueeze(0).to(device)
+                                            
+                                            if is_multi_encoder:
+                                                # Multi-encoder: use PoE decoder
+                                                traj_shape_logits, traj_grid_logits = model.multi_encoder.decoder(
+                                                    traj_z, batch_input_s[i:i+1], target_seq=batch_target_s[i:i+1]
+                                                )
+                                            else:
+                                                # Single encoder: use regular decoder
+                                                traj_shape_logits, traj_grid_logits = model.decoder(
+                                                    traj_z, batch_input_s[i:i+1], target_seq=batch_target_s[i:i+1]
+                                                )
+                                            
+                                            sample_trajectory['poe_trajectory_reconstructions'][label] = {
+                                                'step': idx,
+                                                'shape_logits': traj_shape_logits.cpu().numpy(),
+                                                'grid_logits': traj_grid_logits.cpu().numpy()
+                                            }
+                                        except Exception as e:
+                                            reconstruction_type = "PoE" if is_multi_encoder else "trajectory"
+                                            print(f"    Warning: Could not generate {reconstruction_type} reconstruction at step {idx}: {e}")
+                                            sample_trajectory['poe_trajectory_reconstructions'][label] = None
+                    
+                    # Use trajectory losses if available
+                    if 'losses' in trajectory:
+                        sample_trajectory['losses'] = trajectory['losses']
+                        
+                        # Add loss improvement statistics
+                        if len(trajectory['losses']) > 1:
+                            initial_loss = trajectory['losses'][0]
+                            final_loss = trajectory['losses'][-1]
+                            sample_trajectory['loss_improvement'] = initial_loss - final_loss
+                            sample_trajectory['loss_improvement_percent'] = (initial_loss - final_loss) / initial_loss * 100 if initial_loss > 0 else 0.0
+                
                     trajectory_info.append(sample_trajectory)
             else:
                 print(f"Warning: No optimization losses returned for batch {batch_idx+1}")
         else:
+            # Use encoder inference - handle both single and multi-encoder
             with torch.no_grad():
-                mu, log_var = model.encoder(batch_input_s, batch_target_s)
-                current_z_for_this_sample_batch = model.reparameterize(mu, log_var)
+                if is_multi_encoder:
+                    # For multi-encoder, use PoE inference (each encoder sees the same input)
+                    mu, log_var = model.multi_encoder(
+                        [(batch_input_s, batch_target_s) for _ in range(num_encoders)],
+                        training=False, sample_latent=False, use_poe=True
+                    )[1:3]  # Get mu, log_var from PoE
+                    current_z_for_this_sample_batch = mu  # Use mean for deterministic inference
+                else:
+                    # Single encoder
+                    mu, log_var = model.encoder(batch_input_s, batch_target_s)
+                    current_z_for_this_sample_batch = model.reparameterize(mu, log_var)
                 print(f"Using encoder z (no optimization) for batch {batch_idx+1}")
         
         # Store z vectors from all support samples
@@ -348,18 +746,56 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
         s_loss_val = compute_loss(model, batch_input_s, batch_target_s)
         support_losses.append(s_loss_val.item())
 
-        # Store reconstructions with their corresponding inputs/outputs
+        # Store reconstructions - handle both single and multi-encoder
         if current_z_for_this_sample_batch is not None:
             with torch.no_grad():
-                shape_logits_s, grid_logits_s = model.decoder(current_z_for_this_sample_batch, batch_input_s, target_seq=batch_target_s)
-                # Store each sample's reconstruction with its input and target
-                for i in range(batch_input_s.size(0)):
-                    reconstruction = {
-                        'input': batch_input_s[i].detach().cpu().numpy().tolist(),
-                        'target': batch_target_s[i].detach().cpu().numpy().tolist(),
-                        'reconstruction': (shape_logits_s[i].detach().cpu().numpy().tolist(), grid_logits_s[i].detach().cpu().numpy().tolist())
-                    }
-                    support_reconstructions.append(reconstruction)
+                if is_multi_encoder:
+                    # PoE reconstruction using the combined latent
+                    shape_logits_s, grid_logits_s = model.multi_encoder.decoder(
+                        current_z_for_this_sample_batch, batch_input_s, target_seq=batch_target_s
+                    )
+                    
+                    # Store PoE reconstruction
+                    for i in range(batch_input_s.size(0)):
+                        poe_reconstruction = {
+                            'input': batch_input_s[i].detach().cpu().numpy().tolist(),
+                            'target': batch_target_s[i].detach().cpu().numpy().tolist(),
+                            'reconstruction': (shape_logits_s[i].detach().cpu().numpy().tolist(), 
+                                             grid_logits_s[i].detach().cpu().numpy().tolist())
+                        }
+                        poe_support_reconstructions.append(poe_reconstruction)
+                    
+                    # Also store individual encoder reconstructions for analysis
+                    for enc_idx in range(num_encoders):
+                        enc_mu, enc_log_var = model.multi_encoder.encoders[enc_idx](batch_input_s, batch_target_s)
+                        enc_z = enc_mu  # Use mean for deterministic inference
+                        enc_shape_logits, enc_grid_logits = model.multi_encoder.decoder(
+                            enc_z, batch_input_s, target_seq=batch_target_s
+                        )
+                        
+                        for i in range(batch_input_s.size(0)):
+                            enc_reconstruction = {
+                                'input': batch_input_s[i].detach().cpu().numpy().tolist(),
+                                'target': batch_target_s[i].detach().cpu().numpy().tolist(),
+                                'reconstruction': (enc_shape_logits[i].detach().cpu().numpy().tolist(),
+                                                 enc_grid_logits[i].detach().cpu().numpy().tolist())
+                            }
+                            individual_support_reconstructions[f'encoder_{enc_idx}'].append(enc_reconstruction)
+                
+                else:
+                    # Single encoder reconstruction
+                    shape_logits_s, grid_logits_s = model.decoder(
+                        current_z_for_this_sample_batch, batch_input_s, target_seq=batch_target_s
+                    )
+                    
+                    for i in range(batch_input_s.size(0)):
+                        reconstruction = {
+                            'input': batch_input_s[i].detach().cpu().numpy().tolist(),
+                            'target': batch_target_s[i].detach().cpu().numpy().tolist(),
+                            'reconstruction': (shape_logits_s[i].detach().cpu().numpy().tolist(), 
+                                             grid_logits_s[i].detach().cpu().numpy().tolist())
+                        }
+                        support_reconstructions.append(reconstruction)
         
         processed_support_samples += batch_size
         
@@ -418,66 +854,222 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
             # Expand the prototype z to match query batch size
             z_query_expanded = z_for_queries_prototype.expand(query_batch_size, -1)
             
-            shape_logits, grid_logits = model.decoder(z_query_expanded, batch_input_q, target_seq=batch_target_q)
-            
-            # Compute query loss
-            q_loss_val = compute_loss(model, batch_input_q, batch_target_q)
-            query_losses.append(q_loss_val.item())
-            
-            # Store each query's reconstruction with its input and target
-            for i in range(query_batch_size):
-                query_reconstructions.append({
-                    'input': batch_input_q[i].cpu().numpy().tolist(),
-                    'target': batch_target_q[i].cpu().numpy().tolist(),
-                    'reconstruction': (shape_logits[i].cpu().numpy().tolist(), grid_logits[i].cpu().numpy().tolist())
+            if is_multi_encoder:
+                # Multi-encoder evaluation: individual encoders + PoE
+                
+                # 1. PoE evaluation using the prototype z
+                poe_shape_logits, poe_grid_logits = model.multi_encoder.decoder(
+                    z_query_expanded, batch_input_q, target_seq=batch_target_q
+                )
+                
+                # Calculate PoE metrics
+                poe_shape_pred = poe_shape_logits.argmax(dim=-1)
+                poe_grid_pred = poe_grid_logits.argmax(dim=-1)
+                shape_tgt = batch_target_q[:, 900:902].long()
+                grid_tgt = batch_target_q[:, :900].long()
+
+                batch_poe_shape_correct = (poe_shape_pred == shape_tgt).sum().item()
+                batch_poe_shape_tokens = shape_tgt.numel()
+                batch_poe_grid_correct = 0
+                batch_poe_grid_tokens = 0
+                batch_poe_exact_correct = 0
+
+                poe_metrics['shape_correct'] += batch_poe_shape_correct
+                poe_metrics['shape_tokens'] += batch_poe_shape_tokens
+
+                for i in range(query_batch_size):
+                    tgt_rows = int(batch_target_q[i, 900].item())
+                    tgt_cols = int(batch_target_q[i, 901].item())
+                    active_pixels = tgt_rows * tgt_cols
+                    if active_pixels > 0:
+                        sample_poe_grid_correct = (poe_grid_pred[i, :active_pixels] == grid_tgt[i, :active_pixels]).sum().item()
+                        batch_poe_grid_correct += sample_poe_grid_correct
+                        batch_poe_grid_tokens += active_pixels
+                        if torch.all(poe_shape_pred[i] == shape_tgt[i]) and sample_poe_grid_correct == active_pixels:
+                            batch_poe_exact_correct += 1
+                    elif torch.all(poe_shape_pred[i] == shape_tgt[i]):
+                         batch_poe_exact_correct += 1
+
+                poe_metrics['grid_correct'] += batch_poe_grid_correct
+                poe_metrics['grid_tokens'] += batch_poe_grid_tokens
+                poe_metrics['sample_exact_correct'] += batch_poe_exact_correct
+                poe_metrics['total_samples'] += query_batch_size
+                
+                # Store PoE query reconstructions
+                for i in range(query_batch_size):
+                    poe_query_reconstructions.append({
+                        'input': batch_input_q[i].cpu().numpy().tolist(),
+                        'target': batch_target_q[i].cpu().numpy().tolist(),
+                        'reconstruction': (poe_shape_logits[i].cpu().numpy().tolist(), 
+                                         poe_grid_logits[i].cpu().numpy().tolist())
+                    })
+
+                # 2. Individual encoder evaluations 
+                individual_batch_accuracies = {}  # Track batch performance for comparison
+                
+                for enc_idx in range(num_encoders):
+                    # Get individual encoder output
+                    enc_mu, enc_log_var = model.multi_encoder.encoders[enc_idx](batch_input_q, batch_target_q)
+                    enc_z = enc_mu  # Use mean for deterministic inference
+                    enc_shape_logits, enc_grid_logits = model.multi_encoder.decoder(
+                        enc_z, batch_input_q, target_seq=batch_target_q
+                    )
+                    
+                    # Calculate individual encoder metrics
+                    enc_shape_pred = enc_shape_logits.argmax(dim=-1)
+                    enc_grid_pred = enc_grid_logits.argmax(dim=-1)
+
+                    batch_enc_shape_correct = (enc_shape_pred == shape_tgt).sum().item()
+                    batch_enc_grid_correct = 0
+                    batch_enc_grid_tokens = 0
+                    batch_enc_exact_correct = 0
+
+                    individual_encoder_metrics[f'encoder_{enc_idx}']['shape_correct'] += batch_enc_shape_correct
+                    individual_encoder_metrics[f'encoder_{enc_idx}']['shape_tokens'] += batch_poe_shape_tokens
+
+                    for i in range(query_batch_size):
+                        tgt_rows = int(batch_target_q[i, 900].item())
+                        tgt_cols = int(batch_target_q[i, 901].item())
+                        active_pixels = tgt_rows * tgt_cols
+                        if active_pixels > 0:
+                            sample_enc_grid_correct = (enc_grid_pred[i, :active_pixels] == grid_tgt[i, :active_pixels]).sum().item()
+                            batch_enc_grid_correct += sample_enc_grid_correct
+                            batch_enc_grid_tokens += active_pixels
+                            if torch.all(enc_shape_pred[i] == shape_tgt[i]) and sample_enc_grid_correct == active_pixels:
+                                batch_enc_exact_correct += 1
+                        elif torch.all(enc_shape_pred[i] == shape_tgt[i]):
+                             batch_enc_exact_correct += 1
+
+                    individual_encoder_metrics[f'encoder_{enc_idx}']['grid_correct'] += batch_enc_grid_correct
+                    individual_encoder_metrics[f'encoder_{enc_idx}']['grid_tokens'] += batch_enc_grid_tokens
+                    individual_encoder_metrics[f'encoder_{enc_idx}']['sample_exact_correct'] += batch_enc_exact_correct
+                    individual_encoder_metrics[f'encoder_{enc_idx}']['total_samples'] += query_batch_size
+                    
+                    # Calculate batch-level accuracies for comparison
+                    batch_enc_shape_acc = batch_enc_shape_correct / batch_poe_shape_tokens if batch_poe_shape_tokens > 0 else 0
+                    batch_enc_grid_acc = batch_enc_grid_correct / batch_enc_grid_tokens if batch_enc_grid_tokens > 0 else 0
+                    batch_enc_exact_acc = batch_enc_exact_correct / query_batch_size
+                    
+                    individual_batch_accuracies[f'encoder_{enc_idx}'] = {
+                        'shape_acc': batch_enc_shape_acc,
+                        'grid_acc': batch_enc_grid_acc,
+                        'exact_acc': batch_enc_exact_acc
+                    }
+                    
+                    # Store individual encoder query reconstructions
+                    for i in range(query_batch_size):
+                        individual_query_reconstructions[f'encoder_{enc_idx}'].append({
+                            'input': batch_input_q[i].cpu().numpy().tolist(),
+                            'target': batch_target_q[i].cpu().numpy().tolist(),
+                            'reconstruction': (enc_shape_logits[i].cpu().numpy().tolist(),
+                                             enc_grid_logits[i].cpu().numpy().tolist())
+                        })
+                
+                # Log comparative performance every 10 batches for detailed analysis
+                if (batch_idx + 1) % 10 == 0:
+                    print(f"\n    Batch {batch_idx + 1} Comparative Analysis:")
+                    print(f"      PoE: Shape={batch_poe_shape_acc:.3f}, Grid={batch_poe_grid_acc:.3f}, Exact={batch_poe_exact_acc:.3f}")
+                    
+                    # Find best performing encoder for this batch
+                    best_encoder = max(individual_batch_accuracies.keys(), 
+                                     key=lambda x: individual_batch_accuracies[x]['exact_acc'])
+                    best_exact_acc = individual_batch_accuracies[best_encoder]['exact_acc']
+                    
+                    print(f"      Best Individual: {best_encoder} (Exact={best_exact_acc:.3f})")
+                    
+                    # Show performance difference
+                    poe_vs_best = batch_poe_exact_acc - best_exact_acc
+                    if poe_vs_best > 0.01:
+                        print(f"      PoE Advantage: +{poe_vs_best:.3f} (PoE outperforming)")
+                    elif poe_vs_best < -0.01:
+                        print(f"      Individual Advantage: {abs(poe_vs_best):.3f} ({best_encoder} outperforming)")
+                    else:
+                        print(f"      Performance: Similar (diff={poe_vs_best:.3f})")
+                
+                # Compute query loss using PoE results
+                q_loss_val = compute_loss(model, batch_input_q, batch_target_q)
+                query_losses.append(q_loss_val.item())
+
+                # Calculate batch accuracies for display (using PoE results)
+                batch_poe_shape_acc = batch_poe_shape_correct / batch_poe_shape_tokens if batch_poe_shape_tokens > 0 else 0
+                batch_poe_grid_acc = batch_poe_grid_correct / batch_poe_grid_tokens if batch_poe_grid_tokens > 0 else 0
+                batch_poe_exact_acc = batch_poe_exact_correct / query_batch_size
+
+                # Enhanced progress bar postfix with encoder comparison
+                best_individual_exact = max(acc['exact_acc'] for acc in individual_batch_accuracies.values())
+                
+                # Update progress bar postfix
+                query_pbar.set_postfix({
+                    'samples': f'{processed_query_samples + query_batch_size}/{total_query_samples}',
+                    'loss': f'{q_loss_val.item():.4f}',
+                    'poe_exact': f'{batch_poe_exact_acc:.3f}',
+                    'best_enc': f'{best_individual_exact:.3f}',
+                    'poe_adv': f'{batch_poe_exact_acc - best_individual_exact:+.3f}'
                 })
+                
+            else:
+                # Single encoder evaluation (existing logic)
+                shape_logits, grid_logits = model.decoder(z_query_expanded, batch_input_q, target_seq=batch_target_q)
+                
+                # Compute query loss
+                q_loss_val = compute_loss(model, batch_input_q, batch_target_q)
+                query_losses.append(q_loss_val.item())
+                
+                # Store each query's reconstruction with its input and target
+                for i in range(query_batch_size):
+                    query_reconstructions.append({
+                        'input': batch_input_q[i].cpu().numpy().tolist(),
+                        'target': batch_target_q[i].cpu().numpy().tolist(),
+                        'reconstruction': (shape_logits[i].cpu().numpy().tolist(), grid_logits[i].cpu().numpy().tolist())
+                    })
 
-            shape_pred = shape_logits.argmax(dim=-1)
-            grid_pred = grid_logits.argmax(dim=-1)
-            shape_tgt = batch_target_q[:, 900:902].long()
-            grid_tgt = batch_target_q[:, :900].long()
+                shape_pred = shape_logits.argmax(dim=-1)
+                grid_pred = grid_logits.argmax(dim=-1)
+                shape_tgt = batch_target_q[:, 900:902].long()
+                grid_tgt = batch_target_q[:, :900].long()
 
-            # Calculate accuracies for this batch
-            batch_shape_correct = (shape_pred == shape_tgt).sum().item()
-            batch_shape_tokens = shape_tgt.numel()
-            batch_grid_correct = 0
-            batch_grid_tokens = 0
-            batch_exact_correct = 0
+                # Calculate accuracies for this batch
+                batch_shape_correct = (shape_pred == shape_tgt).sum().item()
+                batch_shape_tokens = shape_tgt.numel()
+                batch_grid_correct = 0
+                batch_grid_tokens = 0
+                batch_exact_correct = 0
 
-            shape_correct += batch_shape_correct
-            shape_tokens += batch_shape_tokens
+                single_metrics['shape_correct'] += batch_shape_correct
+                single_metrics['shape_tokens'] += batch_shape_tokens
 
-            for i in range(query_batch_size):
-                tgt_rows = int(batch_target_q[i, 900].item())
-                tgt_cols = int(batch_target_q[i, 901].item())
-                active_pixels = tgt_rows * tgt_cols
-                if active_pixels > 0:
-                    sample_grid_correct = (grid_pred[i, :active_pixels] == grid_tgt[i, :active_pixels]).sum().item()
-                    batch_grid_correct += sample_grid_correct
-                    batch_grid_tokens += active_pixels
-                    if torch.all(shape_pred[i] == shape_tgt[i]) and sample_grid_correct == active_pixels:
-                        batch_exact_correct += 1
-                elif torch.all(shape_pred[i] == shape_tgt[i]):
-                     batch_exact_correct += 1
+                for i in range(query_batch_size):
+                    tgt_rows = int(batch_target_q[i, 900].item())
+                    tgt_cols = int(batch_target_q[i, 901].item())
+                    active_pixels = tgt_rows * tgt_cols
+                    if active_pixels > 0:
+                        sample_grid_correct = (grid_pred[i, :active_pixels] == grid_tgt[i, :active_pixels]).sum().item()
+                        batch_grid_correct += sample_grid_correct
+                        batch_grid_tokens += active_pixels
+                        if torch.all(shape_pred[i] == shape_tgt[i]) and sample_grid_correct == active_pixels:
+                            batch_exact_correct += 1
+                    elif torch.all(shape_pred[i] == shape_tgt[i]):
+                         batch_exact_correct += 1
 
-            grid_correct += batch_grid_correct
-            grid_tokens += batch_grid_tokens
-            sample_exact_correct += batch_exact_correct
-            total_samples += query_batch_size
-            processed_query_samples += query_batch_size
+                single_metrics['grid_correct'] += batch_grid_correct
+                single_metrics['grid_tokens'] += batch_grid_tokens
+                single_metrics['sample_exact_correct'] += batch_exact_correct
+                single_metrics['total_samples'] += query_batch_size
 
-            # Calculate batch accuracies for display
-            batch_shape_acc = batch_shape_correct / batch_shape_tokens if batch_shape_tokens > 0 else 0
-            batch_grid_acc = batch_grid_correct / batch_grid_tokens if batch_grid_tokens > 0 else 0
-            batch_exact_acc = batch_exact_correct / query_batch_size
+                # Calculate batch accuracies for display
+                batch_shape_acc = batch_shape_correct / batch_shape_tokens if batch_shape_tokens > 0 else 0
+                batch_grid_acc = batch_grid_correct / batch_grid_tokens if batch_grid_tokens > 0 else 0
+                batch_exact_acc = batch_exact_correct / query_batch_size
 
-            # Update progress bar postfix
-            query_pbar.set_postfix({
-                'samples': f'{processed_query_samples}/{total_query_samples}',
-                'loss': f'{q_loss_val.item():.4f}',
-                'shape_acc': f'{batch_shape_acc:.3f}',
-                'exact_acc': f'{batch_exact_acc:.3f}'
-            })
+                # Update progress bar postfix
+                query_pbar.set_postfix({
+                    'samples': f'{processed_query_samples + query_batch_size}/{total_query_samples}',
+                    'loss': f'{q_loss_val.item():.4f}',
+                    'shape_acc': f'{batch_shape_acc:.3f}',
+                    'exact_acc': f'{batch_exact_acc:.3f}'
+                })
+        
+        processed_query_samples += query_batch_size
     
     query_pbar.close()
 
@@ -485,38 +1077,217 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
     print(f"  Total samples processed: {processed_query_samples}")
     print(f"  Total batches processed: {len(queries_dataloader)}")
 
+    # Calculate final metrics
     avg_support_loss = sum(support_losses) / len(support_losses) if support_losses else 0.0
     avg_query_loss = sum(query_losses) / len(query_losses) if query_losses else 0.0
 
-    final_shape_acc = shape_correct / shape_tokens if shape_tokens > 0 else 0.0
-    final_grid_acc = grid_correct / grid_tokens if grid_tokens > 0 else 0.0
-    final_overall_acc = (shape_correct + grid_correct) / (shape_tokens + grid_tokens) if (shape_tokens + grid_tokens) > 0 else 0.0
-    final_exact_acc = sample_exact_correct / total_samples if total_samples > 0 else 0.0
+    if is_multi_encoder:
+        # Multi-encoder final metrics
+        print(f"\n>>> MULTI-ENCODER EVALUATION RESULTS <<<")
+        
+        # PoE metrics
+        poe_shape_acc = poe_metrics['shape_correct'] / poe_metrics['shape_tokens'] if poe_metrics['shape_tokens'] > 0 else 0.0
+        poe_grid_acc = poe_metrics['grid_correct'] / poe_metrics['grid_tokens'] if poe_metrics['grid_tokens'] > 0 else 0.0
+        poe_overall_acc = (poe_metrics['shape_correct'] + poe_metrics['grid_correct']) / (poe_metrics['shape_tokens'] + poe_metrics['grid_tokens']) if (poe_metrics['shape_tokens'] + poe_metrics['grid_tokens']) > 0 else 0.0
+        poe_exact_acc = poe_metrics['sample_exact_correct'] / poe_metrics['total_samples'] if poe_metrics['total_samples'] > 0 else 0.0
+        
+        print(f"\n🎯 PRODUCT OF EXPERTS (PoE) RESULTS:")
+        print(f"  Shape accuracy: {poe_shape_acc:.4f} ({poe_metrics['shape_correct']}/{poe_metrics['shape_tokens']})")
+        print(f"  Grid accuracy: {poe_grid_acc:.4f} ({poe_metrics['grid_correct']}/{poe_metrics['grid_tokens']})")
+        print(f"  Overall accuracy: {poe_overall_acc:.4f}")
+        print(f"  Sample exact accuracy: {poe_exact_acc:.4f} ({poe_metrics['sample_exact_correct']}/{poe_metrics['total_samples']})")
+        
+        # Individual encoder metrics
+        individual_accuracies = {}
+        encoder_exact_accs = []
+        
+        print(f"\n👥 INDIVIDUAL ENCODER RESULTS:")
+        for enc_name, metrics in individual_encoder_metrics.items():
+            enc_shape_acc = metrics['shape_correct'] / metrics['shape_tokens'] if metrics['shape_tokens'] > 0 else 0.0
+            enc_grid_acc = metrics['grid_correct'] / metrics['grid_tokens'] if metrics['grid_tokens'] > 0 else 0.0
+            enc_overall_acc = (metrics['shape_correct'] + metrics['grid_correct']) / (metrics['shape_tokens'] + metrics['grid_tokens']) if (metrics['shape_tokens'] + metrics['grid_tokens']) > 0 else 0.0
+            enc_exact_acc = metrics['sample_exact_correct'] / metrics['total_samples'] if metrics['total_samples'] > 0 else 0.0
+            
+            individual_accuracies[enc_name] = {
+                'shape_accuracy': enc_shape_acc,
+                'grid_accuracy': enc_grid_acc,
+                'overall_accuracy': enc_overall_acc,
+                'sample_exact_accuracy': enc_exact_acc
+            }
+            
+            encoder_exact_accs.append(enc_exact_acc)
+            
+            print(f"  {enc_name.replace('_', ' ').title()}:")
+            print(f"    Shape accuracy: {enc_shape_acc:.4f} ({metrics['shape_correct']}/{metrics['shape_tokens']})")
+            print(f"    Grid accuracy: {enc_grid_acc:.4f} ({metrics['grid_correct']}/{metrics['grid_tokens']})")
+            print(f"    Sample exact accuracy: {enc_exact_acc:.4f} ({metrics['sample_exact_correct']}/{metrics['total_samples']})")
 
-    print(f"\n>>> FINAL EVALUATION METRICS <<<")
-    print(f"Support samples: {len(support_reconstructions)}")
-    print(f"Query samples: {len(query_reconstructions)}")
-    print(f"Support loss: {avg_support_loss:.4f}")
-    print(f"Query loss: {avg_query_loss:.4f}")
-    print(f"Shape accuracy: {final_shape_acc:.4f} ({shape_correct}/{shape_tokens})")
-    print(f"Grid accuracy: {final_grid_acc:.4f} ({grid_correct}/{grid_tokens})")
-    print(f"Overall accuracy: {final_overall_acc:.4f}")
-    print(f"Sample exact accuracy: {final_exact_acc:.4f} ({sample_exact_correct}/{total_samples})")
+        # Comparative Analysis
+        print(f"\n📊 COMPARATIVE ANALYSIS:")
+        
+        # Best individual encoder
+        best_encoder_idx = encoder_exact_accs.index(max(encoder_exact_accs))
+        best_encoder_name = f"encoder_{best_encoder_idx}"
+        best_individual_acc = max(encoder_exact_accs)
+        worst_individual_acc = min(encoder_exact_accs)
+        avg_individual_acc = sum(encoder_exact_accs) / len(encoder_exact_accs)
+        
+        print(f"  Best individual encoder: {best_encoder_name} ({best_individual_acc:.4f})")
+        print(f"  Worst individual encoder: encoder_{encoder_exact_accs.index(worst_individual_acc)} ({worst_individual_acc:.4f})")
+        print(f"  Average individual performance: {avg_individual_acc:.4f}")
+        print(f"  Individual encoder variance: {sum((acc - avg_individual_acc)**2 for acc in encoder_exact_accs) / len(encoder_exact_accs):.6f}")
+        
+        # PoE vs Individual comparison
+        poe_advantage = poe_exact_acc - best_individual_acc
+        poe_vs_avg = poe_exact_acc - avg_individual_acc
+        
+        print(f"\n⚖️  PoE PERFORMANCE COMPARISON:")
+        print(f"  PoE vs Best Individual: {poe_advantage:+.4f} ({poe_exact_acc:.4f} vs {best_individual_acc:.4f})")
+        print(f"  PoE vs Average Individual: {poe_vs_avg:+.4f} ({poe_exact_acc:.4f} vs {avg_individual_acc:.4f})")
+        
+        # Encoder specialization analysis
+        print(f"\n🔍 ENCODER SPECIALIZATION ANALYSIS:")
+        if len(encoder_exact_accs) > 1:
+            performance_range = max(encoder_exact_accs) - min(encoder_exact_accs)
+            print(f"  Specialization range: {performance_range:.4f}")
+            if performance_range > 0.05:
+                print(f"  Classification: HIGH specialization")
+            elif performance_range > 0.02:
+                print(f"  Classification: MODERATE specialization")
+            else:
+                print(f"  Classification: LOW specialization")
+        
+        # Data distribution impact
+        print(f"\n📈 PERFORMANCE METRICS SUMMARY:")
+        print(f"  Total query samples evaluated: {poe_metrics['total_samples']}")
+        print(f"  PoE exact match samples: {poe_metrics['sample_exact_correct']}")
+        print(f"  Best individual exact matches: {individual_encoder_metrics[best_encoder_name]['sample_exact_correct']}")
+        print(f"  Additional samples PoE got right: {poe_metrics['sample_exact_correct'] - individual_encoder_metrics[best_encoder_name]['sample_exact_correct']}")
 
-    return {
-        'metrics': {
-            'support_loss': avg_support_loss,
-            'query_loss': avg_query_loss,
-            'shape_accuracy': final_shape_acc,
-            'grid_accuracy': final_grid_acc,
-            'overall_accuracy': final_overall_acc,
-            'sample_exact_accuracy': final_exact_acc,
-            'losses_gradient_ascent': z_optimization_logs,
-            'used_latent_optimization': optimize_z_inference,
-            'trajectory_info': trajectory_info
-        },
-        'reconstruction_results': {
-            'support_reconstructions': support_reconstructions,
-            'query_reconstructions': query_reconstructions
+        # Collect latent representations for visualization
+        print(f"\n>>> COLLECTING LATENT REPRESENTATIONS FOR VISUALIZATION <<<")
+        evaluation_latent_data = collect_evaluation_latent_data(
+            model, samples_dataloader, queries_dataloader, device, is_multi_encoder, num_encoders
+        )
+        print(f"✓ Collected evaluation latent data with {len(evaluation_latent_data)} data types")
+
+        return {
+            'metrics': {
+                'support_loss': avg_support_loss,
+                'query_loss': avg_query_loss,
+                'losses_gradient_ascent': z_optimization_logs,
+                'used_latent_optimization': optimize_z_inference,
+                'trajectory_info': trajectory_info,
+                'is_multi_encoder': True,
+                'num_encoders': num_encoders,
+                # PoE metrics (primary results)
+                'shape_accuracy': poe_shape_acc,
+                'grid_accuracy': poe_grid_acc,
+                'overall_accuracy': poe_overall_acc,
+                'sample_exact_accuracy': poe_exact_acc,
+                # Individual encoder metrics (for analysis)
+                'individual_encoder_accuracies': individual_accuracies,
+                # PoE metrics (detailed)
+                'poe_metrics': {
+                    'shape_accuracy': poe_shape_acc,
+                    'grid_accuracy': poe_grid_acc,
+                    'overall_accuracy': poe_overall_acc,
+                    'sample_exact_accuracy': poe_exact_acc
+                },
+                # Comparative analysis results
+                'comparative_analysis': {
+                    'best_individual_accuracy': best_individual_acc,
+                    'worst_individual_accuracy': worst_individual_acc,
+                    'average_individual_accuracy': avg_individual_acc,
+                    'poe_vs_best_advantage': poe_advantage,
+                    'poe_vs_avg_advantage': poe_vs_avg,
+                    'encoder_performance_variance': sum((acc - avg_individual_acc)**2 for acc in encoder_exact_accs) / len(encoder_exact_accs),
+                    'specialization_range': max(encoder_exact_accs) - min(encoder_exact_accs) if len(encoder_exact_accs) > 1 else 0.0
+                }
+            },
+            'reconstruction_results': {
+                'support_reconstructions': poe_support_reconstructions,
+                'query_reconstructions': poe_query_reconstructions,
+                'individual_support_reconstructions': individual_support_reconstructions,
+                'individual_query_reconstructions': individual_query_reconstructions
+            },
+            'evaluation_latent_data': evaluation_latent_data
         }
-    }
+    else:
+        # Single encoder final metrics (existing logic)
+        final_shape_acc = single_metrics['shape_correct'] / single_metrics['shape_tokens'] if single_metrics['shape_tokens'] > 0 else 0.0
+        final_grid_acc = single_metrics['grid_correct'] / single_metrics['grid_tokens'] if single_metrics['grid_tokens'] > 0 else 0.0
+        final_overall_acc = (single_metrics['shape_correct'] + single_metrics['grid_correct']) / (single_metrics['shape_tokens'] + single_metrics['grid_tokens']) if (single_metrics['shape_tokens'] + single_metrics['grid_tokens']) > 0 else 0.0
+        final_exact_acc = single_metrics['sample_exact_correct'] / single_metrics['total_samples'] if single_metrics['total_samples'] > 0 else 0.0
+
+        print(f"\n>>> SINGLE ENCODER EVALUATION RESULTS <<<")
+        print(f"Support samples: {len(support_reconstructions)}")
+        print(f"Query samples: {len(query_reconstructions)}")
+        print(f"Support loss: {avg_support_loss:.4f}")
+        print(f"Query loss: {avg_query_loss:.4f}")
+        print(f"Shape accuracy: {final_shape_acc:.4f} ({single_metrics['shape_correct']}/{single_metrics['shape_tokens']})")
+        print(f"Grid accuracy: {final_grid_acc:.4f} ({single_metrics['grid_correct']}/{single_metrics['grid_tokens']})")
+        print(f"Overall accuracy: {final_overall_acc:.4f}")
+        print(f"Sample exact accuracy: {final_exact_acc:.4f} ({single_metrics['sample_exact_correct']}/{single_metrics['total_samples']})")
+
+        # Collect latent representations for visualization
+        print(f"\n>>> COLLECTING LATENT REPRESENTATIONS FOR VISUALIZATION <<<")
+        evaluation_latent_data = collect_evaluation_latent_data(
+            model, samples_dataloader, queries_dataloader, device, is_multi_encoder, num_encoders
+        )
+        print(f"✓ Collected evaluation latent data with {len(evaluation_latent_data)} data types")
+
+        # Convert single-encoder results to unified multi-encoder format for consistent processing
+        individual_accuracies = {
+            'encoder_0': {
+                'shape_accuracy': final_shape_acc,
+                'grid_accuracy': final_grid_acc,
+                'overall_accuracy': final_overall_acc,
+                'sample_exact_accuracy': final_exact_acc
+            }
+        }
+        
+        return {
+            'metrics': {
+                'support_loss': avg_support_loss,
+                'query_loss': avg_query_loss,
+                'losses_gradient_ascent': z_optimization_logs,
+                'used_latent_optimization': optimize_z_inference,
+                'trajectory_info': trajectory_info,
+                'is_multi_encoder': True,  # Always True for unified processing
+                'num_encoders': 1,  # Single encoder treated as multi-encoder with 1 encoder
+                'is_actually_single_encoder': True,  # Track original state
+                # Single encoder metrics (primary results - same as PoE for 1 encoder)
+                'shape_accuracy': final_shape_acc,
+                'grid_accuracy': final_grid_acc,
+                'overall_accuracy': final_overall_acc,
+                'sample_exact_accuracy': final_exact_acc,
+                # Individual encoder metrics (for unified processing)
+                'individual_encoder_accuracies': individual_accuracies,
+                # PoE metrics (same as single encoder for 1 encoder)
+                'poe_metrics': {
+                    'shape_accuracy': final_shape_acc,
+                    'grid_accuracy': final_grid_acc,
+                    'overall_accuracy': final_overall_acc,
+                    'sample_exact_accuracy': final_exact_acc
+                },
+                # Comparative analysis results (trivial for single encoder)
+                'comparative_analysis': {
+                    'best_individual_accuracy': final_exact_acc,
+                    'worst_individual_accuracy': final_exact_acc,
+                    'average_individual_accuracy': final_exact_acc,
+                    'poe_vs_best_advantage': 0.0,
+                    'poe_vs_avg_advantage': 0.0,
+                    'encoder_performance_variance': 0.0,
+                    'specialization_range': 0.0
+                }
+            },
+            'reconstruction_results': {
+                'support_reconstructions': support_reconstructions,
+                'query_reconstructions': query_reconstructions,
+                # Add individual reconstructions for unified processing (same as main for single encoder)
+                'individual_support_reconstructions': {'encoder_0': support_reconstructions},
+                'individual_query_reconstructions': {'encoder_0': query_reconstructions}
+            },
+            'evaluation_latent_data': evaluation_latent_data
+        }

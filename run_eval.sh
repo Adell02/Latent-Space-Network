@@ -1,0 +1,1 @@
+python LPN_reproduction/main_pattern_task.py --mode eval --epoch 6 --file_name multiencoder_4_m

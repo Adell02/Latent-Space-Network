@@ -13,10 +13,14 @@
         "run_base_dir": "runs_re_arc"
     },
     "model_architecture": {
+        "num_encoders": 1,
+        "encoder_layers": 4,
+        "decoder_layers": 4,
+        "encoder_heads": 8,
+        "decoder_heads": 8,
+        "encoder_hidden_dim": 64,
+        "decoder_hidden_dim": 64,
         "latent_dim": 128,
-        "hidden_dim": 64,
-        "num_layers": 4,
-        "num_heads": 8,
         "dropout": 0.15,
         "max_length": 902,
         "encoder_max_length": 1805,

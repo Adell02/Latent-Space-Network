@@ -1,0 +1,6 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+When generating or modifying code, always prefer refactoring and reusing existing functions, variables, and logic rather than duplicating or adding new code. If old code becomes unused, remove it. Keep code clean, minimal, and logically organized—avoid leaving behind unused imports, variables, or functions.

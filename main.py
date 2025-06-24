@@ -96,13 +96,15 @@ def main_args():
         
         # Run evaluation
         print("\n=== RUNNING EVALUATION ===")
-        eval_results = main_test(model, args.keys, args.n_eval_samples, args.n_eval_queries, EVAL_SEED, device)
+        eval_results = main_test(model, args.keys, args.file_name, args.n_eval_samples, args.n_eval_queries, EVAL_SEED, device)
         
         # Add encoded training data to evaluation results for easy access
         if encoded_training_data is not None:
             for key in eval_results:
                 eval_results[key]['encoded_training_latents'] = {
-                    'latent_mus': encoded_training_data['latent_mus'].tolist(),  # Convert to list for JSON serialization
+                    'latent_mus': encoded_training_data['latent_mus'].tolist() if isinstance(encoded_training_data['latent_mus'], np.ndarray) else encoded_training_data['latent_mus'],
+                    'latent_log_vars': encoded_training_data['latent_log_vars'].tolist() if isinstance(encoded_training_data['latent_log_vars'], np.ndarray) else encoded_training_data['latent_log_vars'],
+                    'latent_zs': encoded_training_data['latent_zs'].tolist() if isinstance(encoded_training_data['latent_zs'], np.ndarray) else encoded_training_data['latent_zs'],
                     'encoding_info': encoded_training_data['encoding_info']
                 }
                 

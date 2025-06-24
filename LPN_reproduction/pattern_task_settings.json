@@ -5,7 +5,7 @@
         ],
         "training_seed": 42,
         "eval_seed": 1,
-        "n": 25,
+        "n": 200,
         "run_base_dir": "runs_re_arc"
     },
     "model_architecture": {
@@ -16,10 +16,7 @@
         "decoder_heads" : 6,
         "encoder_hidden_dim" : 96,
         "decoder_hidden_dim" : 96,
-        "hidden_dim" : 96,
-        "num_layers" : 2,
-        "num_heads" : 6,
-        "latent_dim": 16,
+        "latent_dim": 128,
         "dropout": 1e-6,
         "max_length": 902,
         "encoder_max_length": 1805,
@@ -27,14 +24,14 @@
         "use_gradient_checkpointing": true
     },
     "training_settings": {
-        "num_epochs": 20,
+        "num_epochs": 10,
         "batch_size": 16,
         "gradient_accumulation_steps": 2,
         "learning_rate": 0.0004,
         "optimizer_weight_decay": 1e-05,
         "beta": 1e-2,
         "use_mixed_precision": true,
-        "save_checkpoint_interval": 2,
+        "save_checkpoint_interval": 1,
         "learning_rate_scheduler": {
             "type": "none",
             "warmup_epochs": 20,
@@ -49,7 +46,7 @@
         },
         "inference": {
             "enabled": true,
-            "num_steps": 150,
+            "num_steps": 100,
             "learning_rate": 0.1
         },
         "method": "gradient",
@@ -69,9 +66,9 @@
         "eval_keys": [
             "pattern_task"
         ],
-        "eval_n_samples": 2,
-        "eval_n_queries": 100,
-        "eval_epoch": 20,
+        "eval_n_samples": 5,
+        "eval_n_queries": 50,
+        "eval_epoch": 10,
         "visualize_n_values": 5
     }
 }
