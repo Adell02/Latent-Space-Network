@@ -32,6 +32,26 @@ class SettingsManager:
         """Get training settings."""
         return self._settings['training_settings']
 
+    def get_solo_loss_settings(self) -> Dict[str, Any]:
+        """Get solo loss settings."""
+        return self._settings['training_settings'].get('solo_loss', {
+            'enabled': False,
+            'lambda_solo': 0.1,
+            'isolate_decoder_gradients': True,
+            'log_frequency': 100
+        })
+
+    def get_wandb_settings(self) -> Dict[str, Any]:
+        """Get wandb settings."""
+        return self._settings['training_settings'].get('wandb', {
+            'enabled': False,
+            'entity': None,
+            'api_key': None,
+            'log_interval': 1,
+            'log_visualizations': True,
+            'log_gradients': False
+        })
+
     def get_latent_optimization(self) -> Dict[str, Any]:
         """Get latent optimization settings."""
         return self._settings['latent_optimization']
@@ -48,5 +68,5 @@ class SettingsManager:
         print(f"Settings saved to {settings_file}")
 
 # Create a global settings manager instance
-#settings = SettingsManager(settings_file="model_settings.json") 
-settings = SettingsManager(settings_file="LPN_reproduction/pattern_task_settings.json")
+settings = SettingsManager(settings_file="model_settings.json") 
+#settings = SettingsManager(settings_file="LPN_reproduction/pattern_task_settings.json")

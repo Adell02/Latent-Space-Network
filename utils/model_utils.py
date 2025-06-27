@@ -460,13 +460,28 @@ def load_model(run_dir, epoch=None, device='cuda', model_type='lpn'):
         checkpoints = [f for f in os.listdir(run_dir) if f.startswith('checkpoint_epoch')]
         if not checkpoints:
             raise FileNotFoundError(f"No checkpoints found in {run_dir}")
-        latest_epoch = max([int(f.split('_')[1][5:].split('.')[0]) for f in checkpoints])
+        
+        # Extract all available epochs and find the latest
+        available_epochs = [int(f.split('_')[1][5:].split('.')[0]) for f in checkpoints]
+        latest_epoch = max(available_epochs)
+        
+        print(f"=== MODEL LOADING ===")
+        print(f"Available checkpoints: {sorted(available_epochs)}")
+        print(f"No specific epoch requested - selecting latest epoch: {latest_epoch}")
+        
         checkpoint_path = os.path.join(run_dir, f'checkpoint_epoch{latest_epoch}.pt')
+        epoch = latest_epoch
     else:
+        print(f"=== MODEL LOADING ===")
+        print(f"Loading specific epoch: {epoch}")
         checkpoint_path = os.path.join(run_dir, f'checkpoint_epoch{epoch}.pt')
     
     if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+        available_checkpoints = [f for f in os.listdir(run_dir) if f.startswith('checkpoint_epoch')]
+        available_epochs = [int(f.split('_')[1][5:].split('.')[0]) for f in available_checkpoints] if available_checkpoints else []
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}\nAvailable epochs: {sorted(available_epochs)}")
+    
+    print(f"Loading checkpoint from: {checkpoint_path}")
     
     # Load checkpoint
     checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -474,6 +489,8 @@ def load_model(run_dir, epoch=None, device='cuda', model_type='lpn'):
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     epoch = checkpoint['epoch']
     loss = checkpoint['loss']
+    
+    print(f"✓ Successfully loaded epoch {epoch} (training loss: {loss:.6f})")
     
     # Set to evaluation mode
     model.eval()

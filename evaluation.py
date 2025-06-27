@@ -20,19 +20,9 @@ MAX_BATCH_SIZE = 16
 
 def collect_evaluation_latent_data(model, samples_dataloader, queries_dataloader, device, is_multi_encoder, num_encoders):
     """
-    Collect latent representations from support and query samples for visualization.
-    Unified approach: single encoder is treated as multi-encoder with num_encoders=1.
-    
-    Args:
-        model: The model to collect latent data from
-        samples_dataloader: Support samples dataloader
-        queries_dataloader: Query samples dataloader
-        device: Device to run on
-        is_multi_encoder: Whether this is a multi-encoder model
-        num_encoders: Number of encoders (1 for single encoder)
-        
-    Returns:
-        dict: Latent data organized by data type (support/query) and encoder
+    Collect latent representations from support and query samples efficiently.
+    Avoids data duplication by reusing shared input/output data.
+    Always uses mean vectors (μ) for consistency.
     """
     model.eval()
     evaluation_latent_data = {}
@@ -51,17 +41,16 @@ def collect_evaluation_latent_data(model, samples_dataloader, queries_dataloader
     
     return evaluation_latent_data
 
-def collect_unified_evaluation_latents(model, dataloader, device, is_multi_encoder, num_encoders, data_type='support', max_samples=100):
+def collect_unified_evaluation_latents(model, dataloader, device, is_multi_encoder, num_encoders, data_type='support', max_samples=100, batch_size_limit=16):
     """
-    Unified evaluation latent collection for both single and multi-encoder models.
-    Single encoder (num_encoders=1) is treated as a special case of multi-encoder.
-    
-    For evaluation: ALL encoders process the SAME support/query dataset.
+    Unified evaluation latent collection using batch-split approach.
+    Processes data in smaller batches to avoid memory issues.
+    Always uses mean vectors (μ) for consistency and efficiency.
     """
     print(f"    Collecting {data_type} latents from {num_encoders}-encoder model...")
-    print(f"      Processing same {data_type} dataset with {num_encoders} encoder{'s' if num_encoders != 1 else ''}...")
+    print(f"    Using mean (μ) vectors for visualization")
     
-    # Get the data samples first (same for all encoders)
+    # Get the data samples once (shared across all encoders)
     input_samples = []
     output_samples = []
     
@@ -80,65 +69,119 @@ def collect_unified_evaluation_latents(model, dataloader, device, is_multi_encod
         print(f"      ⚠ No {data_type} samples found")
         return {}
     
-    # Combine all batches
-    all_inputs = torch.cat(input_samples, dim=0).to(device)
-    all_outputs = torch.cat(output_samples, dim=0).to(device)
+    # Combine all batches - this is the shared dataset
+    all_inputs = torch.cat(input_samples, dim=0)
+    all_outputs = torch.cat(output_samples, dim=0)
     
-    print(f"      Processing {len(all_inputs)} {data_type} samples...")
+    print(f"      Processing {len(all_inputs)} {data_type} samples in batches of {batch_size_limit}...")
+    
+    # Store shared input/output data (avoid duplicating across encoders)
+    shared_data = {
+        'input_samples': all_inputs.cpu().numpy(),
+        'output_samples': all_outputs.cpu().numpy(),
+        'num_samples': len(all_inputs),
+        'latent_type': 'mean'
+    }
     
     encoder_latent_data = {}
     
-    # Process with each individual encoder (works for both single and multi-encoder)
-    for encoder_idx in range(num_encoders):
-        print(f"        Encoder {encoder_idx}...")
+    # Process data in batches to avoid memory issues
+    def process_in_batches(inputs, outputs, processing_func, func_name):
+        """Process data in batches and concatenate results."""
+        all_mus = []
+        all_log_vars = []
+        all_zs = []
         
-        with torch.no_grad():
-            if is_multi_encoder:
-                # Multi-encoder: use specific encoder
-                mu, log_var = model(all_inputs, all_outputs, encoder_idx=encoder_idx)[1:3]
-            else:
-                # Single encoder: there's only one encoder (encoder_idx should be 0)
-                assert encoder_idx == 0, f"Single encoder but encoder_idx={encoder_idx}"
-                mu, log_var = model.encoder(all_inputs, all_outputs)
+        total_batches = (len(inputs) + batch_size_limit - 1) // batch_size_limit
+        print(f"          Processing {total_batches} batches...")
+        
+        for i in range(0, len(inputs), batch_size_limit):
+            end_idx = min(i + batch_size_limit, len(inputs))
+            batch_inputs = inputs[i:end_idx].to(device)
+            batch_outputs = outputs[i:end_idx].to(device)
             
-            z = model.reparameterize(mu, log_var)
-            
-            latent_data = {
-                'latent_mus': mu.cpu().numpy(),
-                'latent_log_vars': log_var.cpu().numpy(),
-                'latent_zs': z.cpu().numpy(),
-                'input_samples': all_inputs.cpu().numpy(),
-                'output_samples': all_outputs.cpu().numpy(),
-                'data_type': f"{data_type}_encoder_{encoder_idx}",
-                'num_samples': len(z),
-                'encoder_idx': encoder_idx
-            }
-            
-            encoder_latent_data[f"encoder_{encoder_idx}"] = latent_data
-            print(f"          ✓ Collected {len(z)} samples from Encoder {encoder_idx}")
+            with torch.no_grad():
+                mu, log_var = processing_func(batch_inputs, batch_outputs)
+                # Always use mean vectors (μ) for consistency
+                z = mu
+                
+                all_mus.append(mu.cpu().numpy())
+                all_log_vars.append(log_var.cpu().numpy())
+                all_zs.append(z.cpu().numpy())
+        
+        # Concatenate all batch results
+        final_mus = np.concatenate(all_mus, axis=0)
+        final_log_vars = np.concatenate(all_log_vars, axis=0)
+        final_zs = np.concatenate(all_zs, axis=0)
+        
+        return final_mus, final_log_vars, final_zs
     
-    # Process with PoE (Product of Experts) - only for multi-encoder
-    if is_multi_encoder and num_encoders > 1:
-        print(f"        PoE (Product of Experts)...")
-        with torch.no_grad():
-            # Get PoE latent representations (combining all encoders)
-            mu, log_var = model(all_inputs, all_outputs)[1:3]  # No encoder_idx = PoE
-            z = model.reparameterize(mu, log_var)
-            
-            poe_latent_data = {
-                'latent_mus': mu.cpu().numpy(),
-                'latent_log_vars': log_var.cpu().numpy(),
-                'latent_zs': z.cpu().numpy(),
-                'input_samples': all_inputs.cpu().numpy(),
-                'output_samples': all_outputs.cpu().numpy(),
-                'data_type': f"{data_type}_poe",
-                'num_samples': len(z)
-            }
-            
-            encoder_latent_data['poe'] = poe_latent_data
-            print(f"          ✓ Collected {len(z)} samples from PoE")
+    # For single encoder: only collect once as encoder_0
+    if not is_multi_encoder or num_encoders == 1:
+        print(f"        Single encoder processing...")
+        
+        def single_encoder_processing(batch_inputs, batch_outputs):
+            mu, log_var = model.encoder(batch_inputs, batch_outputs)
+            return mu, log_var
+        
+        final_mus, final_log_vars, final_zs = process_in_batches(
+            all_inputs, all_outputs, single_encoder_processing, "single encoder"
+        )
+        
+        encoder_latent_data['encoder_0'] = {
+            'latent_mus': final_mus,
+            'latent_log_vars': final_log_vars,
+            'latent_zs': final_zs,  # This will be μ or z based on use_mean_for_viz
+            'data_type': f"{data_type}_encoder_0",
+            'encoder_idx': 0,
+            **shared_data
+        }
+        print(f"          ✓ Collected {len(final_zs)} samples from Encoder 0 (μ)")
+    
+    # For true multi-encoder: collect individual encoder latents + PoE
     else:
-        print(f"        PoE skipped (single encoder - PoE = Encoder 0)")
+        # Individual encoders
+        for encoder_idx in range(num_encoders):
+            print(f"        Encoder {encoder_idx}...")
+            
+            def individual_encoder_processing(batch_inputs, batch_outputs):
+                mu, log_var = model(batch_inputs, batch_outputs, encoder_idx=encoder_idx)[1:3]
+                return mu, log_var
+            
+            final_mus, final_log_vars, final_zs = process_in_batches(
+                all_inputs, all_outputs, individual_encoder_processing, f"encoder_{encoder_idx}"
+            )
+            
+            encoder_latent_data[f"encoder_{encoder_idx}"] = {
+                'latent_mus': final_mus,
+                'latent_log_vars': final_log_vars,
+                'latent_zs': final_zs,
+                'data_type': f"{data_type}_encoder_{encoder_idx}",
+                'encoder_idx': encoder_idx,
+                **shared_data
+            }
+            print(f"          ✓ Collected {len(final_zs)} samples from Encoder {encoder_idx} (μ)")
+
+            # PoE (Product of Experts) - ONLY for evaluation data, not training data
+            if data_type in ['support', 'query']:
+                print(f"      PoE (Product of Experts)...")
+                
+                def poe_processing(batch_inputs, batch_outputs):
+                    mu, log_var = model(batch_inputs, batch_outputs)[1:3]  # No encoder_idx = PoE
+                    return mu, log_var
+                
+                final_mus, final_log_vars, final_zs = process_in_batches(
+                    all_inputs, all_outputs, poe_processing, "PoE"
+                )
+                
+                encoder_latent_data['poe'] = {
+                    'latent_mus': final_mus,
+                    'latent_log_vars': final_log_vars,
+                    'latent_zs': final_zs,
+                    'data_type': f"{data_type}_poe",
+                    **shared_data
+                }
+                print(f"          ✓ Collected {len(final_zs)} samples from PoE (μ)")
     
     print(f"      ✓ {num_encoders}-encoder {data_type} collection complete")
     return encoder_latent_data
@@ -149,20 +192,11 @@ def collect_unified_evaluation_latents(model, dataloader, device, is_multi_encod
 
 def collect_training_latent_representations(model, run_dir, device='cuda'):
     """
-    Collect training latent representations for visualization.
-    Unified approach: single encoder is treated as multi-encoder with num_encoders=1.
-    
-    Args:
-        model: Trained model to use for encoding
-        run_dir: Directory containing results.pkl with training data
-        device: Device to run encoding on
-        
-    Returns:
-        dict: Contains training latent representations and metadata
+    Collect training latent representations efficiently without data duplication.
+    Always uses mean vectors (μ) for consistency.
     """
     print("  Loading training data from results.pkl...")
     
-    # First, try to load training sequences from results.pkl
     results_file = os.path.join(run_dir, 'results.pkl')
     if not os.path.exists(results_file):
         print(f"  Warning: No training results file found at {results_file}")
@@ -172,7 +206,6 @@ def collect_training_latent_representations(model, run_dir, device='cuda'):
         with open(results_file, 'rb') as f:
             training_results = pickle.load(f)
         
-        # Extract training sequences
         input_sequences = training_results.get('input_sequences', [])
         output_sequences = training_results.get('output_sequences', [])
         
@@ -182,7 +215,7 @@ def collect_training_latent_representations(model, run_dir, device='cuda'):
         
         print(f"  Found {len(input_sequences)} training sequences")
         
-        # Check model type (unified approach)
+        # Check model type
         is_multi_encoder = hasattr(model, 'is_multi_encoder') and model.is_multi_encoder
         num_encoders = getattr(model, 'num_encoders', 1) if is_multi_encoder else 1
         
@@ -195,18 +228,17 @@ def collect_training_latent_representations(model, run_dir, device='cuda'):
             output_sequences = output_sequences[:max_samples]
             print(f"  Limited to {max_samples} samples for memory efficiency")
         
-        # Encode using the trained model (unified approach)
+        # Encode using the trained model
         model.eval()
         batch_size = 16
-        
         print(f"  Encoding {len(input_sequences)} training samples...")
         
-        # Use unified training latent collection
         training_latent_data = collect_unified_training_latents(
             model, input_sequences, output_sequences, device, is_multi_encoder, num_encoders, batch_size
         )
         
         if training_latent_data:
+            # Add metadata without duplicating data
             training_latent_data['collection_info'] = {
                 'total_available_samples': len(training_results.get('input_sequences', [])),
                 'collected_samples': len(input_sequences),
@@ -216,7 +248,6 @@ def collect_training_latent_representations(model, run_dir, device='cuda'):
                 'is_multi_encoder': is_multi_encoder,
                 'num_encoders': num_encoders
             }
-            
             print(f"  ✓ Successfully collected training latent representations")
         
         return training_latent_data
@@ -227,58 +258,112 @@ def collect_training_latent_representations(model, run_dir, device='cuda'):
 
 def collect_unified_training_latents(model, input_sequences, output_sequences, device, is_multi_encoder, num_encoders, batch_size=16):
     """
-    Unified training latent collection for both single and multi-encoder models.
-    Single encoder (num_encoders=1) is treated as a special case of multi-encoder.
-    
-    For training: Each encoder may have trained on different data subsets (multi-encoder),
-    or the same data (single encoder).
+    Unified training latent collection using batch-split approach.
+    Processes the training data efficiently with memory-safe batching.
+    Always uses mean vectors (μ) for consistency.
     """
-    from utils.data_preparation import prepare_dataloader
-    
     print(f"    Collecting training latents from {num_encoders}-encoder model...")
+    print(f"    Using mean (μ) vectors for visualization")
     
-    # Create dataloader
+    # Create dataloader for the shared training data
     dataloader = prepare_dataloader(input_sequences, output_sequences, batch_size, shuffle=False)
+    
+    # Convert dataloader to tensors for batch processing
+    all_inputs = []
+    all_outputs = []
+    
+    for batch_input, batch_output in dataloader:
+        all_inputs.append(batch_input)
+        all_outputs.append(batch_output)
+    
+    if not all_inputs:
+        print(f"      ⚠ No training data found")
+        return {}
+    
+    # Combine all batches
+    combined_inputs = torch.cat(all_inputs, dim=0)
+    combined_outputs = torch.cat(all_outputs, dim=0)
+    
+    print(f"      Processing {len(combined_inputs)} training samples in batches of {batch_size}...")
+    
+    # Store shared input/output data
+    shared_data = {
+        'input_samples': combined_inputs.cpu().numpy(),
+        'output_samples': combined_outputs.cpu().numpy(),
+        'num_samples': len(combined_inputs),
+        'latent_type': 'mean'
+    }
     
     encoder_latent_data = {}
     
-    # Collect individual encoder latents (works for both single and multi-encoder)
-    for encoder_idx in range(num_encoders):
-        print(f"      Encoder {encoder_idx}...")
+    # Process data in batches to avoid memory issues
+    def process_training_in_batches(inputs, outputs, processing_func, func_name):
+        """Process training data in batches and concatenate results."""
+        all_mus = []
+        all_log_vars = []
+        all_zs = []
         
-        # Use unified collect_latent_data function
-        latent_data = collect_latent_data(
-            model,
-            dataloader,
-            device,
-            encoder_idx=encoder_idx if is_multi_encoder else None,  # None for single encoder
-            max_samples=len(input_sequences),
-            data_type=f"training_encoder_{encoder_idx}",
+        total_batches = (len(inputs) + batch_size - 1) // batch_size
+        print(f"        Processing {total_batches} batches...")
+        
+        for i in range(0, len(inputs), batch_size):
+            end_idx = min(i + batch_size, len(inputs))
+            batch_inputs = inputs[i:end_idx].to(device)
+            batch_outputs = outputs[i:end_idx].to(device)
+            
+            with torch.no_grad():
+                mu, log_var = processing_func(batch_inputs, batch_outputs)
+                # Always use mean vectors (μ) for consistency
+                z = mu
+                
+                all_mus.append(mu.cpu().numpy())
+                all_log_vars.append(log_var.cpu().numpy())
+                all_zs.append(z.cpu().numpy())
+        
+        # Concatenate all batch results
+        final_mus = np.concatenate(all_mus, axis=0)
+        final_log_vars = np.concatenate(all_log_vars, axis=0)
+        final_zs = np.concatenate(all_zs, axis=0)
+        
+        return {
+            'latent_mus': final_mus,
+            'latent_log_vars': final_log_vars,
+            'latent_zs': final_zs,  # Always μ (mean) vectors
+            'data_type': func_name,
+            **shared_data
+        }
+    
+    # For single encoder: only collect once as encoder_0
+    if not is_multi_encoder or num_encoders == 1:
+        print(f"      Single encoder processing...")
+        
+        def single_encoder_processing(batch_inputs, batch_outputs):
+            mu, log_var = model.encoder(batch_inputs, batch_outputs)
+            return mu, log_var
+        
+        latent_data = process_training_in_batches(
+            combined_inputs, combined_outputs, single_encoder_processing, "training_encoder_0"
         )
-
-        if latent_data.get('num_samples', 0) > 0:
-            print(f"        ✓ Collected {latent_data['num_samples']} samples from Encoder {encoder_idx}")
-
-        encoder_latent_data[f"encoder_{encoder_idx}"] = latent_data
-
-    # Collect PoE latents - only for multi-encoder with more than 1 encoder
-    if is_multi_encoder and num_encoders > 1:
-        print(f"      PoE (Product of Experts)...")
-        poe_latent_data = collect_latent_data(
-            model,
-            dataloader,
-            device,
-            encoder_idx=None,  # PoE mode
-            max_samples=len(input_sequences),
-            data_type="training_poe",
-        )
-
-        if poe_latent_data.get('num_samples', 0) > 0:
-            print(f"        ✓ Collected {poe_latent_data['num_samples']} samples from PoE")
-
-        encoder_latent_data['poe'] = poe_latent_data
+        latent_data['encoder_idx'] = 0
+        encoder_latent_data['encoder_0'] = latent_data
+        print(f"        ✓ Collected {latent_data['num_samples']} samples from Encoder 0 (μ)")
+    
+    # For true multi-encoder: collect individual encoder latents + PoE
     else:
-        print(f"      PoE skipped (single encoder - PoE = Encoder 0)")
+        # Individual encoders
+        for encoder_idx in range(num_encoders):
+            print(f"      Encoder {encoder_idx}...")
+            
+            def individual_encoder_processing(batch_inputs, batch_outputs):
+                mu, log_var = model(batch_inputs, batch_outputs, encoder_idx=encoder_idx)[1:3]
+                return mu, log_var
+            
+            latent_data = process_training_in_batches(
+                combined_inputs, combined_outputs, individual_encoder_processing, f"training_encoder_{encoder_idx}"
+            )
+            latent_data['encoder_idx'] = encoder_idx
+            encoder_latent_data[f"encoder_{encoder_idx}"] = latent_data
+            print(f"        ✓ Collected {latent_data['num_samples']} samples from Encoder {encoder_idx} (μ)")
     
     return encoder_latent_data
 
@@ -350,15 +435,15 @@ def encode_training_sequences(model, run_dir, device='cuda', max_samples=500, ba
                 batch_output = torch.tensor(output_sequences[i:end_idx]).float().to(device)
                 
                 # Encode (equivalent to initial step of trajectory)
-                # Handle both single and multi-encoder models
+                # Handle both single and multi-encoder models - always use mean vectors
                 if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
                     # Multi-encoder: use PoE inference
                     mu, log_var = model(batch_input, batch_output)[1:3]
-                    z = model.reparameterize(mu, log_var)
+                    z = mu  # Use mean for consistency
                 else:
                     # Single encoder
                     mu, log_var = model.encoder(batch_input, batch_output)
-                    z = model.reparameterize(mu, log_var)
+                    z = mu  # Use mean for consistency
                 
                 # Compute loss for this encoded latent (equivalent to initial trajectory loss)
                 # Handle both single and multi-encoder models for decoding
@@ -429,8 +514,8 @@ def encode_training_sequences(model, run_dir, device='cuda', max_samples=500, ba
 
 def main_test(model, keys, run_dir, n_samples, n_queries, seed, device='cuda'):
     """
-    Generate new data and evaluate the model on it.
-    Collects training latent representations at the beginning for visualization.
+    Generate new data and evaluate the model on it with key-specific evaluation.
+    Each key is evaluated separately with its own support->optimization->queries cycle.
     
     Args:
         model: The trained model
@@ -440,107 +525,180 @@ def main_test(model, keys, run_dir, n_samples, n_queries, seed, device='cuda'):
         device: Device to run evaluation on
     
     Returns:
-        dict: Dictionary containing evaluation results for each key   
+        dict: Dictionary containing evaluation results structured by key   
     """
 
     set_seed(seed)
-    results = {}
+    results = {
+        'evaluation_metadata': {
+            'keys': keys,
+            'n_samples_per_key': n_samples,
+            'n_queries_per_key': n_queries,
+            'max_batch_size': MAX_BATCH_SIZE,
+            'device': str(device),
+            'seed': seed,
+            'evaluation_strategy': 'key_specific_separate_evaluation',
+            'latent_type': 'mean'
+        },
+        'key_results': {},
+        'aggregated_metrics': {}
+    }
     
-    print(f"=== EVALUATION CONFIGURATION ===")
+    print(f"=== KEY-SPECIFIC EVALUATION CONFIGURATION ===")
     print(f"Keys to evaluate: {keys}")
     print(f"Support samples per key: {n_samples}")
     print(f"Query samples per key: {n_queries}")
+    print(f"Evaluation strategy: Separate support->optimization->queries for each key")
     print(f"Maximum batch size: {MAX_BATCH_SIZE}")
     print(f"Device: {device}")
     print(f"Random seed: {seed}")
+    print(f"Latent representation: Mean (μ)")
     print("=" * 50)
     
-    # Collect training latent representations at the beginning of evaluation
+    # Collect training latent representations once at the beginning
     print(f"\n>>> COLLECTING TRAINING LATENT REPRESENTATIONS <<<")
     training_latent_data = collect_training_latent_representations(model, run_dir, device)
     if training_latent_data:
         print(f"✓ Collected training latent data: {training_latent_data.get('collection_info', {})}")
+        results['training_latent_data'] = training_latent_data
     else:
         print("⚠ Warning: Could not collect training latent representations")
     
+    # Initialize aggregated metrics
+    aggregated_metrics = {
+        'total_keys': len(keys),
+        'successful_evaluations': 0,
+        'failed_evaluations': 0,
+        'average_metrics': {},
+        'per_key_summary': {}
+    }
+    
+    # Evaluate each key separately
     for key_idx, key in enumerate(keys):
-        results[key] = {}
-        print(f"\n[KEY {key_idx+1}/{len(keys)}] Evaluating '{key}'")
-        print("-" * 40)
+        print(f"\n[KEY {key_idx+1}/{len(keys)}] EVALUATING '{key}'")
+        print("-" * 50)
         
-        # Generate support samples (used for latent space optimization)
-        print(f"Generating {n_samples} support samples...")
-        _, _, _, input_samples_sequences, output_samples_sequences = generate_and_process_tasks(key, n_samples)
+        try:
+            # Generate key-specific support samples
+            print(f"  Generating {n_samples} support samples for key '{key}'...")
+            _, _, _, input_samples_sequences, output_samples_sequences = generate_and_process_tasks(key, n_samples)
+            
+            # Generate key-specific query samples  
+            print(f"  Generating {n_queries} query samples for key '{key}'...")
+            _, _, _, input_queries_sequences, output_queries_sequences = generate_and_process_tasks(key, n_queries)
+            
+            if not input_samples_sequences or not input_queries_sequences:
+                print(f"  ❌ Failed to generate data for key '{key}' - skipping")
+                results['key_results'][key] = {
+                    'error': f'Data generation failed for key {key}',
+                    'support_samples': 0,
+                    'query_samples': 0
+                }
+                aggregated_metrics['failed_evaluations'] += 1
+                continue
+            
+            # Create dataloaders for this key
+            support_batch_size = min(MAX_BATCH_SIZE, n_samples)
+            query_batch_size = min(MAX_BATCH_SIZE, n_queries)
+            
+            samples_dataloader = prepare_dataloader(input_samples_sequences, output_samples_sequences, 
+                                                   batch_size=support_batch_size, shuffle=False)
+            queries_dataloader = prepare_dataloader(input_queries_sequences, output_queries_sequences, 
+                                                   batch_size=query_batch_size, shuffle=False)
+            
+            print(f"  Support: {len(input_samples_sequences)} samples, batch size: {support_batch_size}")
+            print(f"  Query: {len(input_queries_sequences)} samples, batch size: {query_batch_size}")
+            
+            # Evaluate model on this specific key
+            print(f"  Running evaluation for key '{key}'...")
+            key_metrics = evaluate_model(model, samples_dataloader, queries_dataloader, device=device)
+            
+            # Store key-specific results with structured information
+            results['key_results'][key] = {
+                'key': key,
+                'support_samples': len(input_samples_sequences),
+                'query_samples': len(input_queries_sequences),
+                'metrics': key_metrics['metrics'],
+                'reconstruction_results': key_metrics['reconstruction_results'],
+                'evaluation_latent_data': key_metrics.get('evaluation_latent_data', {}),
+                'raw_data': {
+                    'input_samples_sequences': input_samples_sequences,
+                    'output_samples_sequences': output_samples_sequences,
+                    'input_queries_sequences': input_queries_sequences,
+                    'output_queries_sequences': output_queries_sequences
+                }
+            }
+            
+            # Add training latent data reference to each key
+            if training_latent_data:
+                results['key_results'][key]['training_latent_data'] = training_latent_data
+            
+            aggregated_metrics['successful_evaluations'] += 1
+            
+            # Collect metrics for aggregation
+            if 'error' not in key_metrics['metrics']:
+                key_summary = {
+                    'support_loss': key_metrics['metrics']['support_loss'],
+                    'query_loss': key_metrics['metrics']['query_loss'],
+                    'shape_accuracy': key_metrics['metrics']['shape_accuracy'],
+                    'grid_accuracy': key_metrics['metrics']['grid_accuracy'],
+                    'sample_exact_accuracy': key_metrics['metrics']['sample_exact_accuracy'],
+                    'trajectory_samples': len(key_metrics['metrics']['trajectory_info'])
+                }
+                aggregated_metrics['per_key_summary'][key] = key_summary
+                
+                # Print key summary
+                print(f"  ✅ Key '{key}' Results:")
+                print(f"    Support loss: {key_summary['support_loss']:.4f}")
+                print(f"    Query loss: {key_summary['query_loss']:.4f}")
+                print(f"    Shape accuracy: {key_summary['shape_accuracy']:.4f}")
+                print(f"    Grid accuracy: {key_summary['grid_accuracy']:.4f}")
+                print(f"    Sample exact accuracy: {key_summary['sample_exact_accuracy']:.4f}")
+                print(f"    Trajectory samples: {key_summary['trajectory_samples']}")
+            else:
+                print(f"  ❌ Key '{key}' Error: {key_metrics['metrics']['error']}")
+                aggregated_metrics['failed_evaluations'] += 1
+                
+        except Exception as e:
+            print(f"  ❌ Exception during evaluation of key '{key}': {e}")
+            results['key_results'][key] = {
+                'error': f'Exception during evaluation: {str(e)}',
+                'support_samples': 0,
+                'query_samples': 0
+            }
+            aggregated_metrics['failed_evaluations'] += 1
+    
+    # Calculate aggregated metrics across all successful keys
+    if aggregated_metrics['per_key_summary']:
+        successful_keys = list(aggregated_metrics['per_key_summary'].keys())
         
-        # Use appropriate batch size for support samples - should fit in one batch if possible
-        support_batch_size = min(MAX_BATCH_SIZE, n_samples)
-        samples_dataloader = prepare_dataloader(input_samples_sequences, output_samples_sequences, 
-                                               batch_size=support_batch_size, shuffle=False)
+        # Calculate averages
+        avg_metrics = {}
+        for metric in ['support_loss', 'query_loss', 'shape_accuracy', 'grid_accuracy', 'sample_exact_accuracy']:
+            values = [aggregated_metrics['per_key_summary'][key][metric] for key in successful_keys]
+            avg_metrics[f'avg_{metric}'] = sum(values) / len(values)
+            avg_metrics[f'min_{metric}'] = min(values)
+            avg_metrics[f'max_{metric}'] = max(values)
+            avg_metrics[f'std_{metric}'] = (sum((v - avg_metrics[f'avg_{metric}'])**2 for v in values) / len(values))**0.5
         
-        print(f"Support samples: {len(input_samples_sequences)} generated")
-        print(f"Support batch size: {support_batch_size}")
-        print(f"Support batches: {len(samples_dataloader)}")
-
-        # Generate query samples (used for evaluation)
-        print(f"Generating {n_queries} query samples...")
-        _, _, _, input_queries_sequences, output_queries_sequences = generate_and_process_tasks(key, n_queries)
-        
-        # Use reasonable batch size for queries to avoid GPU memory issues
-        query_batch_size = min(MAX_BATCH_SIZE, n_queries)
-        queries_dataloader = prepare_dataloader(input_queries_sequences, output_queries_sequences, 
-                                               batch_size=query_batch_size, shuffle=False)
-        
-        print(f"Query samples: {len(input_queries_sequences)} generated")
-        print(f"Query batch size: {query_batch_size}")
-        print(f"Query batches: {len(queries_dataloader)}")
-
-        # Evaluate overall performance
-        metrics = evaluate_model(model, samples_dataloader, queries_dataloader, device=device)
-
-        results[key] = metrics
-        results[key]['reconstruction_results']['input_samples_sequences'] = input_samples_sequences
-        results[key]['reconstruction_results']['output_samples_sequences'] = output_samples_sequences  
-        results[key]['reconstruction_results']['input_queries_sequences'] = input_queries_sequences
-        results[key]['reconstruction_results']['output_queries_sequences'] = output_queries_sequences
-        
-        # Add training latent data to each key result (same model for all keys)
-        if training_latent_data:
-            results[key]['training_latent_data'] = training_latent_data
-        
-        # Store data for clustered latent visualization
-        results[key]['latent_clustering_data'] = {
-            'support_data': {
-                'inputs': input_samples_sequences,
-                'outputs': output_samples_sequences,
-                'data_type': 'support',
-                'num_samples': len(input_samples_sequences)
-            },
-            'query_data': {
-                'inputs': input_queries_sequences,
-                'outputs': output_queries_sequences,
-                'data_type': 'query', 
-                'num_samples': len(input_queries_sequences)
-            },
-            'task_key': key
-        }
-        
-        # Print summary for this key
-        print(f"\n[KEY {key_idx+1}/{len(keys)}] '{key}' RESULTS:")
-        if 'error' not in metrics['metrics']:
-            print(f"  Support loss: {metrics['metrics']['support_loss']:.4f}")
-            print(f"  Query loss: {metrics['metrics']['query_loss']:.4f}")
-            print(f"  Shape accuracy: {metrics['metrics']['shape_accuracy']:.4f}")
-            print(f"  Grid accuracy: {metrics['metrics']['grid_accuracy']:.4f}")
-            print(f"  Sample exact accuracy: {metrics['metrics']['sample_exact_accuracy']:.4f}")
-            print(f"  Support reconstructions: {len(metrics['reconstruction_results']['support_reconstructions'])}")
-            print(f"  Query reconstructions: {len(metrics['reconstruction_results']['query_reconstructions'])}")
-            print(f"  Trajectory info samples: {len(metrics['metrics']['trajectory_info'])}")
-        else:
-            print(f"  ERROR: {metrics['metrics']['error']}")
-
-    print(f"\n=== EVALUATION COMPLETE ===")
-    print(f"Processed {len(keys)} keys successfully")
-    print(f"Training latent data collected at start and included in all key results")
+        aggregated_metrics['average_metrics'] = avg_metrics
+        aggregated_metrics['successful_keys'] = successful_keys
+    
+    results['aggregated_metrics'] = aggregated_metrics
+    
+    print(f"\n=== KEY-SPECIFIC EVALUATION COMPLETE ===")
+    print(f"Total keys processed: {aggregated_metrics['total_keys']}")
+    print(f"Successful evaluations: {aggregated_metrics['successful_evaluations']}")
+    print(f"Failed evaluations: {aggregated_metrics['failed_evaluations']}")
+    
+    if aggregated_metrics['average_metrics']:
+        print(f"\nAggregated Results Across {len(aggregated_metrics['successful_keys'])} Keys:")
+        avg_metrics = aggregated_metrics['average_metrics']
+        print(f"  Average shape accuracy: {avg_metrics['avg_shape_accuracy']:.4f} ± {avg_metrics['std_shape_accuracy']:.4f}")
+        print(f"  Average grid accuracy: {avg_metrics['avg_grid_accuracy']:.4f} ± {avg_metrics['std_grid_accuracy']:.4f}")
+        print(f"  Average sample exact accuracy: {avg_metrics['avg_sample_exact_accuracy']:.4f} ± {avg_metrics['std_sample_exact_accuracy']:.4f}")
+        print(f"  Average support loss: {avg_metrics['avg_support_loss']:.4f} ± {avg_metrics['std_support_loss']:.4f}")
+        print(f"  Average query loss: {avg_metrics['avg_query_loss']:.4f} ± {avg_metrics['std_query_loss']:.4f}")
     
     return results
 
@@ -672,7 +830,7 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
                                 enc_mu, enc_log_var = model.multi_encoder.encoders[enc_idx](
                                     batch_input_s[i:i+1], batch_target_s[i:i+1]
                                 )
-                                enc_z = enc_mu  # Use mean for deterministic inference
+                                enc_z = enc_mu  # Use mean for consistency
                                 
                                 sample_trajectory['individual_encoder_trajectories'][f'encoder_{enc_idx}'] = {
                                     'mu': enc_mu.cpu().numpy(),
@@ -702,35 +860,31 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
                                     sample_trajectory['individual_encoder_reconstructions'][f'encoder_{enc_idx}'] = None
                     else:
                         # Single encoder: create encoder_0 entry for unified processing
-                        with torch.no_grad():
-                            enc_mu, enc_log_var = model.encoder(batch_input_s[i:i+1], batch_target_s[i:i+1])
-                            enc_z = enc_mu  # Use mean for deterministic inference
+                        # IMPORTANT: For single encoder, individual encoder should match PoE start
+                        if 'z_vectors' in trajectory and len(trajectory['z_vectors']) > 0:
+                            # Use the exact same initial z that started the PoE optimization
+                            initial_poe_z = trajectory['z_vectors'][0][i].detach().cpu().numpy()
+                            
+                            # Get encoder mu/log_var for metadata (but use PoE's z)
+                            with torch.no_grad():
+                                enc_mu, enc_log_var = model.encoder(batch_input_s[i:i+1], batch_target_s[i:i+1])
                             
                             sample_trajectory['individual_encoder_trajectories']['encoder_0'] = {
                                 'mu': enc_mu.cpu().numpy(),
-                                'log_var': enc_log_var.cpu().numpy(),
-                                'z': enc_z.cpu().numpy()
+                                'log_var': enc_log_var.cpu().numpy(), 
+                                'z': initial_poe_z  # Use SAME z as PoE trajectory start
                             }
-                        
-                        # Store single encoder reconstruction as encoder_0
-                        sample_trajectory['individual_encoder_reconstructions'] = {}
-                        with torch.no_grad():
-                            enc_data = sample_trajectory['individual_encoder_trajectories']['encoder_0']
-                            enc_z_tensor = torch.tensor(enc_data['z']).to(device)
-                            
-                            try:
-                                # Generate reconstruction using single encoder z
-                                enc_shape_logits, enc_grid_logits = model.decoder(
-                                    enc_z_tensor, batch_input_s[i:i+1], target_seq=batch_target_s[i:i+1]
-                                )
+                        else:
+                            # Fallback: independent z (should not happen normally)
+                            with torch.no_grad():
+                                enc_mu, enc_log_var = model.encoder(batch_input_s[i:i+1], batch_target_s[i:i+1])
+                                enc_z = enc_mu  # Use mean for consistency
                                 
-                                sample_trajectory['individual_encoder_reconstructions']['encoder_0'] = {
-                                    'shape_logits': enc_shape_logits.cpu().numpy(),
-                                    'grid_logits': enc_grid_logits.cpu().numpy()
+                                sample_trajectory['individual_encoder_trajectories']['encoder_0'] = {
+                                    'mu': enc_mu.cpu().numpy(),
+                                    'log_var': enc_log_var.cpu().numpy(),
+                                    'z': enc_z.cpu().numpy()
                                 }
-                            except Exception as e:
-                                print(f"    Warning: Could not generate reconstruction for single encoder: {e}")
-                                sample_trajectory['individual_encoder_reconstructions']['encoder_0'] = None
                     
                     # Convert PoE z vectors to numpy (main trajectory)
                     if 'z_vectors' in trajectory:
@@ -771,17 +925,29 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
                                             print(f"    Warning: Could not generate {reconstruction_type} reconstruction at step {idx}: {e}")
                                             sample_trajectory['poe_trajectory_reconstructions'][label] = None
                     
-                    # Use trajectory losses if available
-                    if 'losses' in trajectory:
-                        sample_trajectory['losses'] = trajectory['losses']
+                    # Use individual trajectory losses if available, otherwise fall back to batch average
+                    if 'individual_losses' in trajectory and trajectory['individual_losses']:
+                        # Use individual sample losses for this specific sample
+                        sample_trajectory['losses'] = [step_losses[i] for step_losses in trajectory['individual_losses']]
                         
-                        # Add loss improvement statistics
-                        if len(trajectory['losses']) > 1:
-                            initial_loss = trajectory['losses'][0]
-                            final_loss = trajectory['losses'][-1]
+                        # Add loss improvement statistics for this specific sample
+                        sample_losses = sample_trajectory['losses']
+                        if len(sample_losses) > 1:
+                            initial_loss = sample_losses[0]
+                            final_loss = sample_losses[-1]
                             sample_trajectory['loss_improvement'] = initial_loss - final_loss
                             sample_trajectory['loss_improvement_percent'] = (initial_loss - final_loss) / initial_loss * 100 if initial_loss > 0 else 0.0
-                
+                    elif 'losses' in trajectory:
+                        # Fallback to batch average (for compatibility with older code)
+                        sample_trajectory['losses'] = trajectory['losses'] if isinstance(trajectory['losses'], list) else [trajectory['losses']]
+                        
+                        # Add loss improvement statistics
+                        if len(sample_trajectory['losses']) > 1:
+                            initial_loss = sample_trajectory['losses'][0]
+                            final_loss = sample_trajectory['losses'][-1]
+                            sample_trajectory['loss_improvement'] = initial_loss - final_loss
+                            sample_trajectory['loss_improvement_percent'] = (initial_loss - final_loss) / initial_loss * 100 if initial_loss > 0 else 0.0
+                    
                     trajectory_info.append(sample_trajectory)
             else:
                 print(f"Warning: No optimization losses returned for batch {batch_idx+1}")
@@ -798,7 +964,7 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
                 else:
                     # Single encoder
                     mu, log_var = model.encoder(batch_input_s, batch_target_s)
-                    current_z_for_this_sample_batch = model.reparameterize(mu, log_var)
+                    current_z_for_this_sample_batch = mu  # Use mean for consistency
                 print(f"Using encoder z (no optimization) for batch {batch_idx+1}")
         
         # Store z vectors from all support samples

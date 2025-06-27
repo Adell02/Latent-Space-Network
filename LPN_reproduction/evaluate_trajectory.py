@@ -11,6 +11,7 @@ import argparse
 from sklearn.manifold import TSNE
 from sklearn.preprocessing import StandardScaler
 from tabulate import tabulate
+from sklearn.neighbors import NearestNeighbors
 
 # Add the parent directory to the Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -19,7 +20,7 @@ from models.base_model import LatentProgramNetwork
 from utils.settings_manager import settings
 from utils.model_utils import load_model, set_seed
 from utils.visualizers import load_evaluation_latent_data, get_comprehensive_latent_data_for_trajectory
-from utils.data_preparation import extract_grid_from_sequence
+from utils.data_preparation import extract_grid_from_sequence, safe_extract_reconstruction_grid
 
 def print_trajectory_info(trajectory_info):
     """
@@ -86,6 +87,7 @@ def load_training_latent_data(run_dir):
     """
     Load comprehensive latent data (encoders + PoE) for trajectory visualization background.
     This reuses the comprehensive latent space that combines all encoder and PoE latents.
+    Returns both high-dimensional data and precomputed t-SNE coordinates for consistency.
     """
     print("Loading comprehensive latent data (encoders + PoE) for background visualization...")
     
@@ -100,21 +102,22 @@ def load_training_latent_data(run_dir):
             print(f"✓ Successfully loaded comprehensive latent data:")
             print(f"  - Total samples: {len(combined_latents)}")
             print(f"  - Latent dimensionality: {combined_latents.shape[1]}")
+            print(f"  - t-SNE 2D coordinates: {tsne_2d.shape}")
             print(f"  - Data types: {len(set(labels))}")
             print(f"  - Includes: Individual encoders + PoE latents")
             
-            # Return the original high-dimensional data for consistent t-SNE with trajectory
-            return combined_latents
+            # Return both high-dimensional data and precomputed t-SNE coordinates
+            return combined_latents, tsne_2d, labels, colors
         else:
             print("⚠ Warning: No comprehensive latent data available")
-            return None
+            return None, None, None, None
             
     except ImportError as e:
         print(f"⚠ Warning: Could not import comprehensive latent data function: {e}")
-        return None
+        return None, None, None, None
     except Exception as e:
         print(f"⚠ Warning: Could not load comprehensive latent data: {e}")
-        return None
+        return None, None, None, None
 
 def visualize_input_target(trajectory_info, save_path):
     """
@@ -140,6 +143,45 @@ def visualize_input_target(trajectory_info, save_path):
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
 
+def find_trajectory_points_in_tsne_space(z_vectors, training_latent_data, training_tsne_2d, training_labels):
+    """
+    Map trajectory z vectors to existing t-SNE space by finding nearest neighbors
+    in the high-dimensional space and using their 2D coordinates.
+    """
+    if training_latent_data is None or training_tsne_2d is None or not z_vectors:
+        return None
+    
+    from sklearn.neighbors import NearestNeighbors
+    from sklearn.preprocessing import StandardScaler
+    
+    # Normalize both training data and trajectory vectors using the same scaler
+    scaler = StandardScaler()
+    training_normalized = scaler.fit_transform(training_latent_data)
+    
+    z_array = np.array(z_vectors)
+    z_normalized = scaler.transform(z_array)
+    
+    # Find nearest neighbors in normalized high-dimensional space
+    n_neighbors = min(3, len(training_latent_data))  # Use 3 neighbors for interpolation
+    nbrs = NearestNeighbors(n_neighbors=n_neighbors, algorithm='ball_tree').fit(training_normalized)
+    distances, indices = nbrs.kneighbors(z_normalized)
+    
+    # Map to 2D using weighted average of nearest neighbors
+    trajectory_2d = []
+    for i in range(len(z_vectors)):
+        neighbor_indices = indices[i]
+        neighbor_distances = distances[i]
+        
+        # Use inverse distance weighting (avoid division by zero)
+        weights = 1.0 / (neighbor_distances + 1e-8)
+        weights = weights / weights.sum()
+        
+        # Weighted average of neighbor 2D coordinates
+        weighted_2d = np.average(training_tsne_2d[neighbor_indices], weights=weights, axis=0)
+        trajectory_2d.append(weighted_2d)
+    
+    return np.array(trajectory_2d)
+
 def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_dir, device='cuda'):
     """
     Create a comprehensive trajectory visualization.
@@ -154,9 +196,9 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
     
     print("Single-encoder model detected - using standard visualization")
     
-    # Load training latent data for background
+    # Load training latent data for background with precomputed t-SNE
     print("Loading training latent data for background visualization...")
-    training_latent_data = load_training_latent_data(run_dir)
+    training_latent_data, training_tsne_2d, training_labels, training_colors = load_training_latent_data(run_dir)
     
     # Create figure
     fig, axs = plt.subplots(2, 4, figsize=(20, 10))
@@ -179,94 +221,120 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
     axs[1, 0].set_title(f'Target\n{target_shape[0]}×{target_shape[1]}')
     axs[1, 0].axis('off')
     
-    # Plot trajectory in latent space with training background
+    # Plot trajectory in latent space using precomputed t-SNE coordinates
     if z_vectors and len(z_vectors) >= 2:
-        z_array = np.array(z_vectors)
-        
-        # Combine trajectory and training data for consistent t-SNE
-        if training_latent_data is not None:
-            combined_data = np.vstack([training_latent_data, z_array])
-            scaler = StandardScaler()
-            combined_data_scaled = scaler.fit_transform(combined_data)
+        # Use precomputed t-SNE coordinates for consistency
+        if training_latent_data is not None and training_tsne_2d is not None:
+            # Plot training background using precomputed coordinates
+            if training_colors is not None and training_labels is not None:
+                # Use the existing colors from comprehensive latent data
+                unique_labels = list(set(training_labels))
+                for label in unique_labels:
+                    indices = [i for i, l in enumerate(training_labels) if l == label]
+                    if indices:
+                        x_coords = training_tsne_2d[indices, 0]
+                        y_coords = training_tsne_2d[indices, 1]
+                        color = training_colors[indices[0]]  # Get color for this class
+                        
+                        # Use alpha for background effect
+                        axs[0, 1].scatter(x_coords, y_coords, c=color, alpha=0.3, s=12, 
+                                       edgecolors='none', label=f'Training {label.replace("training_enc_", "Enc ")}')
+            else:
+                # Fallback to gray
+                axs[0, 1].scatter(training_tsne_2d[:, 0], training_tsne_2d[:, 1],
+                                   c='lightgray', alpha=0.4, s=15, edgecolors='none', 
+                                   label='Training Data')
             
-            tsne = TSNE(n_components=2, random_state=42, perplexity=30, n_iter=1000)
-            combined_2d = tsne.fit_transform(combined_data_scaled)
+            # Map trajectory points to the same t-SNE space
+            z_2d = find_trajectory_points_in_tsne_space(z_vectors, training_latent_data, training_tsne_2d, training_labels)
             
-            n_training = training_latent_data.shape[0]
-            training_2d = combined_2d[:n_training]
-            z_2d = combined_2d[n_training:]
-            
-            # Plot training background
-            axs[0, 1].scatter(training_2d[:, 0], training_2d[:, 1],
-                            c=np.arange(len(training_2d)), cmap='viridis', 
-                            alpha=0.3, s=20, edgecolors='none')
+            if z_2d is not None:
+                # Plot trajectory
+                trajectory_scatter = axs[0, 1].scatter(z_2d[:, 0], z_2d[:, 1], c=losses, cmap='plasma', 
+                                                     s=80, alpha=0.9, edgecolors='black', linewidth=1)
+                
+                # Draw arrows between consecutive trajectory points
+                for i in range(len(z_2d) - 1):
+                    axs[0, 1].annotate('', xy=z_2d[i+1], xytext=z_2d[i],
+                                     arrowprops=dict(arrowstyle='->', color='red', alpha=0.8, lw=2))
+                
+                # Mark start and end points
+                axs[0, 1].scatter(z_2d[0, 0], z_2d[0, 1], c='green', s=150, marker='o', 
+                                label='Start', edgecolors='black', linewidth=2, zorder=10)
+                axs[0, 1].scatter(z_2d[-1, 0], z_2d[-1, 1], c='red', s=150, marker='s', 
+                                label='End', edgecolors='black', linewidth=2, zorder=10)
+                
+                # Add colorbar
+                cbar = plt.colorbar(trajectory_scatter, ax=axs[0, 1], shrink=0.8)
+                cbar.set_label('Loss', rotation=270, labelpad=20)
+                
+                axs[0, 1].set_title('Latent Trajectory (Consistent t-SNE)')
+                axs[0, 1].legend()
+                axs[0, 1].grid(True, alpha=0.3)
+            else:
+                axs[0, 1].text(0.5, 0.5, 'Could not map\ntrajectory to t-SNE', 
+                              ha='center', va='center', transform=axs[0, 1].transAxes)
+                axs[0, 1].set_title('Latent Trajectory (Error)')
         else:
+            # Fallback: use independent t-SNE (will be inconsistent)
+            z_array = np.array(z_vectors)
             scaler = StandardScaler()
             z_array_normalized = scaler.fit_transform(z_array)
             tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(z_array)-1), n_iter=1000)
             z_2d = tsne.fit_transform(z_array_normalized)
-        
-        # Plot trajectory
-        trajectory_scatter = axs[0, 1].scatter(z_2d[:, 0], z_2d[:, 1], c=losses, cmap='plasma', 
-                                             s=80, alpha=0.9, edgecolors='black', linewidth=1)
-        
-        # Draw arrows between consecutive trajectory points
-        for i in range(len(z_2d) - 1):
-            axs[0, 1].annotate('', xy=z_2d[i+1], xytext=z_2d[i],
-                             arrowprops=dict(arrowstyle='->', color='red', alpha=0.8, lw=2))
-        
-        # Mark start and end points
-        axs[0, 1].scatter(z_2d[0, 0], z_2d[0, 1], c='green', s=150, marker='o', 
-                        label='Start', edgecolors='black', linewidth=2, zorder=10)
-        axs[0, 1].scatter(z_2d[-1, 0], z_2d[-1, 1], c='red', s=150, marker='s', 
-                        label='End', edgecolors='black', linewidth=2, zorder=10)
-        
-        # Add colorbar
-        cbar = plt.colorbar(trajectory_scatter, ax=axs[0, 1], shrink=0.8)
-        cbar.set_label('Loss', rotation=270, labelpad=20)
-        
-        axs[0, 1].set_title('Latent Trajectory (t-SNE)')
-        axs[0, 1].legend()
-        axs[0, 1].grid(True, alpha=0.3)
+            
+            trajectory_scatter = axs[0, 1].scatter(z_2d[:, 0], z_2d[:, 1], c=losses, cmap='plasma', 
+                                                 s=80, alpha=0.9, edgecolors='black', linewidth=1)
+            axs[0, 1].set_title('Latent Trajectory (Independent t-SNE)')
     else:
         axs[0, 1].text(0.5, 0.5, 'No trajectory data', 
                       ha='center', va='center', transform=axs[0, 1].transAxes)
         axs[0, 1].set_title('Latent Trajectory')
     
-    # Generate reconstructions for different trajectory steps
-    if z_vectors and len(z_vectors) > 0:
-        input_tensor = torch.tensor(input_seq).unsqueeze(0).to(device).float()
-        target_tensor = torch.tensor(target_seq).unsqueeze(0).to(device).float()
+    # Use safe extraction to avoid scalar conversion errors
+    extract_reconstruction_grid = safe_extract_reconstruction_grid
+
+    # Use stored reconstructions for different trajectory steps
+    trajectory_reconstructions = trajectory_info.get('poe_trajectory_reconstructions', {})
+    if trajectory_reconstructions:
+        reconstruction_labels = ['initial', 'middle', 'final']
+        display_labels = ['Start', 'Mid', 'End']
         
-        model.eval()
-        with torch.no_grad():
-            # Reconstruct at different steps
-            if len(z_vectors) >= 3:
-                indices = [0, len(z_vectors)//2, len(z_vectors)-1]  # Start, middle, end
-                labels = ['Start', 'Mid', 'End']
-            else:
-                indices = list(range(len(z_vectors)))
-                labels = [f'Step {i}' for i in indices]
-            
-            for i, (idx, label) in enumerate(zip(indices, labels)):
-                if i < 3:  # Only 3 slots available
-                    z_step = torch.tensor(z_vectors[idx]).unsqueeze(0).to(device).float()
-                    shape_logits, grid_logits = model.decoder(z_step, input_tensor, target_seq=target_tensor)
+        for i, (recon_label, display_label) in enumerate(zip(reconstruction_labels, display_labels)):
+            if i < 3:  # Only 3 slots available
+                row = 0 if i < 2 else 1
+                col = 2 + (i % 2)
+                
+                if recon_label in trajectory_reconstructions and trajectory_reconstructions[recon_label] is not None:
+                    recon_data = trajectory_reconstructions[recon_label]
+                    shape_logits = recon_data['shape_logits']
+                    grid_logits = recon_data['grid_logits']
                     
-                    shape_array = shape_logits.cpu().numpy()
-                    grid_array = grid_logits.cpu().numpy()
+                    # Extract reconstruction grid from stored data
+                    recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
                     
-                    pred_shapes = np.argmax(shape_array, axis=-1)[0]
-                    pred_grid = np.argmax(grid_array, axis=-1)[0]
-                    
-                    recon_rows, recon_cols = int(pred_shapes[0]), int(pred_shapes[1])
-                    recon_grid = pred_grid.reshape(30, 30)[:recon_rows, :recon_cols]
-                    
-                    row = 0 if i < 2 else 1
-                    col = 2 + (i % 2)
-                    axs[row, col].imshow(recon_grid, cmap='viridis')
-                    axs[row, col].set_title(f'Reconstruction {label}\n{recon_rows}×{recon_cols}')
-                    axs[row, col].axis('off')
+                    if recon_grid is not None:
+                        axs[row, col].imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
+                        axs[row, col].set_title(f'Reconstruction {display_label}\n{recon_rows}×{recon_cols}')
+                    else:
+                        axs[row, col].text(0.5, 0.5, f'Invalid\nDims', ha='center', va='center', 
+                                         transform=axs[row, col].transAxes, fontsize=8)
+                        axs[row, col].set_title(f'Reconstruction {display_label}')
+                else:
+                    axs[row, col].text(0.5, 0.5, f'No Data\n{display_label}', ha='center', va='center', 
+                                     transform=axs[row, col].transAxes, fontsize=8)
+                    axs[row, col].set_title(f'Reconstruction {display_label}')
+                
+                axs[row, col].axis('off')
+    else:
+        # Fallback message for missing reconstruction data
+        for i in range(3):
+            row = 0 if i < 2 else 1
+            col = 2 + (i % 2)
+            axs[row, col].text(0.5, 0.5, 'No Stored\nReconstruction\nData', 
+                             ha='center', va='center', transform=axs[row, col].transAxes)
+            axs[row, col].set_title(f'Reconstruction {i}')
+            axs[row, col].axis('off')
     
     # Loss progression plot
     if losses and len(losses) > 1:
@@ -303,19 +371,24 @@ def visualize_all_samples_comprehensive(trajectory_info_list, model, save_path, 
     else:
         print("Single-encoder model detected")
     
-    # Load training latent data for background
+    # Load training latent data for background with precomputed t-SNE
     print("Loading training latent data for background...")
-    training_latent_data = load_training_latent_data(run_dir)
+    training_latent_data, training_tsne_2d, training_labels, training_colors = load_training_latent_data(run_dir)
     
     # Create figure with expanded layout for multi-encoder
     if is_multi_encoder:
-        fig = plt.figure(figsize=(24, 8 * len(trajectory_info_list)))
-        rows_per_sample = 2
-        cols = 8  # Input/Target | Encoder spaces | PoE space | Reconstructions
-    else:
-        fig = plt.figure(figsize=(20, 6 * len(trajectory_info_list)))
-        rows_per_sample = 1
-        cols = 6  # Input | Target | Latent | 3 Reconstructions
+        # For multi-encoder, use individual visualization for each sample
+        for sample_idx, trajectory_info in enumerate(trajectory_info_list):
+            individual_save_path = save_path.replace('.png', f'_sample_{sample_idx}.png')
+            print(f"Creating individual visualization for sample {sample_idx + 1}")
+            visualize_multi_encoder_comprehensive_trajectory(trajectory_info, model, individual_save_path, run_dir, device)
+        print(f"Created {len(trajectory_info_list)} individual multi-encoder visualizations")
+        return
+        
+    # Single encoder layout - simpler
+    fig = plt.figure(figsize=(20, 6 * len(trajectory_info_list)))
+    rows_per_sample = 1
+    cols = 6  # Input | Target | Latent | 3 Reconstructions
     
     total_rows = rows_per_sample * len(trajectory_info_list)
     
@@ -325,285 +398,106 @@ def visualize_all_samples_comprehensive(trajectory_info_list, model, save_path, 
         # Calculate row indices for this sample
         start_row = sample_idx * rows_per_sample
         
-        if is_multi_encoder:
-            # Multi-encoder layout
-            # Row 1: Input | Encoder latent spaces | PoE latent
-            # Row 2: Target | Encoder reconstructions | PoE reconstructions
-            
-            gs = fig.add_gridspec(total_rows, cols, 
-                                height_ratios=[1] * total_rows,
-                                width_ratios=[1, 1.5, 1.5, 1.5, 1, 1, 1, 1])
-            
-            # Input and Target
-            ax_input = fig.add_subplot(gs[start_row, 0])
-            ax_target = fig.add_subplot(gs[start_row + 1, 0])
-            
-            input_grid, input_shape = extract_grid_from_sequence(trajectory_info['input_sample'])
-            target_grid, target_shape = extract_grid_from_sequence(trajectory_info['target_sample'])
-            
-            ax_input.imshow(input_grid, cmap='viridis')
-            ax_input.set_title(f'Sample {sample_idx + 1} Input\n{input_shape[0]}×{input_shape[1]}')
-            ax_input.axis('off')
-            
-            ax_target.imshow(target_grid, cmap='viridis')
-            ax_target.set_title(f'Target\n{target_shape[0]}×{target_shape[1]}')
-            ax_target.axis('off')
-            
-            # Individual encoder latent spaces (columns 1-4, top row)
-            individual_trajectories = trajectory_info.get('individual_encoder_trajectories', {})
-            
-            for enc_idx in range(min(num_encoders, 3)):  # Limit to 3 encoders for layout
-                ax_enc_latent = fig.add_subplot(gs[start_row, enc_idx + 1])
-                
-                encoder_key = f'encoder_{enc_idx}'
-                if encoder_key in individual_trajectories:
-                    enc_data = individual_trajectories[encoder_key]
-                    enc_z = enc_data['z']
-                    
-                    if training_latent_data is not None:
-                        # Show encoder point in context of training data
-                        enc_z_flat = enc_z.flatten().reshape(1, -1)
-                        combined_data = np.vstack([training_latent_data, enc_z_flat])
-                        
-                        scaler = StandardScaler()
-                        combined_data_scaled = scaler.fit_transform(combined_data)
-                        
-                        tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(combined_data)-1), n_iter=1000)
-                        combined_2d = tsne.fit_transform(combined_data_scaled)
-                        
-                        training_2d = combined_2d[:-1]
-                        enc_2d = combined_2d[-1:]
-                        
-                        # Plot training background
-                        ax_enc_latent.scatter(training_2d[:, 0], training_2d[:, 1],
-                                            c=np.arange(len(training_2d)), cmap='viridis', 
-                                            alpha=0.3, s=10, edgecolors='none')
-                        
-                        # Plot encoder point
-                        ax_enc_latent.scatter(enc_2d[0, 0], enc_2d[0, 1], c='red', s=50, marker='o', 
-                                            edgecolors='black', linewidth=1, zorder=10)
-                    
-                    ax_enc_latent.set_title(f'Encoder {enc_idx}')
-                    ax_enc_latent.grid(True, alpha=0.3)
-                else:
-                    ax_enc_latent.text(0.5, 0.5, f'Enc {enc_idx}\nNo Data', 
-                                     ha='center', va='center', transform=ax_enc_latent.transAxes)
-                    ax_enc_latent.set_title(f'Encoder {enc_idx}')
-            
-            # PoE latent trajectory (column 4, top row)
-            ax_poe_latent = fig.add_subplot(gs[start_row, 4])
-            
-            z_vectors = trajectory_info['z_vectors']
-            losses = trajectory_info['losses']
-            
-            if z_vectors and len(z_vectors) >= 2:
-                z_array = np.array(z_vectors)
-                
-                if training_latent_data is not None:
-                    combined_data = np.vstack([training_latent_data, z_array])
-                    scaler = StandardScaler()
-                    combined_data_scaled = scaler.fit_transform(combined_data)
-                    
-                    tsne = TSNE(n_components=2, random_state=42, perplexity=30, n_iter=1000)
-                    combined_2d = tsne.fit_transform(combined_data_scaled)
-                    
-                    n_training = training_latent_data.shape[0]
-                    training_2d = combined_2d[:n_training]
-                    z_2d = combined_2d[n_training:]
-                    
-                    # Plot training background
-                    ax_poe_latent.scatter(training_2d[:, 0], training_2d[:, 1],
-                                        c=np.arange(len(training_2d)), cmap='viridis', 
-                                        alpha=0.3, s=10, edgecolors='none')
-                else:
-                    scaler = StandardScaler()
-                    z_array_normalized = scaler.fit_transform(z_array)
-                    tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(z_array)-1), n_iter=1000)
-                    z_2d = tsne.fit_transform(z_array_normalized)
-                
-                # Plot PoE trajectory
-                trajectory_scatter = ax_poe_latent.scatter(z_2d[:, 0], z_2d[:, 1], c=losses, cmap='plasma', 
-                                                         s=40, alpha=0.9, edgecolors='black', linewidth=0.5)
-                
-                # Draw arrows
-                for i in range(len(z_2d) - 1):
-                    ax_poe_latent.annotate('', xy=z_2d[i+1], xytext=z_2d[i],
-                                         arrowprops=dict(arrowstyle='->', color='red', alpha=0.8, lw=1))
-                
-                ax_poe_latent.set_title('PoE Trajectory')
-                ax_poe_latent.grid(True, alpha=0.3)
-            else:
-                ax_poe_latent.text(0.5, 0.5, 'No PoE\nTrajectory', 
-                                 ha='center', va='center', transform=ax_poe_latent.transAxes)
-                ax_poe_latent.set_title('PoE Trajectory')
-            
-            # Bottom row: Reconstructions
-            input_tensor = torch.tensor(trajectory_info['input_sample']).unsqueeze(0).to(device).float()
-            target_tensor = torch.tensor(trajectory_info['target_sample']).unsqueeze(0).to(device).float()
-            
-            model.eval()
-            with torch.no_grad():
-                # Individual encoder reconstructions (columns 1-3, bottom row)
-                for enc_idx in range(min(num_encoders, 3)):
-                    ax_enc_recon = fig.add_subplot(gs[start_row + 1, enc_idx + 1])
-                    
-                    encoder_key = f'encoder_{enc_idx}'
-                    if encoder_key in individual_trajectories:
-                        enc_data = individual_trajectories[encoder_key]
-                        enc_z = torch.tensor(enc_data['z']).to(device).float()
-                        
-                        enc_shape_logits, enc_grid_logits = model.multi_encoder.decoder(
-                            enc_z, input_tensor, target_seq=target_tensor
-                        )
-                        
-                        shape_array = enc_shape_logits.cpu().numpy()
-                        grid_array = enc_grid_logits.cpu().numpy()
-                        
-                        pred_shapes = np.argmax(shape_array, axis=-1)[0]
-                        pred_grid = np.argmax(grid_array, axis=-1)[0]
-                        
-                        recon_rows, recon_cols = int(pred_shapes[0]), int(pred_shapes[1])
-                        recon_grid = pred_grid.reshape(30, 30)[:recon_rows, :recon_cols]
-                        
-                        ax_enc_recon.imshow(recon_grid, cmap='viridis')
-                        ax_enc_recon.set_title(f'Enc {enc_idx} Recon\n{recon_rows}×{recon_cols}')
-                        ax_enc_recon.axis('off')
-                    else:
-                        ax_enc_recon.text(0.5, 0.5, f'Enc {enc_idx}\nNo Recon', 
-                                        ha='center', va='center', transform=ax_enc_recon.transAxes)
-                        ax_enc_recon.set_title(f'Enc {enc_idx} Recon')
-                        ax_enc_recon.axis('off')
-                
-                # PoE reconstructions (columns 4-7, bottom row)
-                if z_vectors and len(z_vectors) > 0:
-                    if len(z_vectors) >= 3:
-                        indices = [0, len(z_vectors)//2, len(z_vectors)-1]
-                        labels = ['Start', 'Mid', 'End']
-                    else:
-                        indices = list(range(len(z_vectors)))
-                        labels = [f'Step {i}' for i in indices]
-                    
-                    for i, (idx, label) in enumerate(zip(indices, labels)):
-                        if i < 4:  # Columns 4-7
-                            ax_poe_recon = fig.add_subplot(gs[start_row + 1, 4 + i])
-                            
-                            z_step = torch.tensor(z_vectors[idx]).unsqueeze(0).to(device).float()
-                            shape_logits, grid_logits = model.multi_encoder.decoder(
-                                z_step, input_tensor, target_seq=target_tensor
-                            )
-                            
-                            shape_array = shape_logits.cpu().numpy()
-                            grid_array = grid_logits.cpu().numpy()
-                            
-                            pred_shapes = np.argmax(shape_array, axis=-1)[0]
-                            pred_grid = np.argmax(grid_array, axis=-1)[0]
-                            
-                            recon_rows, recon_cols = int(pred_shapes[0]), int(pred_shapes[1])
-                            recon_grid = pred_grid.reshape(30, 30)[:recon_rows, :recon_cols]
-                            
-                            ax_poe_recon.imshow(recon_grid, cmap='viridis')
-                            ax_poe_recon.set_title(f'PoE {label}\n{recon_rows}×{recon_cols}')
-                            ax_poe_recon.axis('off')
+        # Single encoder layout - simpler
+        gs = fig.add_gridspec(total_rows, cols, height_ratios=[1] * total_rows)
         
-        else:
-            # Single encoder layout - simpler
-            gs = fig.add_gridspec(total_rows, cols, height_ratios=[1] * total_rows)
-            
-            # Input, Target, Latent trajectory, 3 reconstructions
-            ax_input = fig.add_subplot(gs[start_row, 0])
-            ax_target = fig.add_subplot(gs[start_row, 1])
-            ax_latent = fig.add_subplot(gs[start_row, 2])
-            
-            input_grid, input_shape = extract_grid_from_sequence(trajectory_info['input_sample'])
-            target_grid, target_shape = extract_grid_from_sequence(trajectory_info['target_sample'])
-            
-            ax_input.imshow(input_grid, cmap='viridis')
-            ax_input.set_title(f'Sample {sample_idx + 1} Input\n{input_shape[0]}×{input_shape[1]}')
-            ax_input.axis('off')
-            
-            ax_target.imshow(target_grid, cmap='viridis')
-            ax_target.set_title(f'Target\n{target_shape[0]}×{target_shape[1]}')
-            ax_target.axis('off')
-            
-            # Plot latent trajectory
-            z_vectors = trajectory_info['z_vectors']
-            losses = trajectory_info['losses']
-            
-            if z_vectors and len(z_vectors) >= 2:
-                z_array = np.array(z_vectors)
+        # Input, Target, Latent trajectory, 3 reconstructions
+        ax_input = fig.add_subplot(gs[start_row, 0])
+        ax_target = fig.add_subplot(gs[start_row, 1])
+        ax_latent = fig.add_subplot(gs[start_row, 2])
+        
+        input_grid, input_shape = extract_grid_from_sequence(trajectory_info['input_sample'])
+        target_grid, target_shape = extract_grid_from_sequence(trajectory_info['target_sample'])
+        
+        ax_input.imshow(input_grid, cmap='viridis')
+        ax_input.set_title(f'Sample {sample_idx + 1} Input\n{input_shape[0]}×{input_shape[1]}')
+        ax_input.axis('off')
+        
+        ax_target.imshow(target_grid, cmap='viridis')
+        ax_target.set_title(f'Target\n{target_shape[0]}×{target_shape[1]}')
+        ax_target.axis('off')
+        
+        # Plot latent trajectory using consistent t-SNE
+        z_vectors = trajectory_info['z_vectors']
+        losses = trajectory_info['losses']
+        
+        if z_vectors and len(z_vectors) >= 2:
+            if training_latent_data is not None and training_tsne_2d is not None:
+                # Plot training background using precomputed coordinates
+                ax_latent.scatter(training_tsne_2d[:, 0], training_tsne_2d[:, 1],
+                                c='lightgray', alpha=0.3, s=10, edgecolors='none')
                 
-                if training_latent_data is not None:
-                    combined_data = np.vstack([training_latent_data, z_array])
-                    scaler = StandardScaler()
-                    combined_data_scaled = scaler.fit_transform(combined_data)
+                # Map trajectory to consistent t-SNE space
+                z_2d = find_trajectory_points_in_tsne_space(z_vectors, training_latent_data, training_tsne_2d, training_labels)
+                
+                if z_2d is not None:
+                    ax_latent.scatter(z_2d[:, 0], z_2d[:, 1], c=losses, cmap='plasma', 
+                                    s=40, alpha=0.9, edgecolors='black', linewidth=0.5)
                     
-                    tsne = TSNE(n_components=2, random_state=42, perplexity=30, n_iter=1000)
-                    combined_2d = tsne.fit_transform(combined_data_scaled)
+                    for i in range(len(z_2d) - 1):
+                        ax_latent.annotate('', xy=z_2d[i+1], xytext=z_2d[i],
+                                         arrowprops=dict(arrowstyle='->', color='red', alpha=0.8, lw=1))
                     
-                    n_training = training_latent_data.shape[0]
-                    training_2d = combined_2d[:n_training]
-                    z_2d = combined_2d[n_training:]
-                    
-                    # Plot training background
-                    ax_latent.scatter(training_2d[:, 0], training_2d[:, 1],
-                                    c=np.arange(len(training_2d)), cmap='viridis', 
-                                    alpha=0.3, s=10, edgecolors='none')
+                    ax_latent.set_title('Latent Trajectory (Consistent)')
                 else:
-                    scaler = StandardScaler()
-                    z_array_normalized = scaler.fit_transform(z_array)
-                    tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(z_array)-1), n_iter=1000)
-                    z_2d = tsne.fit_transform(z_array_normalized)
-                
-                # Plot trajectory
-                ax_latent.scatter(z_2d[:, 0], z_2d[:, 1], c=losses, cmap='plasma', 
-                                s=40, alpha=0.9, edgecolors='black', linewidth=0.5)
-                
-                for i in range(len(z_2d) - 1):
-                    ax_latent.annotate('', xy=z_2d[i+1], xytext=z_2d[i],
-                                     arrowprops=dict(arrowstyle='->', color='red', alpha=0.8, lw=1))
-                
-                ax_latent.set_title('Latent Trajectory')
-                ax_latent.grid(True, alpha=0.3)
+                    ax_latent.text(0.5, 0.5, 'Mapping Error', 
+                                 ha='center', va='center', transform=ax_latent.transAxes)
+                    ax_latent.set_title('Latent Trajectory (Error)')
             else:
-                ax_latent.text(0.5, 0.5, 'No trajectory', 
+                ax_latent.text(0.5, 0.5, 'No background data', 
                              ha='center', va='center', transform=ax_latent.transAxes)
                 ax_latent.set_title('Latent Trajectory')
             
-            # Reconstructions
-            if z_vectors and len(z_vectors) > 0:
-                input_tensor = torch.tensor(trajectory_info['input_sample']).unsqueeze(0).to(device).float()
-                target_tensor = torch.tensor(trajectory_info['target_sample']).unsqueeze(0).to(device).float()
-                
-                model.eval()
-                with torch.no_grad():
-                    if len(z_vectors) >= 3:
-                        indices = [0, len(z_vectors)//2, len(z_vectors)-1]
-                        labels = ['Start', 'Mid', 'End']
-                    else:
-                        indices = list(range(len(z_vectors)))
-                        labels = [f'Step {i}' for i in indices]
+            ax_latent.grid(True, alpha=0.3)
+        else:
+            ax_latent.text(0.5, 0.5, 'No trajectory', 
+                         ha='center', va='center', transform=ax_latent.transAxes)
+            ax_latent.set_title('Latent Trajectory')
+        
+        # Use safe extraction to avoid scalar conversion errors
+        extract_reconstruction_grid = safe_extract_reconstruction_grid
+
+        # Use stored reconstructions for different trajectory steps
+        trajectory_reconstructions = trajectory_info.get('poe_trajectory_reconstructions', {})
+        if trajectory_reconstructions:
+            reconstruction_labels = ['initial', 'middle', 'final']
+            display_labels = ['Start', 'Mid', 'End']
+            
+            for i, (recon_label, display_label) in enumerate(zip(reconstruction_labels, display_labels)):
+                if i < 3:  # Columns 3-5
+                    ax_recon = fig.add_subplot(gs[start_row, 3 + i])
                     
-                    for i, (idx, label) in enumerate(zip(indices, labels)):
-                        if i < 3:  # Columns 3-5
-                            ax_recon = fig.add_subplot(gs[start_row, 3 + i])
-                            
-                            z_step = torch.tensor(z_vectors[idx]).unsqueeze(0).to(device).float()
-                            shape_logits, grid_logits = model.decoder(z_step, input_tensor, target_seq=target_tensor)
-                            
-                            shape_array = shape_logits.cpu().numpy()
-                            grid_array = grid_logits.cpu().numpy()
-                            
-                            pred_shapes = np.argmax(shape_array, axis=-1)[0]
-                            pred_grid = np.argmax(grid_array, axis=-1)[0]
-                            
-                            recon_rows, recon_cols = int(pred_shapes[0]), int(pred_shapes[1])
-                            recon_grid = pred_grid.reshape(30, 30)[:recon_rows, :recon_cols]
-                            
-                            ax_recon.imshow(recon_grid, cmap='viridis')
-                            ax_recon.set_title(f'{label}\n{recon_rows}×{recon_cols}')
-                            ax_recon.axis('off')
+                    if recon_label in trajectory_reconstructions and trajectory_reconstructions[recon_label] is not None:
+                        recon_data = trajectory_reconstructions[recon_label]
+                        shape_logits = recon_data['shape_logits']
+                        grid_logits = recon_data['grid_logits']
+                        
+                        # Extract reconstruction grid from stored data
+                        recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
+                        
+                        if recon_grid is not None:
+                            ax_recon.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
+                            ax_recon.set_title(f'{display_label}\n{recon_rows}×{recon_cols}')
+                        else:
+                            ax_recon.text(0.5, 0.5, f'Invalid\nDims', ha='center', va='center', 
+                                        transform=ax_recon.transAxes, fontsize=8)
+                            ax_recon.set_title(f'{display_label}')
+                    else:
+                        ax_recon.text(0.5, 0.5, f'No Data\n{display_label}', ha='center', va='center', 
+                                    transform=ax_recon.transAxes, fontsize=8)
+                        ax_recon.set_title(f'{display_label}')
+                    
+                    ax_recon.axis('off')
+        else:
+            # Fallback message for missing reconstruction data
+            for i in range(3):
+                ax_recon = fig.add_subplot(gs[start_row, 3 + i])
+                ax_recon.text(0.5, 0.5, 'No Stored\nReconstruction\nData', 
+                            ha='center', va='center', transform=ax_recon.transAxes)
+                ax_recon.set_title(f'Reconstruction {i}')
+                ax_recon.axis('off')
     
-    title = f'{"Multi-Encoder" if is_multi_encoder else "Single-Encoder"} Trajectory Analysis - All Samples'
+    title = f'Single-Encoder Trajectory Analysis - All Samples'
     plt.suptitle(title, fontsize=16)
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
@@ -617,9 +511,9 @@ def visualize_multi_encoder_comprehensive_trajectory(trajectory_info, model, sav
     - Input/Target grids
     - Individual encoder latent trajectories
     - PoE latent trajectory 
-    - Individual encoder reconstructions (using pre-computed data from evaluation if available)
-    - PoE reconstructions (using pre-computed data from evaluation if available)
-    All with training background in latent space.
+    - Individual encoder reconstructions (from stored data)
+    - PoE reconstructions (from stored data)
+    All with training background in latent space using consistent t-SNE coordinates.
     """
     if not trajectory_info.get('is_multi_encoder', False):
         print("Warning: This function is for multi-encoder models only.")
@@ -628,108 +522,72 @@ def visualize_multi_encoder_comprehensive_trajectory(trajectory_info, model, sav
     num_encoders = trajectory_info.get('num_encoders', 1)
     print(f"Creating multi-encoder visualization for {num_encoders} encoders...")
     
-    # Load training latent data for background
+    # Load training latent data for background with precomputed t-SNE
     print("Loading training latent data for background visualization...")
-    training_latent_data = load_training_latent_data(run_dir)
+    training_latent_data, training_tsne_2d, training_labels, training_colors = load_training_latent_data(run_dir)
+
+    # Create figure with optimized layout
+    fig = plt.figure(figsize=(20, 15))
     
-    # Create figure with expanded layout for multi-encoder
-    fig = plt.figure(figsize=(24, 12))
-    
-    # Define grid layout: 
-    # Row 1: Input/Target | Merged Latent Space (Training + Encoders + PoE Trajectory)
-    # Row 2: Individual Encoder Reconstructions | PoE Reconstructions  
-    gs = fig.add_gridspec(2, 8, width_ratios=[1, 1, 1, 1, 1, 1, 1, 1], height_ratios=[1, 1])
+    # Define grid layout: 3 rows, 8 columns
+    # Row 0: Input | Merged Latent Space (5 cols) | Loss Plot (2 cols)
+    # Row 1: Target | Individual Encoder Reconstructions (4 cols) | PoE Reconstructions (3 cols)
+    # Row 2: Error | Individual Encoder Error Maps (4 cols) | PoE Error Maps (3 cols)
+    gs = fig.add_gridspec(3, 8, width_ratios=[1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1], height_ratios=[1, 1.5, 1.5])
     
     # Input and Target (left column)
     ax_input = fig.add_subplot(gs[0, 0])
     ax_target = fig.add_subplot(gs[1, 0])
+    ax_error_label = fig.add_subplot(gs[2, 0])
     
     input_grid, input_shape = extract_grid_from_sequence(trajectory_info['input_sample'])
-    im_input = ax_input.imshow(input_grid, cmap='viridis')
-    ax_input.set_title(f'Input\n{input_shape[0]}×{input_shape[1]}')
+    ax_input.imshow(input_grid, cmap='viridis', interpolation='nearest', aspect='equal')
+    ax_input.set_title(f'Input\n{input_shape[0]}×{input_shape[1]}', fontsize=12, fontweight='bold')
     ax_input.axis('off')
     
     target_grid, target_shape = extract_grid_from_sequence(trajectory_info['target_sample'])
-    im_target = ax_target.imshow(target_grid, cmap='viridis')
-    ax_target.set_title(f'Target\n{target_shape[0]}×{target_shape[1]}')
+    ax_target.imshow(target_grid, cmap='viridis', interpolation='nearest', aspect='equal')
+    ax_target.set_title(f'Target\n{target_shape[0]}×{target_shape[1]}', fontsize=12, fontweight='bold')
     ax_target.axis('off')
     
-    # Merged latent space visualization (columns 1-5, top row)
+    ax_error_label.text(0.5, 0.5, 'Error Maps\n(Pred - Target)', ha='center', va='center', 
+                       transform=ax_error_label.transAxes, fontsize=10, fontweight='bold')
+    ax_error_label.axis('off')
+    
+    # Merged latent space visualization using consistent t-SNE
     ax_merged_latent = fig.add_subplot(gs[0, 1:6])
+    ax_loss = fig.add_subplot(gs[0, 6:8])
     
     individual_trajectories = trajectory_info.get('individual_encoder_trajectories', {})
     z_vectors = trajectory_info['z_vectors']
     losses = trajectory_info['losses']
     
-    if training_latent_data is not None and z_vectors and len(z_vectors) >= 2:
-        try:
-            from sklearn.manifold import TSNE
-            from sklearn.preprocessing import StandardScaler
-            
-            # Collect all individual encoder z vectors
-            encoder_zs = []
-            encoder_colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray']
-            encoder_markers = ['o', 's', '^', 'D', 'v', '<', '>', 'h']
-            
-            for enc_idx in range(num_encoders):
-                encoder_key = f'encoder_{enc_idx}'
-                if encoder_key in individual_trajectories:
-                    enc_data = individual_trajectories[encoder_key]
-                    enc_z = enc_data['z'].flatten().reshape(1, -1)
-                    encoder_zs.append(enc_z)
-            
-            # Prepare PoE trajectory data
-            z_array = np.array(z_vectors)
-            
-            # Combine ALL data for consistent t-SNE: training + individual encoders + PoE trajectory
-            all_data_for_tsne = [training_latent_data]
-            
-            # Add individual encoder points
-            for enc_z in encoder_zs:
-                all_data_for_tsne.append(enc_z)
-            
-            # Add PoE trajectory
-            all_data_for_tsne.append(z_array)
-            
-            combined_data = np.vstack(all_data_for_tsne)
-            
-            # Apply StandardScaler and t-SNE
-            scaler = StandardScaler()
-            combined_data_scaled = scaler.fit_transform(combined_data)
-            
-            tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(combined_data)//4), n_iter=1000)
-            combined_2d = tsne.fit_transform(combined_data_scaled)
-            
-            # Split the results back
-            n_training = training_latent_data.shape[0]
-            training_2d = combined_2d[:n_training]
-            
-            current_idx = n_training
-            encoder_2d_points = []
-            for enc_z in encoder_zs:
-                enc_2d = combined_2d[current_idx:current_idx + len(enc_z)]
-                encoder_2d_points.append(enc_2d)
-                current_idx += len(enc_z)
-            
-            z_2d = combined_2d[current_idx:current_idx + len(z_array)]
-            
-            # Plot training background
-            ax_merged_latent.scatter(training_2d[:, 0], training_2d[:, 1],
+    if training_latent_data is not None and training_tsne_2d is not None:
+        # Plot training background using precomputed coordinates
+        if training_colors is not None and training_labels is not None:
+            # Use the existing colors from comprehensive latent data
+            unique_labels = list(set(training_labels))
+            for label in unique_labels:
+                indices = [i for i, l in enumerate(training_labels) if l == label]
+                if indices:
+                    x_coords = training_tsne_2d[indices, 0]
+                    y_coords = training_tsne_2d[indices, 1]
+                    color = training_colors[indices[0]]  # Get color for this class
+                    
+                    # Use alpha for background effect
+                    ax_merged_latent.scatter(x_coords, y_coords, c=color, alpha=0.3, s=12, 
+                                           edgecolors='none', label=f'Training {label.replace("training_enc_", "Enc ")}')
+        else:
+            # Fallback to gray
+            ax_merged_latent.scatter(training_tsne_2d[:, 0], training_tsne_2d[:, 1],
                                    c='lightgray', alpha=0.4, s=15, edgecolors='none', 
                                    label='Training Data')
+        
+        # Plot PoE trajectory using consistent mapping
+        if z_vectors and len(z_vectors) >= 2:
+            z_2d = find_trajectory_points_in_tsne_space(z_vectors, training_latent_data, training_tsne_2d, training_labels)
             
-            # Plot individual encoder initial estimates
-            for enc_idx, enc_2d in enumerate(encoder_2d_points):
-                if len(enc_2d) > 0:
-                    color = encoder_colors[enc_idx % len(encoder_colors)]
-                    marker = encoder_markers[enc_idx % len(encoder_markers)]
-                    ax_merged_latent.scatter(enc_2d[0, 0], enc_2d[0, 1], 
-                                           c=color, s=150, marker=marker,
-                                           label=f'Encoder {enc_idx}', 
-                                           edgecolors='black', linewidth=2, zorder=10)
-            
-            # Plot PoE trajectory
-            if len(z_2d) >= 2:
+            if z_2d is not None:
                 # Draw trajectory path
                 ax_merged_latent.plot(z_2d[:, 0], z_2d[:, 1], 'k-', alpha=0.7, linewidth=2, 
                                     label='PoE Trajectory Path')
@@ -752,186 +610,160 @@ def visualize_multi_encoder_comprehensive_trajectory(trajectory_info, model, sav
                                        label='PoE Start', edgecolors='black', linewidth=2, zorder=11)
                 ax_merged_latent.scatter(z_2d[-1, 0], z_2d[-1, 1], c='red', s=200, marker='X', 
                                        label='PoE End', edgecolors='black', linewidth=2, zorder=11)
-                
-                # Add colorbar for trajectory losses
-                cbar = plt.colorbar(trajectory_scatter, ax=ax_merged_latent, shrink=0.6)
-                cbar.set_label('PoE Loss', rotation=270, labelpad=20)
-            
-            ax_merged_latent.set_title('Merged Latent Space:\nTraining Data + Individual Encoders + PoE Trajectory', fontsize=12)
-            ax_merged_latent.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-            ax_merged_latent.grid(True, alpha=0.3)
-            
-        except ImportError:
-            print("Warning: sklearn not available for t-SNE visualization")
-            ax_merged_latent.text(0.5, 0.5, 'sklearn required\nfor t-SNE visualization', 
-                                ha='center', va='center', transform=ax_merged_latent.transAxes)
-            ax_merged_latent.set_title('Merged Latent Space (Error)')
-        except Exception as e:
-            print(f"Warning: Error creating merged latent space visualization: {e}")
-            ax_merged_latent.text(0.5, 0.5, f'Error creating\nmerged visualization:\n{str(e)[:50]}...', 
-                                ha='center', va='center', transform=ax_merged_latent.transAxes)
-            ax_merged_latent.set_title('Merged Latent Space (Error)')
+        
+        ax_merged_latent.set_title('Consistent Latent Space:\nTraining Data + PoE Trajectory Only', fontsize=12)
+        ax_merged_latent.legend(loc='upper right', fontsize=8, frameon=True, fancybox=True, 
+                               shadow=True, framealpha=0.9, bbox_to_anchor=(0.98, 0.98))
+        ax_merged_latent.grid(True, alpha=0.3)
     else:
-        ax_merged_latent.text(0.5, 0.5, 'Insufficient data\nfor merged visualization', 
+        ax_merged_latent.text(0.5, 0.5, 'No precomputed\nt-SNE data available', 
                             ha='center', va='center', transform=ax_merged_latent.transAxes)
-        ax_merged_latent.set_title('Merged Latent Space')
+        ax_merged_latent.set_title('Consistent Latent Space (No Data)')
     
-    # Bottom row: Reconstructions
-    # Individual encoder reconstructions (columns 1-4, bottom row)
-    input_tensor = torch.tensor(trajectory_info['input_sample']).unsqueeze(0).to(device).float()
-    target_tensor = torch.tensor(trajectory_info['target_sample']).unsqueeze(0).to(device).float()
+    # Plot optimization losses
+    if losses and len(losses) > 1:
+        steps = list(range(len(losses)))
+        ax_loss.plot(steps, losses, 'b-', marker='o', linewidth=2, markersize=4)
+        ax_loss.set_title('Optimization Losses', fontsize=12)
+        ax_loss.set_xlabel('Step')
+        ax_loss.set_ylabel('Loss')
+        ax_loss.grid(True, alpha=0.3)
+        
+        # Add start/end annotations
+        ax_loss.annotate(f'Start: {losses[0]:.3f}', xy=(0, losses[0]), 
+                       xytext=(5, 5), textcoords='offset points', fontsize=8)
+        ax_loss.annotate(f'End: {losses[-1]:.3f}', xy=(len(losses)-1, losses[-1]), 
+                       xytext=(5, -15), textcoords='offset points', fontsize=8)
+    else:
+        ax_loss.text(0.5, 0.5, 'No Loss\nData', 
+                    ha='center', va='center', transform=ax_loss.transAxes)
+        ax_loss.set_title('Optimization Losses')
     
-    model.eval()
-    with torch.no_grad():
-        # Individual encoder reconstructions - use pre-computed if available
-        pre_computed_reconstructions = trajectory_info.get('individual_encoder_reconstructions', {})
+    # Use safe extraction to avoid scalar conversion errors
+    extract_reconstruction_grid = safe_extract_reconstruction_grid
+    
+    # Individual encoder reconstructions (row 1, columns 1-4) - USE STORED DATA
+    individual_reconstructions = trajectory_info.get('individual_encoder_reconstructions', {})
+    for enc_idx in range(min(num_encoders, 4)):  # Limit to 4 encoders for layout
+        ax_enc_recon = fig.add_subplot(gs[1, enc_idx + 1])
+        ax_enc_error = fig.add_subplot(gs[2, enc_idx + 1])
         
-        for enc_idx in range(min(num_encoders, 4)):
-            ax_enc_recon = fig.add_subplot(gs[1, enc_idx + 1])
+        encoder_key = f'encoder_{enc_idx}'
+        if encoder_key in individual_reconstructions and individual_reconstructions[encoder_key] is not None:
+            enc_recon_data = individual_reconstructions[encoder_key]
+            shape_logits = enc_recon_data['shape_logits']
+            grid_logits = enc_recon_data['grid_logits']
             
-            encoder_key = f'encoder_{enc_idx}'
+            # Extract reconstruction grid from stored data
+            recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
             
-            # Try to use pre-computed reconstruction first
-            if encoder_key in pre_computed_reconstructions and pre_computed_reconstructions[encoder_key] is not None:
-                try:
-                    pre_computed = pre_computed_reconstructions[encoder_key]
-                    shape_array = pre_computed['shape_logits']
-                    grid_array = pre_computed['grid_logits']
-                    
-                    pred_shapes = np.argmax(shape_array, axis=-1)[0]
-                    pred_grid = np.argmax(grid_array, axis=-1)[0]
-                    
-                    recon_rows, recon_cols = int(pred_shapes[0]), int(pred_shapes[1])
-                    recon_grid = pred_grid.reshape(30, 30)[:recon_rows, :recon_cols]
-                    
-                    ax_enc_recon.imshow(recon_grid, cmap='viridis')
-                    ax_enc_recon.set_title(f'Enc {enc_idx} Recon\n{recon_rows}×{recon_cols} (cached)')
-                    ax_enc_recon.axis('off')
-                    continue
-                except Exception as e:
-                    print(f"Warning: Could not use pre-computed reconstruction for encoder {enc_idx}: {e}")
-            
-            # Fallback to computing reconstruction on the fly
-            if encoder_key in individual_trajectories:
-                try:
-                    enc_data = individual_trajectories[encoder_key]
-                    enc_z = torch.tensor(enc_data['z']).to(device).float()
-                    
-                    # Get individual encoder reconstruction
-                    enc_shape_logits, enc_grid_logits = model.multi_encoder.decoder(
-                        enc_z, input_tensor, target_seq=target_tensor
-                    )
-                    
-                    # Process reconstruction
-                    shape_array = enc_shape_logits.cpu().numpy()
-                    grid_array = enc_grid_logits.cpu().numpy()
-                    
-                    pred_shapes = np.argmax(shape_array, axis=-1)[0]
-                    pred_grid = np.argmax(grid_array, axis=-1)[0]
-                    
-                    recon_rows, recon_cols = int(pred_shapes[0]), int(pred_shapes[1])
-                    recon_grid = pred_grid.reshape(30, 30)[:recon_rows, :recon_cols]
-                    
-                    ax_enc_recon.imshow(recon_grid, cmap='viridis')
-                    ax_enc_recon.set_title(f'Enc {enc_idx} Recon\n{recon_rows}×{recon_cols}')
-                    ax_enc_recon.axis('off')
-                except Exception as e:
-                    print(f"Warning: Could not compute reconstruction for encoder {enc_idx}: {e}")
-                    ax_enc_recon.text(0.5, 0.5, f'Enc {enc_idx}\nRecon Error', 
-                                    ha='center', va='center', transform=ax_enc_recon.transAxes)
-                    ax_enc_recon.set_title(f'Enc {enc_idx} Recon')
-                    ax_enc_recon.axis('off')
-            else:
-                ax_enc_recon.text(0.5, 0.5, f'Enc {enc_idx}\nNo Recon', 
-                                ha='center', va='center', transform=ax_enc_recon.transAxes)
-                ax_enc_recon.set_title(f'Enc {enc_idx} Recon')
-                ax_enc_recon.axis('off')
-        
-        # PoE reconstructions at different trajectory steps (columns 5-7, bottom row)
-        # Try to use pre-computed PoE reconstructions first
-        pre_computed_poe = trajectory_info.get('poe_trajectory_reconstructions', {})
-        
-        if pre_computed_poe and len(pre_computed_poe) >= 3:
-            # Use pre-computed reconstructions
-            for i, (label, recon_data) in enumerate(list(pre_computed_poe.items())[:3]):
-                ax_poe_recon = fig.add_subplot(gs[1, 5 + i])
+            if recon_grid is not None:
+                # Plot reconstruction
+                ax_enc_recon.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
+                ax_enc_recon.set_title(f'Encoder {enc_idx}\n{recon_rows}×{recon_cols}', fontsize=10)
                 
-                if recon_data is not None:
-                    try:
-                        shape_array = recon_data['shape_logits']
-                        grid_array = recon_data['grid_logits']
-                        
-                        pred_shapes = np.argmax(shape_array, axis=-1)[0]
-                        pred_grid = np.argmax(grid_array, axis=-1)[0]
-                        
-                        recon_rows, recon_cols = int(pred_shapes[0]), int(pred_shapes[1])
-                        recon_grid = pred_grid.reshape(30, 30)[:recon_rows, :recon_cols]
-                        
-                        ax_poe_recon.imshow(recon_grid, cmap='viridis')
-                        ax_poe_recon.set_title(f'PoE {label.title()}\n{recon_rows}×{recon_cols} (cached)')
-                        ax_poe_recon.axis('off')
-                    except Exception as e:
-                        print(f"Warning: Could not use pre-computed PoE reconstruction {label}: {e}")
-                        ax_poe_recon.text(0.5, 0.5, f'PoE {label}\nError', 
-                                        ha='center', va='center', transform=ax_poe_recon.transAxes)
-                        ax_poe_recon.set_title(f'PoE {label}')
-                        ax_poe_recon.axis('off')
+                # Calculate and plot error map
+                if recon_rows == target_shape[0] and recon_cols == target_shape[1]:
+                    error_map = recon_grid.astype(float) - target_grid.astype(float)
+                    im_error = ax_enc_error.imshow(error_map, cmap='RdBu', vmin=-5, vmax=5, 
+                                                 interpolation='nearest', aspect='equal')
+                    ax_enc_error.set_title(f'Error {enc_idx}', fontsize=10)
                 else:
-                    ax_poe_recon.text(0.5, 0.5, f'PoE {label}\nNo Data', 
-                                    ha='center', va='center', transform=ax_poe_recon.transAxes)
-                    ax_poe_recon.set_title(f'PoE {label}')
-                    ax_poe_recon.axis('off')
-        
-        elif z_vectors and len(z_vectors) > 0:
-            # Fallback to computing reconstructions on the fly
-            if len(z_vectors) >= 3:
-                indices = [0, len(z_vectors)//2, len(z_vectors)-1]  # Start, middle, end
-                labels = ['Start', 'Mid', 'End']
+                    ax_enc_error.text(0.5, 0.5, 'Size\nMismatch', ha='center', va='center', 
+                                    transform=ax_enc_error.transAxes, fontsize=8)
+                    ax_enc_error.set_title(f'Error {enc_idx}', fontsize=10)
             else:
-                indices = list(range(len(z_vectors)))
-                labels = [f'Step {i}' for i in indices]
+                ax_enc_recon.text(0.5, 0.5, f'Invalid\nDims', ha='center', va='center', 
+                                transform=ax_enc_recon.transAxes, fontsize=8)
+                ax_enc_recon.set_title(f'Encoder {enc_idx}', fontsize=10)
+                ax_enc_error.text(0.5, 0.5, f'No Error', ha='center', va='center', 
+                                transform=ax_enc_error.transAxes, fontsize=8)
+                ax_enc_error.set_title(f'Error {enc_idx}', fontsize=10)
             
-            for i, (idx, label) in enumerate(zip(indices, labels)):
-                if i < 3:  # Only 3 slots available
-                    ax_poe_recon = fig.add_subplot(gs[1, 5 + i])
-                    
-                    try:
-                        z_step = torch.tensor(z_vectors[idx]).unsqueeze(0).to(device).float()
-                        shape_logits, grid_logits = model.multi_encoder.decoder(
-                            z_step, input_tensor, target_seq=target_tensor
-                        )
-                        
-                        shape_array = shape_logits.cpu().numpy()
-                        grid_array = grid_logits.cpu().numpy()
-                        
-                        pred_shapes = np.argmax(shape_array, axis=-1)[0]
-                        pred_grid = np.argmax(grid_array, axis=-1)[0]
-                        
-                        recon_rows, recon_cols = int(pred_shapes[0]), int(pred_shapes[1])
-                        recon_grid = pred_grid.reshape(30, 30)[:recon_rows, :recon_cols]
-                        
-                        ax_poe_recon.imshow(recon_grid, cmap='viridis')
-                        ax_poe_recon.set_title(f'PoE {label}\n{recon_rows}×{recon_cols}')
-                        ax_poe_recon.axis('off')
-                    except Exception as e:
-                        print(f"Warning: Could not compute PoE reconstruction for step {idx}: {e}")
-                        ax_poe_recon.text(0.5, 0.5, f'PoE {label}\nError', 
-                                        ha='center', va='center', transform=ax_poe_recon.transAxes)
-                        ax_poe_recon.set_title(f'PoE {label}')
-                        ax_poe_recon.axis('off')
+            ax_enc_recon.axis('off')
+            ax_enc_error.axis('off')
         else:
-            for i in range(3):
-                ax_poe_recon = fig.add_subplot(gs[1, 5 + i])
-                ax_poe_recon.text(0.5, 0.5, 'No PoE\nRecon', 
-                                ha='center', va='center', transform=ax_poe_recon.transAxes)
-                ax_poe_recon.set_title(f'PoE Step {i}')
-                ax_poe_recon.axis('off')
+            ax_enc_recon.text(0.5, 0.5, f'Enc {enc_idx}\nNo Data', 
+                            ha='center', va='center', transform=ax_enc_recon.transAxes)
+            ax_enc_recon.set_title(f'Encoder {enc_idx}', fontsize=10)
+            ax_enc_recon.axis('off')
+            
+            ax_enc_error.text(0.5, 0.5, f'Enc {enc_idx}\nNo Error', 
+                            ha='center', va='center', transform=ax_enc_error.transAxes)
+            ax_enc_error.set_title(f'Error {enc_idx}', fontsize=10)
+            ax_enc_error.axis('off')
     
-    plt.suptitle(f'Multi-Encoder Comprehensive Analysis ({num_encoders} Encoders)', fontsize=16)
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    # PoE reconstructions at different trajectory steps (row 1, columns 5-7) - USE STORED DATA
+    poe_reconstructions = trajectory_info.get('poe_trajectory_reconstructions', {})
+    if poe_reconstructions:
+        reconstruction_labels = ['initial', 'middle', 'final']
+        display_labels = ['Start', 'Mid', 'End']
+        
+        for i, (recon_label, display_label) in enumerate(zip(reconstruction_labels, display_labels)):
+            if i < 3:  # Columns 5-7 (indices 5, 6, 7)
+                ax_poe_recon = fig.add_subplot(gs[1, 5 + i])
+                ax_poe_error = fig.add_subplot(gs[2, 5 + i])
+                
+                if recon_label in poe_reconstructions and poe_reconstructions[recon_label] is not None:
+                    poe_recon_data = poe_reconstructions[recon_label]
+                    shape_logits = poe_recon_data['shape_logits']
+                    grid_logits = poe_recon_data['grid_logits']
+                    
+                    # Extract reconstruction grid from stored data
+                    recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
+                    
+                    if recon_grid is not None:
+                        # Plot reconstruction
+                        ax_poe_recon.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
+                        ax_poe_recon.set_title(f'PoE {display_label}\n{recon_rows}×{recon_cols}', fontsize=10)
+                        
+                        # Calculate and plot error map
+                        if recon_rows == target_shape[0] and recon_cols == target_shape[1]:
+                            error_map = recon_grid.astype(float) - target_grid.astype(float)
+                            im_error = ax_poe_error.imshow(error_map, cmap='RdBu', vmin=-5, vmax=5, 
+                                                         interpolation='nearest', aspect='equal')
+                            ax_poe_error.set_title(f'PoE Error {display_label}', fontsize=10)
+                        else:
+                            ax_poe_error.text(0.5, 0.5, 'Size\nMismatch', ha='center', va='center', 
+                                            transform=ax_poe_error.transAxes, fontsize=8)
+                            ax_poe_error.set_title(f'PoE Error {display_label}', fontsize=10)
+                    else:
+                        ax_poe_recon.text(0.5, 0.5, f'Invalid\nDims', ha='center', va='center', 
+                                        transform=ax_poe_recon.transAxes, fontsize=8)
+                        ax_poe_recon.set_title(f'PoE {display_label}', fontsize=10)
+                        ax_poe_error.text(0.5, 0.5, f'No Error', ha='center', va='center', 
+                                        transform=ax_poe_error.transAxes, fontsize=8)
+                        ax_poe_error.set_title(f'PoE Error {display_label}', fontsize=10)
+                else:
+                    ax_poe_recon.text(0.5, 0.5, f'PoE {display_label}\nNo Data', 
+                                    ha='center', va='center', transform=ax_poe_recon.transAxes)
+                    ax_poe_recon.set_title(f'PoE {display_label}', fontsize=10)
+                    ax_poe_error.text(0.5, 0.5, f'PoE {display_label}\nNo Error', 
+                                    ha='center', va='center', transform=ax_poe_error.transAxes)
+                    ax_poe_error.set_title(f'PoE Error {display_label}', fontsize=10)
+                
+                ax_poe_recon.axis('off')
+                ax_poe_error.axis('off')
+    else:
+        # Fallback message for missing PoE reconstruction data
+        for i in range(3):
+            ax_poe_recon = fig.add_subplot(gs[1, 5 + i])
+            ax_poe_error = fig.add_subplot(gs[2, 5 + i])
+            ax_poe_recon.text(0.5, 0.5, 'No PoE\nReconstruction\nData', 
+                            ha='center', va='center', transform=ax_poe_recon.transAxes)
+            ax_poe_recon.set_title(f'PoE Step {i}', fontsize=10)
+            ax_poe_recon.axis('off')
+            ax_poe_error.text(0.5, 0.5, 'No PoE\nError\nData', 
+                            ha='center', va='center', transform=ax_poe_error.transAxes)
+            ax_poe_error.set_title(f'PoE Error {i}', fontsize=10)
+            ax_poe_error.axis('off')
+    
+    plt.suptitle(f'Multi-Encoder Analysis: Individual vs PoE ({num_encoders} Encoders)', fontsize=16, y=0.98)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.subplots_adjust(hspace=0.4, wspace=0.3)
+    plt.savefig(save_path, dpi=200, bbox_inches='tight')
     plt.close()
-    print(f"✓ Saved multi-encoder trajectory visualization to: {save_path}")
+    print(f"✓ Saved optimized multi-encoder trajectory visualization to: {save_path}")
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Visualize model trajectory in latent space')

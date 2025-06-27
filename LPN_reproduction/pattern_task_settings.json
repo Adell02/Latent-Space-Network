@@ -10,11 +10,11 @@
     },
     "model_architecture": {
         "num_encoders": 1,
-        "encoder_layers" : 2,
+        "encoder_layers" : 8,
         "decoder_layers" : 2,
         "encoder_heads" : 6,
         "decoder_heads" : 6,
-        "encoder_hidden_dim" : 204,
+        "encoder_hidden_dim" : 96,
         "decoder_hidden_dim" : 96,
         "latent_dim": 128,
         "dropout": 1e-6,
@@ -49,11 +49,11 @@
             "num_steps": 100,
             "learning_rate": 0.1
         },
-        "method": "gradient",
+        "method": "evolutionary",
         "evolutionary": {
             "population_size": 25,
-            "num_generations": 15,
-            "mutation_std": 0.1
+            "num_generations": 10,
+            "mutation_std": 0.5
         },
         "voronoi": {
             "population_size": 10,
@@ -67,7 +67,7 @@
             "pattern_task"
         ],
         "eval_n_samples": 5,
-        "eval_n_queries": 50,
+        "eval_n_queries": 10,
         "eval_epoch": 10,
         "visualize_n_values": 5
     }

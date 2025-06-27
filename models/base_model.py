@@ -505,12 +505,96 @@ def multinomial_loss(
     kl = 0.5 * torch.sum(mu.pow(2) + logvar.exp() - 1 - logvar) / mu.size(0)
     return recon + beta * kl
 
-def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Tensor, beta: float = BETA, return_components: bool = False, encoder_idx: int = None) -> torch.Tensor:
+def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Tensor, beta: float = BETA, return_components: bool = False, encoder_idx: int = None, solo_loss_settings: dict = None) -> torch.Tensor:
     """
     Compute loss for both single and multi-encoder models.
+    For multi-encoder: adds solo-loss branch to encourage self-contained encoder representations.
+    
+    Args:
+        solo_loss_settings: Dict with keys: enabled, lambda_solo, isolate_decoder_gradients
     """
-    if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
-        # Multi-encoder model
+    if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder and encoder_idx is not None and solo_loss_settings and solo_loss_settings.get('enabled', False):
+        # Multi-encoder model with solo-loss branch
+        
+        # Main PoE path
+        reconstruction_poe, mu_poe, log_var_poe = model(input_seq, target_seq, encoder_idx=None)  # PoE inference
+        shape_logits_poe, grid_logits_poe = reconstruction_poe
+        
+        main_loss = multinomial_loss(
+            (shape_logits_poe, grid_logits_poe),
+            target_seq,
+            beta=beta,
+            mu=mu_poe,
+            logvar=log_var_poe
+        )
+        
+        # Solo path: current encoder only
+        mu_solo, log_var_solo = model.multi_encoder.encoders[encoder_idx](input_seq, target_seq)
+        z_solo = mu_solo  # Use mean for consistency
+        
+        # Efficient solo loss computation with proper gradient isolation
+        lambda_solo = solo_loss_settings.get('lambda_solo', 0.1)
+        isolate_gradients = solo_loss_settings.get('isolate_decoder_gradients', True)
+        
+        if isolate_gradients:
+            # Temporarily disable decoder gradients for solo computation
+            decoder_params = list(model.multi_encoder.decoder.parameters())
+            original_requires_grad = [p.requires_grad for p in decoder_params]
+            
+            for p in decoder_params:
+                p.requires_grad_(False)
+        
+        # Compute solo loss
+        shape_logits_solo, grid_logits_solo = model.multi_encoder.decoder(z_solo, input_seq, target_seq=target_seq)
+        
+        if isolate_gradients:
+            # Restore decoder gradients
+            for p, requires_grad in zip(decoder_params, original_requires_grad):
+                p.requires_grad_(requires_grad)
+        
+        # Efficient solo loss computation (reuse target computation)
+        shape_targets = target_seq[:, 900:902].long()
+        shape_loss_solo = F.cross_entropy(shape_logits_solo.reshape(-1, 31), shape_targets.reshape(-1))
+        
+        # Optimized grid loss computation
+        batch_size = target_seq.size(0)
+        grid_loss_solo_sum = 0.0
+        active_pixels = 0
+        
+        for i in range(batch_size):
+            r, c = map(int, target_seq[i, 900:902])
+            n_pix = r * c
+            if n_pix > 0:
+                grid_loss_solo_sum += F.cross_entropy(grid_logits_solo[i, :n_pix], target_seq[i, :n_pix].long(), reduction='sum')
+                active_pixels += n_pix
+        
+        grid_loss_solo = grid_loss_solo_sum / active_pixels if active_pixels > 0 else torch.tensor(0.0, device=target_seq.device)
+        solo_recon_loss = shape_loss_solo + grid_loss_solo
+        
+        # Combined loss: main + λ_solo * solo_loss
+        total_loss = main_loss + lambda_solo * solo_recon_loss
+        
+        if return_components:
+            # Return components from main PoE path for logging consistency
+            shape_loss = F.cross_entropy(shape_logits_poe.reshape(-1, 31), shape_targets.reshape(-1))
+            
+            grid_loss_sum = 0.0
+            active = 0
+            for i in range(batch_size):
+                r, c = map(int, target_seq[i, 900:902])
+                n_pix = r * c
+                if n_pix > 0:
+                    grid_loss_sum += F.cross_entropy(grid_logits_poe[i, :n_pix], target_seq[i, :n_pix].long(), reduction='sum')
+                    active += n_pix
+            grid_loss = grid_loss_sum / active if active > 0 else torch.tensor(0.0, device=target_seq.device)
+            kl_loss = 0.5 * torch.sum(mu_poe.pow(2) + log_var_poe.exp() - 1 - log_var_poe) / mu_poe.size(0)
+            
+            return total_loss, shape_loss, grid_loss, kl_loss
+        
+        return total_loss
+        
+    elif hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
+        # Multi-encoder model (PoE inference without solo-loss)
         reconstruction, mu, log_var = model(input_seq, target_seq, encoder_idx=encoder_idx)
         shape_logits, grid_logits = reconstruction
         
@@ -532,10 +616,10 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
             for i in range(batch_size):
                 r, c = map(int, target_seq[i, 900:902])
                 n_pix = r * c
-                if n_pix:
+                if n_pix > 0:
                     grid_loss_sum += F.cross_entropy(grid_logits[i, :n_pix], target_seq[i, :n_pix].long(), reduction='sum')
                     active += n_pix
-            grid_loss = grid_loss_sum / active if active else torch.tensor(0.0, device=target_seq.device)
+            grid_loss = grid_loss_sum / active if active > 0 else torch.tensor(0.0, device=target_seq.device)
             kl_loss = 0.5 * torch.sum(mu.pow(2) + log_var.exp() - 1 - log_var) / mu.size(0)
             
             return loss, shape_loss, grid_loss, kl_loss

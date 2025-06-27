@@ -2,12 +2,13 @@ import torch
 from torch.optim import Adam
 import json
 import numpy as np
+import os
 
 from models.base_model import LatentProgramNetwork, compute_loss
 from utils.settings_manager import settings
 from re_arc.main import generate_and_process_tasks
 from utils.latent_functions import get_optimized_z
-from utils.data_preparation import split_dataset_for_multi_encoder
+from utils.data_preparation import split_dataset_by_keys_for_multi_encoder
 
 from utils.model_utils import (
     set_seed,
@@ -20,6 +21,9 @@ from utils.model_utils import (
     save_model_params,
     collect_latent_data,
 )
+
+from utils.wandb_logger import init_wandb_for_mode, get_wandb_logger
+from utils.evaluation_utils import run_quick_evaluation, should_run_evaluation, log_evaluation_to_wandb
 
 ##############################
 # Latent Data Collection Functions
@@ -84,9 +88,9 @@ def collect_single_encoder_latent_data(model, dataloader, device, max_samples=10
             batch_input = batch_input.to(device)
             batch_target = batch_target.to(device)
             
-            # Get latent representations
+            # Get latent representations - always use mean vectors
             mu, log_var = model.encoder(batch_input, batch_target)
-            z = model.reparameterize(mu, log_var)
+            z = mu  # Use mean for consistency
             
             # Store data
             batch_size = min(batch_input.size(0), max_samples - sample_count)
@@ -158,11 +162,11 @@ def evaluate_accuracy(model, dataloader, device, is_multi_encoder=False, encoder
                     else:
                         # PoE inference
                         mu_eval, log_var_eval = model(batch_input_eval, batch_target_eval)[1:3]
-                    z_eval = model.reparameterize(mu_eval, log_var_eval)
+                    z_eval = mu_eval  # Use mean for consistency
                 else:
                     # Single encoder
                     mu_eval, log_var_eval = model.encoder(batch_input_eval, batch_target_eval)
-                    z_eval = model.reparameterize(mu_eval, log_var_eval)
+                    z_eval = mu_eval  # Use mean for consistency
 
             # Decode
             shape_logits_eval, grid_logits_eval = model.decoder(z_eval, batch_input_eval, target_seq=batch_target_eval)
@@ -302,6 +306,11 @@ def main_training(file_store_name):
     model_architecture = settings.get_model_architecture()
     training_settings = settings.get_training_settings()
     latent_optimization = settings.get_latent_optimization()
+    solo_loss_settings = settings.get_solo_loss_settings()
+    wandb_settings = settings.get_wandb_settings()
+
+    # Initialize wandb for training mode (will be done after run_dir is created)
+    wandb_logger = None
 
     TRAINING_KEYS = data_settings.get('training_keys', [data_settings.get('key', None)])
     if TRAINING_KEYS is None or not TRAINING_KEYS[0]:
@@ -332,62 +341,99 @@ def main_training(file_store_name):
     logger.info(f"Full settings dump: {json.dumps(settings.get_settings(), indent=2)}")
     print("Run directory created:", run_dir)
 
+    # Initialize wandb for training mode (now that run_dir is available)
+    if wandb_settings.get('enabled', False):
+        # Pass project name from file_store_name to ensure consistency
+        os.environ['WANDB_PROJECT_NAME'] = file_store_name
+        wandb_logger = init_wandb_for_mode('train', run_dir)
+        if wandb_logger:
+            logger.info(f"✓ Wandb logging enabled: {wandb_logger.run.name}")
+        else:
+            logger.info("⚠ Wandb initialization failed, continuing without wandb")
+
     logger.info("Generating and preparing data...")
     print("Generating and preparing data...")
 
-    all_input_sequences = []
-    all_output_sequences = []
-    logger.info(f"Generating data for tasks: {TRAINING_KEYS}")
-    print(f"Generating data for tasks: {TRAINING_KEYS}")
-
-    for task_key in TRAINING_KEYS:
-        logger.info(f"Processing task: {task_key} with {N_EXAMPLES_PER_TASK} examples")
-        print(f"Processing task: {task_key} with {N_EXAMPLES_PER_TASK} examples")
-        try:
-            _, _, _, task_input_sequences, task_output_sequences = generate_and_process_tasks(task_key, N_EXAMPLES_PER_TASK)
-            all_input_sequences.extend(task_input_sequences)
-            all_output_sequences.extend(task_output_sequences)
-            logger.info(f"Generated {len(task_input_sequences)} pairs for task {task_key}")
-            print(f"Generated {len(task_input_sequences)} pairs for task {task_key}")
-        except Exception as e:
-            logger.error(f"Error generating data for task {task_key}: {e}")
-            print(f"Error generating data for task {task_key}: {e}")
-            continue 
-    
-    if not all_input_sequences:
-        logger.error("No data generated from any task. Exiting training.")
-        print("No data generated from any task. Exiting training.")
-        return None, None
-
-    input_sequences = all_input_sequences
-    output_sequences = all_output_sequences
-    logger.info(f"Total generated {len(input_sequences)} pairs of sequences from {len(TRAINING_KEYS)} tasks.")
-    print(f"Total generated {len(input_sequences)} pairs of sequences from {len(TRAINING_KEYS)} tasks.")
-
     # Check if multi-encoder training is enabled
     NUM_ENCODERS = model_architecture.get('num_encoders', 1)
-    is_multi_encoder = True
+    is_multi_encoder = NUM_ENCODERS > 1
     
     if is_multi_encoder:
         logger.info(f"Multi-encoder training enabled with {NUM_ENCODERS} encoders")
         print(f"Multi-encoder training enabled with {NUM_ENCODERS} encoders")
         
-        # Split dataset for individual encoder training
-        dataset_splits = split_dataset_for_multi_encoder(
-            input_sequences, output_sequences, NUM_ENCODERS, 
-            shuffle=True, seed=data_settings['training_seed']
+        # Use key-based dataset splitting for multi-encoder training
+        logger.info("Using key-based dataset splitting for multi-encoder training")
+        print("Using key-based dataset splitting for multi-encoder training")
+        
+        dataset_splits, key_to_encoder_mapping, splitting_statistics = split_dataset_by_keys_for_multi_encoder(
+            TRAINING_KEYS, NUM_ENCODERS, N_EXAMPLES_PER_TASK, generate_and_process_tasks
         )
+        
+        # Store splitting information for later use
+        training_metadata = {
+            'key_to_encoder_mapping': key_to_encoder_mapping,
+            'splitting_statistics': splitting_statistics,
+            'training_keys': TRAINING_KEYS,
+            'num_encoders': NUM_ENCODERS
+        }
         
         # Create dataloaders for each encoder
         encoder_dataloaders = []
         for i, (enc_inputs, enc_outputs) in enumerate(dataset_splits):
-            dataloader = prepare_dataloader(enc_inputs, enc_outputs, BATCH_SIZE)
-            encoder_dataloaders.append(dataloader)
-            logger.info(f"Encoder {i}: {len(enc_inputs)} training samples")
-            print(f"Encoder {i}: {len(enc_inputs)} training samples")
+            if enc_inputs and enc_outputs:
+                dataloader = prepare_dataloader(enc_inputs, enc_outputs, BATCH_SIZE)
+                encoder_dataloaders.append(dataloader)
+                
+                # Log which keys are trained by this encoder
+                encoder_keys = splitting_statistics['keys_per_encoder'][i]
+                logger.info(f"Encoder {i}: {len(enc_inputs)} samples from keys {encoder_keys}")
+                print(f"Encoder {i}: {len(enc_inputs)} samples from keys {encoder_keys}")
+            else:
+                # Create empty dataloader for consistency
+                encoder_dataloaders.append(prepare_dataloader([], [], BATCH_SIZE))
+                logger.info(f"Encoder {i}: No data assigned")
+                print(f"Encoder {i}: No data assigned")
     else:
-        # Single encoder training
+        # Single encoder training - generate data normally
+        logger.info("Generating data for single encoder training...")
+        print("Generating data for single encoder training...")
+
+        all_input_sequences = []
+        all_output_sequences = []
+        logger.info(f"Generating data for tasks: {TRAINING_KEYS}")
+        print(f"Generating data for tasks: {TRAINING_KEYS}")
+
+        for task_key in TRAINING_KEYS:
+            logger.info(f"Processing task: {task_key} with {N_EXAMPLES_PER_TASK} examples")
+            print(f"Processing task: {task_key} with {N_EXAMPLES_PER_TASK} examples")
+            try:
+                _, _, _, task_input_sequences, task_output_sequences = generate_and_process_tasks(task_key, N_EXAMPLES_PER_TASK)
+                all_input_sequences.extend(task_input_sequences)
+                all_output_sequences.extend(task_output_sequences)
+                logger.info(f"Generated {len(task_input_sequences)} pairs for task {task_key}")
+                print(f"Generated {len(task_input_sequences)} pairs for task {task_key}")
+            except Exception as e:
+                logger.error(f"Error generating data for task {task_key}: {e}")
+                print(f"Error generating data for task {task_key}: {e}")
+                continue 
+        
+        if not all_input_sequences:
+            logger.error("No data generated from any task. Exiting training.")
+            print("No data generated from any task. Exiting training.")
+            return None, None
+
+        input_sequences = all_input_sequences
+        output_sequences = all_output_sequences
+        logger.info(f"Total generated {len(input_sequences)} pairs of sequences from {len(TRAINING_KEYS)} tasks.")
+        print(f"Total generated {len(input_sequences)} pairs of sequences from {len(TRAINING_KEYS)} tasks.")
+        
         dataloader = prepare_dataloader(input_sequences, output_sequences, BATCH_SIZE)
+        training_metadata = {
+            'training_keys': TRAINING_KEYS,
+            'num_encoders': 1,
+            'single_encoder_training': True
+        }
 
     logger.info("Initializing model...")
     print("Initializing model...")
@@ -438,15 +484,31 @@ def main_training(file_store_name):
     results = {
         'epoch_losses': [],
         'epoch_accuracies': [],
-        'epoch_metrics': [], # To store shape, grid, kl losses per epoch
+        'epoch_metrics': [],
         'reconstructions': [],
         'latent_mus': [],
         'latent_log_vars': [],
         'latent_zs': [],
-        'input_sequences': [seq.tolist() for seq in input_sequences], # Convert to list for JSON
-        'output_sequences': [seq.tolist() for seq in output_sequences], # Convert to list for JSON
-        'losses_gradient_ascent': []
+        'losses_gradient_ascent': [],
+        'training_metadata': training_metadata  # Add training metadata
     }
+    
+    # Store training sequences for visualization (both single and multi-encoder)
+    if not is_multi_encoder:
+        results['input_sequences'] = [seq.tolist() for seq in input_sequences]
+        results['output_sequences'] = [seq.tolist() for seq in output_sequences]
+    else:
+        # For multi-encoder, combine all training data for visualization
+        all_inputs = []
+        all_outputs = []
+        for encoder_idx in range(NUM_ENCODERS):
+            for batch_input, batch_output in encoder_dataloaders[encoder_idx]:
+                all_inputs.extend(batch_input.tolist())
+                all_outputs.extend(batch_output.tolist())
+        
+        results['input_sequences'] = all_inputs
+        results['output_sequences'] = all_outputs
+        print(f"Saved {len(all_inputs)} combined training sequences from {NUM_ENCODERS} encoders for visualization")
 
     # Save initial settings and model parameters
     logger.info("Saving initial model parameters and settings...")
@@ -594,23 +656,48 @@ def main_training(file_store_name):
 
         model.train() # Already called at the start of train_model function for the next epoch
 
+        # Log training metrics to wandb
+        if wandb_logger:
+            if is_multi_encoder:
+                # Log average metrics across encoders
+                wandb_logger.log_training_metrics(epoch + 1, {
+                    'avg_shape_loss': sum(m['avg_shape_loss'] for m in epoch_metrics_list) / len(epoch_metrics_list),
+                    'avg_grid_loss': sum(m['avg_grid_loss'] for m in epoch_metrics_list) / len(epoch_metrics_list),
+                    'avg_kl_loss': sum(m['avg_kl_loss'] for m in epoch_metrics_list) / len(epoch_metrics_list),
+                    'avg_total_loss': avg_epoch_loss
+                })
+                # Log accuracy metrics
+                wandb_logger.log_accuracy_metrics(epoch + 1, epoch_accuracy_data)
+            else:
+                # Single encoder logging
+                wandb_logger.log_training_metrics(epoch + 1, {
+                    'avg_shape_loss': avg_shape_loss,
+                    'avg_grid_loss': avg_grid_loss,
+                    'avg_kl_loss': avg_kl_loss,
+                    'avg_total_loss': avg_loss
+                })
+                wandb_logger.log_accuracy_metrics(epoch + 1, single_accuracy)
+
+        # Run evaluation and log visualizations every N epochs
+        if wandb_logger and should_run_evaluation(epoch + 1, wandb_settings.get('log_interval', 1), NUM_EPOCHS):
+            logger.info(f"Running evaluation and visualization logging for epoch {epoch+1}...")
+            eval_results = run_quick_evaluation(model, run_dir, epoch + 1)
+            if eval_results:
+                log_evaluation_to_wandb(eval_results, run_dir, epoch + 1, wandb_logger)
+            else:
+                # Log visualizations without evaluation results (training-only visualizations)
+                wandb_logger.log_visualizations(run_dir, epoch + 1)
+
         # Save checkpoint and results at regular intervals or at the end
         save_interval = training_settings.get('save_checkpoint_interval', 50)
-        eval_interval = training_settings.get('evaluation_interval', 25)  # New setting
-        
         should_save = (epoch + 1) % save_interval == 0 or (epoch + 1) == NUM_EPOCHS
-        should_evaluate = (epoch + 1) % eval_interval == 0 or (epoch + 1) == NUM_EPOCHS
-        
-        if should_evaluate:
-            logger.info(f"Running intermediate evaluation at epoch {epoch+1}...")
-            logger.info("Note: Latent data collection moved to evaluation phase for efficiency.")
         
         if should_save:
             logger.info(f"Saving checkpoint and results at epoch {epoch+1}...")
             print(f"Saving checkpoint and results at epoch {epoch+1}...")
             
             # Save checkpoint
-            save_checkpoint(model, optimizer, epoch + 1, avg_loss, run_dir)
+            save_checkpoint(model, optimizer, epoch + 1, avg_loss if not is_multi_encoder else avg_epoch_loss, run_dir)
             
             # Save updated results (this will overwrite previous results.pkl with current progress)
             save_results(results, run_dir)
@@ -620,68 +707,14 @@ def main_training(file_store_name):
 
     print("Training complete.")
     
-    # Legacy final evaluation loop (reduced scope)
-    final_eval_batch_count = 0
-    max_eval_batches = 5  # Reduced to save memory since we have dedicated latent collection
-    
-    dataloader_to_use = dataloader if not is_multi_encoder else encoder_dataloaders[0]
-    for batch_input, batch_target in dataloader_to_use:
-        final_eval_batch_count += 1
-        batch_input = batch_input.to(device)
-        batch_target = batch_target.to(device)
-        
-        # Consistent z retrieval for final eval
-        if OPTIMIZE_Z_INFERENCE:
-            z, losses = get_optimized_z(model, batch_input, batch_target, 
-                                        context='inference')
-            # Get mu and log_var for storage
-            with torch.no_grad():
-                if is_multi_encoder:
-                    mu, log_var = model(batch_input, batch_target)[1:3]
-                else:
-                    mu, log_var = model.encoder(batch_input, batch_target)
-        else:
-            with torch.no_grad():
-                if is_multi_encoder:
-                    # Use PoE inference mode
-                    mu, log_var = model(batch_input, batch_target)[1:3]
-                    z = model.reparameterize(mu, log_var)
-                else:
-                    mu, log_var = model.encoder(batch_input, batch_target)
-                    z = model.reparameterize(mu, log_var)
-        
-        with torch.no_grad(): # Ensure no grads for decoder pass
-            shape_logits, grid_logits = model.decoder(z, batch_input, target_seq=batch_target) 
-            # Store only a subset of these potentially large tensors if memory is an issue
-            if isinstance(results.get('latent_mus'), list):
-                mu_np = mu.cpu().numpy() if isinstance(mu, torch.Tensor) else mu
-                results['latent_mus'].append(mu_np.tolist())
-            if isinstance(results.get('latent_log_vars'), list):
-                log_var_np = log_var.cpu().numpy() if isinstance(log_var, torch.Tensor) else log_var
-                results['latent_log_vars'].append(log_var_np.tolist())
-            if isinstance(results.get('latent_zs'), list):
-                z_np = z.cpu().numpy() if isinstance(z, torch.Tensor) else z
-                results['latent_zs'].append(z_np.tolist())
-            
-            # Store only one reconstruction per batch to save memory
-            if isinstance(results.get('reconstructions'), list) and len(results['reconstructions']) < 20:
-                results['reconstructions'].append({
-                    'input': batch_input[0].cpu().numpy().tolist(),
-                    'target': batch_target[0].cpu().numpy().tolist(),
-                    'reconstruction': (shape_logits[0].cpu().numpy().tolist(), grid_logits[0].cpu().numpy().tolist())
-                })
-        
-        print(f"Final evaluation: Processed batch {final_eval_batch_count}/{len(dataloader)}")
-        
-        # Limit stored reconstructions for large datasets
-        if final_eval_batch_count >= max_eval_batches:
-            print(f"Limiting stored latent vars/reconstructions to first {final_eval_batch_count} batches to save memory.")
-            break
-
     # Final save of complete results
     logger.info("Saving final complete results...")
     print("Saving final complete results...")
     save_results(results, run_dir)
+
+    # Finish wandb run
+    if wandb_logger:
+        wandb_logger.finish()
 
     print("Results saved in:", run_dir)
     return results, model

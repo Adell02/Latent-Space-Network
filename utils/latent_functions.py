@@ -9,13 +9,16 @@ latent_optimization = settings.get_latent_optimization()
 
 def optimize_latent_z(lpn, input_seq, target_seq, num_steps=None, lr=None, return_trajectory=False):
     """
-    Optimize latent z via gradient descent with progress bar and logging.
+    Optimize latent z via gradient descent with per-sample loss tracking.
     """
     # Use settings if parameters are not provided
     if num_steps is None:
         num_steps = latent_optimization['training']['num_steps']
     if lr is None:
         lr = latent_optimization['training']['learning_rate']
+        
+    batch_size = input_seq.size(0)
+    device = input_seq.device
         
     # Get initial latent parameters from the model and compute initial z.
     with torch.no_grad():
@@ -29,70 +32,70 @@ def optimize_latent_z(lpn, input_seq, target_seq, num_steps=None, lr=None, retur
     z = lpn.reparameterize(mu, log_var)
     initial_z = z.detach().clone()
 
-    # Compute initial loss before optimization (step 0)
+    # Compute individual initial losses for each sample
     with torch.no_grad():
         if hasattr(lpn, 'is_multi_encoder') and lpn.is_multi_encoder:
             shape_logits_init, grid_logits_init = lpn.multi_encoder.decoder(z, input_seq, target_seq=target_seq)
         else:
             shape_logits_init, grid_logits_init = lpn.decoder(z, input_seq, target_seq=target_seq)
         
-        shape_targets = target_seq[:, 900:902].long()
-        shape_loss_init = F.cross_entropy(shape_logits_init.reshape(-1, 31), shape_targets.reshape(-1))
-        
-        # Compute initial grid loss
-        grid_loss_list_init = []
-        batch_size = input_seq.size(0)
+        # Compute per-sample initial losses
+        initial_losses = []
         for i in range(batch_size):
+            # Shape loss for this sample
+            shape_pred_i = shape_logits_init[i:i+1]
+            shape_tgt_i = target_seq[i:i+1, 900:902].long()
+            shape_loss_i = F.cross_entropy(shape_pred_i.reshape(-1, 31), shape_tgt_i.reshape(-1))
+            
+            # Grid loss for this sample
             tgt_rows = int(target_seq[i, 900].item())
             tgt_cols = int(target_seq[i, 901].item())
             active_pixels = tgt_rows * tgt_cols
             if active_pixels > 0:
-                loss_i = F.cross_entropy(grid_logits_init[i, :active_pixels],
-                                       target_seq[i, :active_pixels].long())
-                grid_loss_list_init.append(loss_i)
-
-        grid_loss_init = sum(grid_loss_list_init) / len(grid_loss_list_init) if grid_loss_list_init else \
-                       torch.tensor(0.0, device=input_seq.device)
-        initial_loss = (shape_loss_init + grid_loss_init).item()
+                grid_loss_i = F.cross_entropy(grid_logits_init[i, :active_pixels],
+                                            target_seq[i, :active_pixels].long())
+            else:
+                grid_loss_i = torch.tensor(0.0, device=device)
+            
+            sample_loss = (shape_loss_i + grid_loss_i).item()
+            initial_losses.append(sample_loss)
 
     # Detach z from the graph and enable gradients on it.
     z = z.detach().requires_grad_(True)
-
-    # Create an optimizer for z.
     optimizer_z = torch.optim.Adam([z], lr=lr)
 
-    # Track losses and z changes - start with initial loss
-    losses = [initial_loss]
-    z_changes = []
+    # Track individual sample losses and batch average
+    individual_losses = [initial_losses]  # Each element is a list of losses for all samples at that step
+    batch_avg_losses = [sum(initial_losses) / len(initial_losses)]
     
-    # Track trajectory information if requested - start with initial z and initial loss
+    # Track trajectory information if requested
     trajectory = {
         'z_vectors': [initial_z.detach().clone()],
-        'losses': [initial_loss],
+        'losses': batch_avg_losses[0],  # Keep batch average for backward compatibility
+        'individual_losses': individual_losses,  # NEW: Per-sample losses for each step
         'encoder_mu': mu.detach().clone(),
         'encoder_log_var': log_var.detach().clone(),
         'initial_z': initial_z.detach().clone()
     } if return_trajectory else None
 
     print(f"    Gradient ascent: {num_steps} steps, LR: {lr}, Batch size: {batch_size}")
-    print(f"    Initial loss: {initial_loss:.4f}")
+    print(f"    Initial batch avg loss: {batch_avg_losses[0]:.4f}")
 
-    # Create progress bar for gradient ascent steps
     pbar = tqdm(range(num_steps), desc="Gradient ascent", unit="step", leave=False)
 
     for step in pbar:
         optimizer_z.zero_grad()
-        # Decode using the current z.
+        
+        # Decode using the current z
         if hasattr(lpn, 'is_multi_encoder') and lpn.is_multi_encoder:
             shape_logits, grid_logits = lpn.multi_encoder.decoder(z, input_seq, target_seq=target_seq)
         else:
             shape_logits, grid_logits = lpn.decoder(z, input_seq, target_seq=target_seq)
 
-        # Compute loss on the shape tokens.
+        # Compute batch loss for backpropagation (keep existing approach)
         shape_targets = target_seq[:, 900:902].long()
         shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
 
-        # Compute grid loss
         grid_loss_list = []
         for i in range(batch_size):
             tgt_rows = int(target_seq[i, 900].item())
@@ -104,21 +107,39 @@ def optimize_latent_z(lpn, input_seq, target_seq, num_steps=None, lr=None, retur
                 grid_loss_list.append(loss_i)
 
         grid_loss = sum(grid_loss_list) / len(grid_loss_list) if grid_loss_list else \
-                   torch.tensor(0.0, device=input_seq.device, requires_grad=True)
+                   torch.tensor(0.0, device=device, requires_grad=True)
 
         reconstruction_loss = shape_loss + grid_loss
-        losses.append(reconstruction_loss.item())
+        
+        # Compute individual sample losses for tracking (no gradients needed)
+        with torch.no_grad():
+            step_individual_losses = []
+            for i in range(batch_size):
+                # Shape loss for this sample
+                shape_pred_i = shape_logits[i:i+1].detach()
+                shape_tgt_i = target_seq[i:i+1, 900:902].long()
+                shape_loss_i = F.cross_entropy(shape_pred_i.reshape(-1, 31), shape_tgt_i.reshape(-1))
+                
+                # Grid loss for this sample
+                tgt_rows = int(target_seq[i, 900].item())
+                tgt_cols = int(target_seq[i, 901].item())
+                active_pixels = tgt_rows * tgt_cols
+                if active_pixels > 0:
+                    grid_loss_i = F.cross_entropy(grid_logits[i, :active_pixels].detach(),
+                                                target_seq[i, :active_pixels].long())
+                else:
+                    grid_loss_i = torch.tensor(0.0, device=device)
+                
+                sample_loss = (shape_loss_i + grid_loss_i).item()
+                step_individual_losses.append(sample_loss)
+            
+            individual_losses.append(step_individual_losses)
+            batch_avg_losses.append(sum(step_individual_losses) / len(step_individual_losses))
 
-        # Track how much z has changed
-        z_delta = torch.norm(z - initial_z).item()
-        z_changes.append(z_delta)
-
-        # Update progress bar with current metrics
         pbar.set_postfix({
-            'loss': f'{reconstruction_loss.item():.4f}',
-            'Δz': f'{z_delta:.4f}',
-            'shape': f'{shape_loss.item():.4f}',
-            'grid': f'{grid_loss.item():.4f}'
+            'avg_loss': f'{batch_avg_losses[-1]:.4f}',
+            'min_loss': f'{min(step_individual_losses):.4f}',
+            'max_loss': f'{max(step_individual_losses):.4f}'
         })
 
         reconstruction_loss.backward()
@@ -128,23 +149,20 @@ def optimize_latent_z(lpn, input_seq, target_seq, num_steps=None, lr=None, retur
         # Store trajectory information after optimization step
         if return_trajectory:
             trajectory['z_vectors'].append(z.detach().clone())
-            trajectory['losses'].append(reconstruction_loss.item())
+            trajectory['losses'] = batch_avg_losses[-1]  # Keep scalar for compatibility
+            trajectory['individual_losses'] = individual_losses
 
     pbar.close()
 
-    # Final change in Z
-    final_z_change = torch.norm(z - initial_z).item()
-    loss_improvement = losses[0] - losses[-1]
-    
+    loss_improvement = batch_avg_losses[0] - batch_avg_losses[-1]
     print(f"    ✓ Optimization complete: "
-          f"Loss {losses[0]:.4f} → {losses[-1]:.4f} "
-          f"(Δ: {loss_improvement:+.4f}), "
-          f"Z change: {final_z_change:.4f}")
+          f"Avg loss {batch_avg_losses[0]:.4f} → {batch_avg_losses[-1]:.4f} "
+          f"(Δ: {loss_improvement:+.4f})")
 
     if return_trajectory:
-        return z, losses, trajectory
+        return z, batch_avg_losses, trajectory
     else:
-        return z, losses
+        return z, batch_avg_losses
 
 def evolutionary_optimize_latent_z(lpn, input_seq, target_seq, population_size=None,
                                    num_generations=None, mutation_std=None, return_trajectory=False):

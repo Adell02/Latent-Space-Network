@@ -4,7 +4,7 @@ import os
 import pickle
 import numpy as np
 from training import main_training
-from evaluation import main_test, encode_training_sequences
+from evaluation import main_test
 from utils.model_utils import (
     load_model,
     save_evaluation_results
@@ -43,6 +43,7 @@ def parse_args():
                       help='Specific epoch to load for evaluation')
     parser.add_argument('--visualize_n_values', type=int, default=DEFAULT_VISUALIZE_N_VALUES,
                       help='Numbers of input-output pairs to generate for visualization')
+    # Removed --use_reparameterized flag - always use mean vectors (μ) for consistency
     return parser.parse_args()
     
 
@@ -74,39 +75,11 @@ def main_args():
         
         model, _, _, _ = load_model(run_dir, epoch=args.epoch, device=device)
         
-        # Encode training sequences using the trained model
-        print("\n=== ENCODING TRAINING SEQUENCES ===")
-        encoded_training_data = encode_training_sequences(
-            model=model, 
-            run_dir=run_dir, 
-            device=device, 
-            max_samples=500,  # Limit for memory and visualization clarity
-            batch_size=16
-        )
-        
-        if encoded_training_data is not None:
-            # Save encoded training data for visualization
-            encoded_file = os.path.join(run_dir, 'encoded_training_latents.pkl')
-            with open(encoded_file, 'wb') as f:
-                pickle.dump(encoded_training_data, f)
-            print(f"Encoded training latents saved to {encoded_file}")
-            print(f"Encoded {len(encoded_training_data['latent_mus'])} training samples")
-        else:
-            print("Warning: Could not encode training sequences")
-        
-        # Run evaluation
+        # Run evaluation (now includes training latent data collection)
         print("\n=== RUNNING EVALUATION ===")
-        eval_results = main_test(model, args.keys, args.file_name, args.n_eval_samples, args.n_eval_queries, EVAL_SEED, device)
-        
-        # Add encoded training data to evaluation results for easy access
-        if encoded_training_data is not None:
-            for key in eval_results:
-                eval_results[key]['encoded_training_latents'] = {
-                    'latent_mus': encoded_training_data['latent_mus'].tolist() if isinstance(encoded_training_data['latent_mus'], np.ndarray) else encoded_training_data['latent_mus'],
-                    'latent_log_vars': encoded_training_data['latent_log_vars'].tolist() if isinstance(encoded_training_data['latent_log_vars'], np.ndarray) else encoded_training_data['latent_log_vars'],
-                    'latent_zs': encoded_training_data['latent_zs'].tolist() if isinstance(encoded_training_data['latent_zs'], np.ndarray) else encoded_training_data['latent_zs'],
-                    'encoding_info': encoded_training_data['encoding_info']
-                }
+        # Always use mean vectors (μ) for consistency and efficiency
+        print("Using mean (μ) vectors for latent visualization")
+        eval_results = main_test(model, args.keys, run_dir, args.n_eval_samples, args.n_eval_queries, EVAL_SEED, device)
                 
         # Save evaluation results
         save_evaluation_results(eval_results, run_dir)
@@ -114,12 +87,12 @@ def main_args():
     if 'visualize' in args.mode or 'all' in args.mode:
         if args.visualize_n_values is None:
             print("No visualize_n_values specified for visualization, using default visualize_n_values")
-        if args.visualize_n_values > args.n_eval_queries:
+        if args.n_eval_queries and args.visualize_n_values > args.n_eval_queries:
             print("visualize_n_values is greater than n_eval_queries, using n_eval_queries")
             args.visualize_n_values = args.n_eval_queries
         # Also run visualization
         print("\nVisualizing stored results...")
-        visualize_stored_results(run_dir)
+        visualize_stored_results(run_dir, epoch=args.epoch)
 
 if __name__ == "__main__":
     main_args()

@@ -75,7 +75,7 @@ def main_args():
         
         # Run evaluation
         print("\nRunning evaluation...")
-        eval_results = main_test(model, args.keys, args.file_name, args.n_eval_samples, args.n_eval_queries, EVAL_SEED, device)
+        eval_results = main_test(model, args.keys, os.path.join(BASE_DIR, args.file_name), args.n_eval_samples, args.n_eval_queries, EVAL_SEED, device)
                 
         # Save evaluation results
         save_evaluation_results(eval_results, os.path.join(BASE_DIR, args.file_name))
