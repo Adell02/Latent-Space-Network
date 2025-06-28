@@ -4,13 +4,13 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from utils.settings_manager import settings
 
-# Get settings from settings manager
-latent_optimization = settings.get_latent_optimization()
-
 def optimize_latent_z(lpn, input_seq, target_seq, num_steps=None, lr=None, return_trajectory=False):
     """
     Optimize latent z via gradient descent with per-sample loss tracking.
     """
+    # Get settings from settings manager (moved inside function for sweep compatibility)
+    latent_optimization = settings.get_latent_optimization()
+    
     # Use settings if parameters are not provided
     if num_steps is None:
         num_steps = latent_optimization['training']['num_steps']
@@ -169,6 +169,9 @@ def evolutionary_optimize_latent_z(lpn, input_seq, target_seq, population_size=N
     """
     Optimize latent z using an evolutionary algorithm with progress bar and trajectory logging.
     """
+    # Get settings from settings manager (moved inside function for sweep compatibility)
+    latent_optimization = settings.get_latent_optimization()
+    
     # Use settings if parameters are not provided
     evolutionary_settings = latent_optimization['evolutionary']
     if population_size is None:
@@ -505,6 +508,8 @@ def get_optimized_z(lpn, input_seq, target_seq, num_steps=None, lr=None, context
         context: 'training' or 'inference' - determines which settings to use as defaults
         return_trajectory: Whether to return trajectory information
     """
+    # Get settings from settings manager (moved inside function for sweep compatibility)
+    latent_optimization = settings.get_latent_optimization()
     optimization_method = latent_optimization.get('method', 'gradient')
     
     # Determine which settings to use based on context

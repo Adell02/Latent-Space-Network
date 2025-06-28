@@ -17,50 +17,138 @@ from utils.settings_manager import settings
 # TUNABLE SETTINGS
 #########################################
 
-# Get settings from settings manager
-data_settings = settings.get_data_settings()
-model_architecture = settings.get_model_architecture()
-training_settings = settings.get_training_settings()
-latent_optimization = settings.get_latent_optimization()
+def get_current_settings():
+    """Get current settings from settings manager (for sweep compatibility)."""
+    # Get settings from settings manager
+    data_settings = settings.get_data_settings()
+    model_architecture = settings.get_model_architecture()
+    training_settings = settings.get_training_settings()
+    latent_optimization = settings.get_latent_optimization()
+    
+    return {
+        'data_settings': data_settings,
+        'model_architecture': model_architecture,
+        'training_settings': training_settings,
+        'latent_optimization': latent_optimization
+    }
 
-# Data settings
-TRAINING_KEYS = data_settings.get('training_keys', [data_settings.get('key', None)])
-if TRAINING_KEYS is None or not TRAINING_KEYS[0]:
-    raise ValueError("No training keys specified in data_settings.")
+# For backward compatibility, expose commonly used constants as functions
+def get_num_encoders():
+    return get_current_settings()['model_architecture'].get('num_encoders', 1)
 
-TRAINING_SEED = data_settings['training_seed']
-N_EXAMPLES_PER_TASK = data_settings['n']
+def get_latent_dim():
+    return get_current_settings()['model_architecture']['latent_dim']
 
-# Model architecture settings with backward compatibility
-NUM_ENCODERS = model_architecture.get('num_encoders', 1)
-LATENT_DIM = model_architecture['latent_dim']
-# Support both old and new parameter names
-ENCODER_HIDDEN_DIM = model_architecture.get('encoder_hidden_dim', model_architecture.get('hidden_dim', 96))
-DECODER_HIDDEN_DIM = model_architecture.get('decoder_hidden_dim', model_architecture.get('hidden_dim', 96))
-ENCODER_LAYERS = model_architecture.get('encoder_layers', model_architecture.get('num_layers', 2))
-DECODER_LAYERS = model_architecture.get('decoder_layers', model_architecture.get('num_layers', 2))
-ENCODER_HEADS = model_architecture.get('encoder_heads', model_architecture.get('num_heads', 6))
-DECODER_HEADS = model_architecture.get('decoder_heads', model_architecture.get('num_heads', 6))
-DROPOUT = model_architecture['dropout']
-MAX_LENGTH = model_architecture['max_length']
-ENCODER_MAX_LENGTH = model_architecture['encoder_max_length']
-DECODER_MAX_LENGTH = model_architecture['decoder_max_length']
+def get_encoder_hidden_dim():
+    model_arch = get_current_settings()['model_architecture']
+    return model_arch.get('encoder_hidden_dim', model_arch.get('hidden_dim', 96))
 
-# Training settings
-BATCH_SIZE = training_settings['batch_size']
-NUM_EPOCHS = training_settings['num_epochs']
-LEARNING_RATE = training_settings['learning_rate']
-BETA = training_settings['beta']
+def get_decoder_hidden_dim():
+    model_arch = get_current_settings()['model_architecture']
+    return model_arch.get('decoder_hidden_dim', model_arch.get('hidden_dim', 96))
 
-# Latent optimization settings
-OPTIMIZE_Z = latent_optimization['training']['enabled']
-OPTIMIZE_Z_NUM_STEPS = latent_optimization['training']['num_steps']
-OPTIMIZE_Z_LR = latent_optimization['training']['learning_rate']
-OPTIMIZE_Z_INFERENCE = latent_optimization['inference']['enabled']
-OPTIMIZE_Z_INFERENCE_NUM_STEPS = latent_optimization['inference']['num_steps']
-OPTIMIZE_Z_INFERENCE_LR = latent_optimization['inference']['learning_rate']
+def get_encoder_layers():
+    model_arch = get_current_settings()['model_architecture']
+    return model_arch.get('encoder_layers', model_arch.get('num_layers', 2))
 
-set_seed(TRAINING_SEED)
+def get_decoder_layers():
+    model_arch = get_current_settings()['model_architecture']
+    return model_arch.get('decoder_layers', model_arch.get('num_layers', 2))
+
+def get_encoder_heads():
+    model_arch = get_current_settings()['model_architecture']
+    return model_arch.get('encoder_heads', model_arch.get('num_heads', 6))
+
+def get_decoder_heads():
+    model_arch = get_current_settings()['model_architecture']
+    return model_arch.get('decoder_heads', model_arch.get('num_heads', 6))
+
+def get_dropout():
+    return get_current_settings()['model_architecture']['dropout']
+
+def get_max_length():
+    return get_current_settings()['model_architecture']['max_length']
+
+def get_encoder_max_length():
+    return get_current_settings()['model_architecture']['encoder_max_length']
+
+def get_decoder_max_length():
+    return get_current_settings()['model_architecture']['decoder_max_length']
+
+def get_training_keys():
+    data_settings = get_current_settings()['data_settings']
+    training_keys = data_settings.get('training_keys', [data_settings.get('key', None)])
+    if training_keys is None or not training_keys[0]:
+        raise ValueError("No training keys specified in data_settings.")
+    return training_keys
+
+def get_training_seed():
+    return get_current_settings()['data_settings']['training_seed']
+
+def get_beta():
+    return get_current_settings()['training_settings']['beta']
+
+# Legacy constants for immediate backward compatibility (will be removed gradually)
+# These should not be used in new code - use the getter functions instead
+NUM_ENCODERS = 1  # Default fallback
+LATENT_DIM = 128  # Default fallback
+ENCODER_HIDDEN_DIM = 96  # Default fallback
+DECODER_HIDDEN_DIM = 96  # Default fallback
+ENCODER_LAYERS = 2  # Default fallback
+DECODER_LAYERS = 2  # Default fallback
+ENCODER_HEADS = 6  # Default fallback
+DECODER_HEADS = 6  # Default fallback
+DROPOUT = 1e-6  # Default fallback
+MAX_LENGTH = 902  # Default fallback
+ENCODER_MAX_LENGTH = 1805  # Default fallback
+DECODER_MAX_LENGTH = 902  # Default fallback
+BETA = 0.01  # Default fallback
+
+# Initialize with current settings
+try:
+    current_settings = get_current_settings()
+    data_settings = current_settings['data_settings']
+    model_architecture = current_settings['model_architecture']
+    training_settings = current_settings['training_settings']
+    latent_optimization = current_settings['latent_optimization']
+
+    # Data settings
+    TRAINING_KEYS = get_training_keys()
+    TRAINING_SEED = get_training_seed()
+    N_EXAMPLES_PER_TASK = data_settings['n']
+
+    # Model architecture settings
+    NUM_ENCODERS = get_num_encoders()
+    LATENT_DIM = get_latent_dim()
+    ENCODER_HIDDEN_DIM = get_encoder_hidden_dim()
+    DECODER_HIDDEN_DIM = get_decoder_hidden_dim()
+    ENCODER_LAYERS = get_encoder_layers()
+    DECODER_LAYERS = get_decoder_layers()
+    ENCODER_HEADS = get_encoder_heads()
+    DECODER_HEADS = get_decoder_heads()
+    DROPOUT = get_dropout()
+    MAX_LENGTH = get_max_length()
+    ENCODER_MAX_LENGTH = get_encoder_max_length()
+    DECODER_MAX_LENGTH = get_decoder_max_length()
+
+    # Training settings
+    BATCH_SIZE = training_settings['batch_size']
+    NUM_EPOCHS = training_settings['num_epochs']
+    LEARNING_RATE = training_settings['learning_rate']
+    BETA = get_beta()
+
+    # Latent optimization settings
+    OPTIMIZE_Z = latent_optimization['training']['enabled']
+    OPTIMIZE_Z_NUM_STEPS = latent_optimization['training']['num_steps']
+    OPTIMIZE_Z_LR = latent_optimization['training']['learning_rate']
+    OPTIMIZE_Z_INFERENCE = latent_optimization['inference']['enabled']
+    OPTIMIZE_Z_INFERENCE_NUM_STEPS = latent_optimization['inference']['num_steps']
+    OPTIMIZE_Z_INFERENCE_LR = latent_optimization['inference']['learning_rate']
+except Exception as e:
+    print(f"Warning: Could not load settings at module level: {e}")
+    # Use defaults already set above
+
+set_seed(get_training_seed())
 
 # -------------------------------------------------
 #  Low‑level helper: diagonal‑Gaussian PoE
@@ -107,9 +195,22 @@ def gaussian_poe(mu: torch.Tensor, logvar: torch.Tensor, debug=False) -> Tuple[t
 ##############################
 
 class TransformerEncoder(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int = ENCODER_HIDDEN_DIM, num_layers: int = ENCODER_LAYERS, 
-                 num_heads: int = ENCODER_HEADS, dropout: float = DROPOUT, max_length: int = ENCODER_MAX_LENGTH):
+    def __init__(self, input_dim: int, hidden_dim: int = None, num_layers: int = None, 
+                 num_heads: int = None, dropout: float = None, max_length: int = None):
         super().__init__()
+        
+        # Use current settings if parameters not provided
+        if hidden_dim is None:
+            hidden_dim = get_encoder_hidden_dim()
+        if num_layers is None:
+            num_layers = get_encoder_layers()
+        if num_heads is None:
+            num_heads = get_encoder_heads()
+        if dropout is None:
+            dropout = get_dropout()
+        if max_length is None:
+            max_length = get_encoder_max_length()
+            
         # Embedding tables
         self.color_embedding = nn.Embedding(num_embeddings=10, embedding_dim=hidden_dim)
         self.shape_embedding = nn.Embedding(num_embeddings=31, embedding_dim=hidden_dim)
@@ -131,14 +232,15 @@ class TransformerEncoder(nn.Module):
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
         # Enable gradient checkpointing if specified in settings
-        if model_architecture.get('use_gradient_checkpointing', False):
+        current_model_arch = get_current_settings()['model_architecture']
+        if current_model_arch.get('use_gradient_checkpointing', False):
             for mod in self.transformer_encoder.layers:
                 mod.use_checkpoint = True  # Enables gradient checkpointing
 
         # Output projections for latent distribution
         self.layer_norm = nn.LayerNorm(hidden_dim)
-        self.fc_mu = nn.Linear(hidden_dim, LATENT_DIM)
-        self.fc_log_var = nn.Linear(hidden_dim, LATENT_DIM)
+        self.fc_mu = nn.Linear(hidden_dim, get_latent_dim())
+        self.fc_log_var = nn.Linear(hidden_dim, get_latent_dim())
 
     def create_padding_mask(self, shape_values: torch.Tensor) -> torch.Tensor:
         """Create padding mask based on shape values"""
@@ -206,9 +308,20 @@ class TransformerEncoder(nn.Module):
         return mu, log_var
 
 class TransformerDecoder(nn.Module):
-    def __init__(self, output_dim: int, hidden_dim: int = DECODER_HIDDEN_DIM, num_layers: int = DECODER_LAYERS, 
-                 num_heads: int = DECODER_HEADS, dropout: float = DROPOUT):
+    def __init__(self, output_dim: int, hidden_dim: int = None, num_layers: int = None, 
+                 num_heads: int = None, dropout: float = None):
         super().__init__()
+        
+        # Use current settings if parameters not provided
+        if hidden_dim is None:
+            hidden_dim = get_decoder_hidden_dim()
+        if num_layers is None:
+            num_layers = get_decoder_layers()
+        if num_heads is None:
+            num_heads = get_decoder_heads()
+        if dropout is None:
+            dropout = get_dropout()
+            
         self.hidden_dim = hidden_dim
 
         # Embeddings for teacher forcing
@@ -327,20 +440,45 @@ class MultiEncoderLPN(nn.Module):
 
     def __init__(
         self,
-        num_encoders: int = NUM_ENCODERS,
+        num_encoders: int = None,
         *,
-        latent_dim: int = LATENT_DIM,
-        encoder_hidden_dim: int = ENCODER_HIDDEN_DIM,
-        decoder_hidden_dim: int = DECODER_HIDDEN_DIM,
-        encoder_layers: int = ENCODER_LAYERS,
-        decoder_layers: int = DECODER_LAYERS,
-        encoder_heads: int = ENCODER_HEADS,
-        decoder_heads: int = DECODER_HEADS,
-        dropout: float = DROPOUT,
-        encoder_max_length: int = ENCODER_MAX_LENGTH,
-        decoder_max_length: int = DECODER_MAX_LENGTH,
+        latent_dim: int = None,
+        encoder_hidden_dim: int = None,
+        decoder_hidden_dim: int = None,
+        encoder_layers: int = None,
+        decoder_layers: int = None,
+        encoder_heads: int = None,
+        decoder_heads: int = None,
+        dropout: float = None,
+        encoder_max_length: int = None,
+        decoder_max_length: int = None,
     ) -> None:
         super().__init__()
+        
+        # Use current settings if parameters not provided
+        if num_encoders is None:
+            num_encoders = get_num_encoders()
+        if latent_dim is None:
+            latent_dim = get_latent_dim()
+        if encoder_hidden_dim is None:
+            encoder_hidden_dim = get_encoder_hidden_dim()
+        if decoder_hidden_dim is None:
+            decoder_hidden_dim = get_decoder_hidden_dim()
+        if encoder_layers is None:
+            encoder_layers = get_encoder_layers()
+        if decoder_layers is None:
+            decoder_layers = get_decoder_layers()
+        if encoder_heads is None:
+            encoder_heads = get_encoder_heads()
+        if decoder_heads is None:
+            decoder_heads = get_decoder_heads()
+        if dropout is None:
+            dropout = get_dropout()
+        if encoder_max_length is None:
+            encoder_max_length = get_encoder_max_length()
+        if decoder_max_length is None:
+            decoder_max_length = get_decoder_max_length()
+        
         self.latent_dim = latent_dim
         self.num_encoders = num_encoders
         # ---- Create separate encoder instances for individual training ----
@@ -424,13 +562,38 @@ class MultiEncoderLPN(nn.Module):
 class LatentProgramNetwork(nn.Module):
     """Unified LPN that supports both single and multi-encoder configurations."""
     
-    def __init__(self, input_dim: int = 1, latent_dim: int = LATENT_DIM, 
-                 encoder_hidden_dim: int = ENCODER_HIDDEN_DIM, decoder_hidden_dim: int = DECODER_HIDDEN_DIM,
-                 encoder_layers: int = ENCODER_LAYERS, decoder_layers: int = DECODER_LAYERS,
-                 encoder_heads: int = ENCODER_HEADS, decoder_heads: int = DECODER_HEADS,
-                 dropout: float = DROPOUT, encoder_max_length: int = ENCODER_MAX_LENGTH, 
-                 decoder_max_length: int = DECODER_MAX_LENGTH, num_encoders: int = NUM_ENCODERS):
+    def __init__(self, input_dim: int = 1, latent_dim: int = None, 
+                 encoder_hidden_dim: int = None, decoder_hidden_dim: int = None,
+                 encoder_layers: int = None, decoder_layers: int = None,
+                 encoder_heads: int = None, decoder_heads: int = None,
+                 dropout: float = None, encoder_max_length: int = None, 
+                 decoder_max_length: int = None, num_encoders: int = None):
         super().__init__()
+        
+        # Use current settings if parameters not provided
+        if latent_dim is None:
+            latent_dim = get_latent_dim()
+        if encoder_hidden_dim is None:
+            encoder_hidden_dim = get_encoder_hidden_dim()
+        if decoder_hidden_dim is None:
+            decoder_hidden_dim = get_decoder_hidden_dim()
+        if encoder_layers is None:
+            encoder_layers = get_encoder_layers()
+        if decoder_layers is None:
+            decoder_layers = get_decoder_layers()
+        if encoder_heads is None:
+            encoder_heads = get_encoder_heads()
+        if decoder_heads is None:
+            decoder_heads = get_decoder_heads()
+        if dropout is None:
+            dropout = get_dropout()
+        if encoder_max_length is None:
+            encoder_max_length = get_encoder_max_length()
+        if decoder_max_length is None:
+            decoder_max_length = get_decoder_max_length()
+        if num_encoders is None:
+            num_encoders = get_num_encoders()
+        
         self.latent_dim = latent_dim
         self.num_encoders = num_encoders
         

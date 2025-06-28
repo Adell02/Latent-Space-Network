@@ -164,6 +164,78 @@ class WandbLogger:
         if grad_norms:
             wandb.log(grad_norms, step=epoch)
     
+    def upload_checkpoint(self, checkpoint_path: str, epoch: int):
+        """Upload model checkpoint as WandB artifact."""
+        if not self.is_initialized:
+            return
+            
+        try:
+            import os
+            
+            # Create artifact with run name for better organization
+            run_name = self.run.name if self.run else "unknown_run"
+            artifact_name = f"{run_name}_checkpoint_epoch_{epoch}"
+            artifact = wandb.Artifact(
+                name=artifact_name,
+                type="model",
+                description=f"Model checkpoint at epoch {epoch} for run {run_name}",
+                metadata={
+                    "epoch": epoch,
+                    "framework": "pytorch",
+                    "run_name": run_name
+                }
+            )
+            
+            # Add the checkpoint file to the artifact
+            artifact.add_file(checkpoint_path, name=f"checkpoint_epoch{epoch}.pt")
+            
+            # Log the artifact
+            wandb.log_artifact(artifact)
+            
+            print(f"✓ Uploaded checkpoint for epoch {epoch} to wandb")
+            
+        except Exception as e:
+            print(f"⚠ Failed to upload checkpoint to wandb: {e}")
+    
+    def upload_final_model(self, model_path: str, config_path: str = None):
+        """Upload final trained model and configuration as WandB artifact."""
+        if not self.is_initialized:
+            return
+            
+        try:
+            import os
+            
+            # Create artifact for final model with run name
+            run_name = self.run.name if self.run else "unknown_run"
+            artifact = wandb.Artifact(
+                name=f"{run_name}_final_model",
+                type="model",
+                description=f"Final trained model for run {run_name}",
+                metadata={
+                    "framework": "pytorch",
+                    "model_type": "latent_program_network",
+                    "run_name": run_name
+                }
+            )
+            
+            # Add the model file
+            if os.path.exists(model_path):
+                artifact.add_file(model_path, name="final_model.pt")
+                print(f"✓ Added model file: {model_path}")
+            
+            # Add configuration file if provided
+            if config_path and os.path.exists(config_path):
+                artifact.add_file(config_path, name="model_config.json")
+                print(f"✓ Added config file: {config_path}")
+            
+            # Log the artifact
+            wandb.log_artifact(artifact)
+            
+            print(f"✓ Uploaded final model to wandb")
+            
+        except Exception as e:
+            print(f"⚠ Failed to upload final model to wandb: {e}")
+    
     def finish(self):
         """Finish wandb run."""
         if self.is_initialized and self.run:
@@ -216,16 +288,26 @@ def init_wandb_for_mode(mode: str, run_dir: str = None) -> Optional[WandbLogger]
             print(f"⚠ Wandb not enabled in settings for {mode}")
             return None
             
-        # Extract project name from environment, settings, or run_dir
-        project_name = os.environ.get('WANDB_PROJECT_NAME') or wandb_settings.get('project_name')
-        if not project_name and run_dir:
+        # Always prioritize environment variable for project name (especially for sweeps)
+        project_name = os.environ.get('WANDB_PROJECT_NAME')
+        
+        # Only fall back to config if environment variable is not set
+        if not project_name:
+            project_name = wandb_settings.get('project_name')
+            
+        # Only use run_dir as last resort (and only if not in sweep mode)
+        if not project_name and run_dir and not os.environ.get('WANDB_PROJECT_NAME'):
             project_name = os.path.basename(run_dir)
         
+        # Final fallback
         if not project_name:
             project_name = f"latent-space-network-{mode}"
         
-        # Create run name with mode
-        run_name = f"{project_name}_{mode}"
+        # Create run name - use run_dir basename for run name, not project name
+        if run_dir:
+            run_name = f"{os.path.basename(run_dir)}_{mode}"
+        else:
+            run_name = f"{project_name}_{mode}"
         
         # Initialize wandb logger
         wandb_logger = init_wandb_logger(
@@ -239,7 +321,7 @@ def init_wandb_for_mode(mode: str, run_dir: str = None) -> Optional[WandbLogger]
         )
         
         if wandb_logger:
-            print(f"✓ Wandb initialized for {mode}: {run_name}")
+            print(f"✓ Wandb initialized for {mode}: project={project_name}, run={run_name}")
         
         return wandb_logger
         

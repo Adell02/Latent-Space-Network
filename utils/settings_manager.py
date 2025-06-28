@@ -4,10 +4,9 @@ from typing import Dict, Any
 
 class SettingsManager:
     
-    def __init__(self,settings_file: str = "model_settings.json"):
+    def __init__(self, settings_file: str = "model_settings.json"):
         self.settings_file = settings_file
         self._settings = None
-        self.load_settings()
 
     def load_settings(self) -> None:
         """Load settings from JSON file."""
@@ -19,21 +18,32 @@ class SettingsManager:
 
     def get_settings(self) -> Dict[str, Any]:
         """Get all settings."""
+        if self._settings is None:
+            self.load_settings()
         return self._settings
 
     def get_data_settings(self) -> Dict[str, Any]:
         """Get data-related settings."""
+        if self._settings is None:
+            self.load_settings()
         return self._settings['data_settings']
+    
     def get_model_architecture(self) -> Dict[str, Any]:
         """Get model architecture settings."""
+        if self._settings is None:
+            self.load_settings()
         return self._settings['model_architecture']
 
     def get_training_settings(self) -> Dict[str, Any]:
         """Get training settings."""
+        if self._settings is None:
+            self.load_settings()
         return self._settings['training_settings']
 
     def get_solo_loss_settings(self) -> Dict[str, Any]:
         """Get solo loss settings."""
+        if self._settings is None:
+            self.load_settings()
         return self._settings['training_settings'].get('solo_loss', {
             'enabled': False,
             'lambda_solo': 0.1,
@@ -43,6 +53,8 @@ class SettingsManager:
 
     def get_wandb_settings(self) -> Dict[str, Any]:
         """Get wandb settings."""
+        if self._settings is None:
+            self.load_settings()
         return self._settings['training_settings'].get('wandb', {
             'enabled': False,
             'entity': None,
@@ -54,19 +66,34 @@ class SettingsManager:
 
     def get_latent_optimization(self) -> Dict[str, Any]:
         """Get latent optimization settings."""
+        if self._settings is None:
+            self.load_settings()
         return self._settings['latent_optimization']
 
     def get_evaluation_settings(self) -> Dict[str, Any]:
         """Get evaluation settings."""
+        if self._settings is None:
+            self.load_settings()
         return self._settings['evaluation_settings']
 
     def save_settings(self, run_dir: str) -> None:
         """Save current settings to a run directory."""
+        if self._settings is None:
+            self.load_settings()
         settings_file = os.path.join(run_dir, self.settings_file.split("/")[-1])
         with open(settings_file, 'w') as f:
             json.dump(self._settings, f, indent=4)
         print(f"Settings saved to {settings_file}")
 
-# Create a global settings manager instance
-settings = SettingsManager(settings_file="model_settings.json") 
-#settings = SettingsManager(settings_file="LPN_reproduction/pattern_task_settings.json")
+    def set_settings(self, new_settings: Dict[str, Any]) -> None:
+        """Directly set the settings in memory (for sweeps)."""
+        self._settings = new_settings
+
+# Global settings instance - initialized with default
+settings = SettingsManager()
+
+def init_settings(settings_file: str = "model_settings.json") -> SettingsManager:
+    """Initialize global settings with a specific file path."""
+    global settings
+    settings = SettingsManager(settings_file)
+    return settings

@@ -247,7 +247,17 @@ def save_checkpoint(model, optimizer, epoch, loss, run_dir):
         'optimizer_state_dict': optimizer.state_dict(),
         'loss': loss,
     }
-    torch.save(checkpoint, os.path.join(run_dir, f'checkpoint_epoch{epoch}.pt'))
+    checkpoint_path = os.path.join(run_dir, f'checkpoint_epoch{epoch}.pt')
+    torch.save(checkpoint, checkpoint_path)
+    
+    # Upload checkpoint to WandB if available
+    try:
+        from utils.wandb_logger import get_wandb_logger
+        wandb_logger = get_wandb_logger()
+        if wandb_logger and wandb_logger.is_initialized:
+            wandb_logger.upload_checkpoint(checkpoint_path, epoch)
+    except Exception as e:
+        print(f"⚠ Could not upload checkpoint to wandb: {e}")
 
 
 ##############################

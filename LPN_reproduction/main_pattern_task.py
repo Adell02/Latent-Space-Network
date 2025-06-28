@@ -11,7 +11,10 @@ from utils.model_utils import (
     save_evaluation_results
 )
 from utils.visualizers import visualize_stored_results
-from utils.settings_manager import settings
+from utils.settings_manager import init_settings
+
+# Initialize settings with the pattern task settings file
+settings = init_settings("LPN_reproduction/pattern_task_settings.json")
 
 # Get settings from settings manager
 data_settings = settings.get_data_settings()

@@ -293,7 +293,7 @@ def main_training(file_store_name):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    # Reload settings variables to ensure they are current, especially if an optimization function was called
+    # Get current settings (don't reload from file - preserve sweep configurations)
     global data_settings, model_architecture, training_settings, latent_optimization
     global TRAINING_KEYS, N_EXAMPLES_PER_TASK, N_PAIRS_PER_EXAMPLE
     global DROPOUT
@@ -301,7 +301,7 @@ def main_training(file_store_name):
     global OPTIMIZE_Z, OPTIMIZE_Z_NUM_STEPS, OPTIMIZE_Z_LR
     global OPTIMIZE_Z_INFERENCE, OPTIMIZE_Z_INFERENCE_NUM_STEPS, OPTIMIZE_Z_INFERENCE_LR
 
-    settings.load_settings() # Force reload from file to ensure all parts of the code use updated settings
+    # Use current in-memory settings (important for sweeps - don't reload from file!)
     data_settings = settings.get_data_settings()
     model_architecture = settings.get_model_architecture()
     training_settings = settings.get_training_settings()
@@ -343,8 +343,7 @@ def main_training(file_store_name):
 
     # Initialize wandb for training mode (now that run_dir is available)
     if wandb_settings.get('enabled', False):
-        # Pass project name from file_store_name to ensure consistency
-        os.environ['WANDB_PROJECT_NAME'] = file_store_name
+        # Don't override WANDB_PROJECT_NAME - let it be set by the sweep or environment
         wandb_logger = init_wandb_for_mode('train', run_dir)
         if wandb_logger:
             logger.info(f"✓ Wandb logging enabled: {wandb_logger.run.name}")
@@ -711,6 +710,25 @@ def main_training(file_store_name):
     logger.info("Saving final complete results...")
     print("Saving final complete results...")
     save_results(results, run_dir)
+    
+    # Save final model and upload to WandB
+    if wandb_logger:
+        logger.info("Saving and uploading final model...")
+        print("Saving and uploading final model...")
+        
+        # Save the final model state
+        final_model_path = os.path.join(run_dir, 'final_model.pt')
+        torch.save({
+            'model_state_dict': model.state_dict(),
+            'model_architecture': model_architecture,
+            'training_metadata': training_metadata,
+            'final_epoch': NUM_EPOCHS,
+            'final_loss': avg_loss if not is_multi_encoder else avg_epoch_loss
+        }, final_model_path)
+        
+        # Upload final model and config to WandB
+        config_path = os.path.join(run_dir, 'model_settings.json')
+        wandb_logger.upload_final_model(final_model_path, config_path)
 
     # Finish wandb run
     if wandb_logger:
