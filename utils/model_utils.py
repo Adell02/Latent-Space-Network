@@ -12,6 +12,7 @@ from sklearn.manifold import TSNE
 from sklearn.cluster import KMeans
 import matplotlib.pyplot as plt
 import json
+from utils.settings_manager import settings
 
 
 ##############################
@@ -160,14 +161,25 @@ def count_model_parameters(model: nn.Module, logger=None) -> dict:
 ##############################
 # Create a Unique Run Directory
 ##############################
-RUN_BASE_DIR = "runs_re_arc"    # Base directory to save run outputs
-def create_run_directory(file_store_name=None,base_dir=RUN_BASE_DIR):
+# Base directory comes from settings (falls back to 'runs')
+RUN_BASE_DIR = settings.get_data_settings().get('run_base_dir', 'runs')
+
+def create_run_directory(file_store_name=None, base_dir: str = None):
+    """Create (or reuse) a run directory inside the configured base dir.
+
+    Args:
+        file_store_name: user-supplied folder name (or None → timestamp)
+        base_dir: overrides settings value when provided.
+    """
+    if base_dir is None:
+        base_dir = RUN_BASE_DIR
     if file_store_name is None:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         run_dir = os.path.join(base_dir, f"run_{timestamp}")
     else:
         run_dir = os.path.join(base_dir, file_store_name)
     os.makedirs(run_dir, exist_ok=True)
+    print(f"Creating run directory at: {run_dir}")
     return run_dir
 
 
@@ -188,13 +200,36 @@ def set_seed(seed=42):
 ##############################
 # Set Up Logging
 ##############################
+# --------------------------------------------------
+# Logging helpers (ASCII-only console to avoid cp1252 errors)
+# --------------------------------------------------
+
+class _AsciiFilter(logging.Filter):
+    """Replace non-ASCII characters in log messages for Windows consoles."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            record.msg = record.getMessage().encode('ascii', errors='replace').decode('ascii')
+        except Exception:
+            pass  # If anything goes wrong we keep original message
+        return True
+
 def setup_logging(run_dir):
     log_file = os.path.join(run_dir, "training.log")
+
+    # File handler (UTF-8)
+    file_handler = logging.FileHandler(log_file, encoding='utf-8')
+
+    # Console handler with ASCII filter
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.addFilter(_AsciiFilter())
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler(log_file)]
+        handlers=[console_handler, file_handler]
     )
+
     logger = logging.getLogger(__name__)
     logger.info(f"Logging configured. Logs will be saved to: {log_file}")
     print(f"Logging configured. Logs will be saved to: {log_file}")
@@ -271,8 +306,6 @@ def save_model_params(run_dir, param_info=None):
         run_dir: Directory to save parameters in
         param_info: Optional parameter count information from count_model_parameters()
     """
-    from utils.settings_manager import settings
-    
     # Get all settings
     data_settings = settings.get_data_settings()
     model_architecture = settings.get_model_architecture()
@@ -466,21 +499,25 @@ def load_model(run_dir, epoch=None, device='cuda', model_type='lpn'):
     optimizer = Adam(model.parameters(), lr=1e-4)  # Default learning rate
     
     if epoch is None:
-        # Find the latest checkpoint
-        checkpoints = [f for f in os.listdir(run_dir) if f.startswith('checkpoint_epoch')]
-        if not checkpoints:
-            raise FileNotFoundError(f"No checkpoints found in {run_dir}")
-        
-        # Extract all available epochs and find the latest
-        available_epochs = [int(f.split('_')[1][5:].split('.')[0]) for f in checkpoints]
-        latest_epoch = max(available_epochs)
-        
-        print(f"=== MODEL LOADING ===")
-        print(f"Available checkpoints: {sorted(available_epochs)}")
-        print(f"No specific epoch requested - selecting latest epoch: {latest_epoch}")
-        
-        checkpoint_path = os.path.join(run_dir, f'checkpoint_epoch{latest_epoch}.pt')
-        epoch = latest_epoch
+        # Check for full_joint.ckpt first
+        full_joint_path = os.path.join(run_dir, 'full_joint.ckpt')
+        if os.path.exists(full_joint_path):
+            print("=== MODEL LOADING ===")
+            print("Loading full_joint.ckpt")
+            checkpoint_path = full_joint_path
+        else:
+            # Find the latest checkpoint
+            checkpoints = [f for f in os.listdir(run_dir) if f.startswith('checkpoint_epoch')]
+            if not checkpoints:
+                raise FileNotFoundError(f"No checkpoints found in {run_dir}")
+            # Extract all available epochs and find the latest
+            available_epochs = [int(f.split('_')[1][5:].split('.')[0]) for f in checkpoints]
+            latest_epoch = max(available_epochs)
+            print(f"=== MODEL LOADING ===")
+            print(f"Available checkpoints: {sorted(available_epochs)}")
+            print(f"No specific epoch requested - selecting latest epoch: {latest_epoch}")
+            checkpoint_path = os.path.join(run_dir, f'checkpoint_epoch{latest_epoch}.pt')
+            epoch = latest_epoch
     else:
         print(f"=== MODEL LOADING ===")
         print(f"Loading specific epoch: {epoch}")
@@ -496,7 +533,11 @@ def load_model(run_dir, epoch=None, device='cuda', model_type='lpn'):
     # Load checkpoint
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    try:
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    except ValueError as e:
+        print(f"⚠ Warning: Could not load optimizer state dict (possibly different parameter groups): {e}")
+        print("   Proceeding without loading optimizer state.")
     epoch = checkpoint['epoch']
     loss = checkpoint['loss']
     

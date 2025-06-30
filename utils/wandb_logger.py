@@ -48,11 +48,20 @@ class WandbLogger:
             self.is_initialized = False
             return False
         
-    def log_training_metrics(self, epoch: int, metrics: Dict[str, float]):
-        """Log training metrics."""
+    def _safe_log(self, data: Dict[str, Any], step_hint: Any = None):
+        """Internal helper that logs without violating wandb step monotonicity."""
         if not self.is_initialized:
             return
-        wandb.log({**metrics, 'epoch': epoch}, step=epoch)
+        if isinstance(step_hint, int):
+            wandb.log(data, step=step_hint)
+        else:
+            wandb.log(data)  # Let wandb autoincrement
+
+    def log_training_metrics(self, epoch: Any, metrics: Dict[str, float]):
+        """Log training metrics (epoch may be int or str)."""
+        if not self.is_initialized:
+            return
+        self._safe_log({**metrics, 'epoch': epoch}, step_hint=epoch)
         
     def log_accuracy_metrics(self, epoch: int, accuracy_data: Dict[str, Any]):
         """Log accuracy metrics."""
@@ -63,11 +72,11 @@ class WandbLogger:
             # Multi-encoder case
             for encoder_idx, metrics in accuracy_data['individual_encoders'].items():
                 log_data = {f'encoder_{encoder_idx}_{k}': v for k, v in metrics.items() if k != 'evaluation_name'}
-                wandb.log({**log_data, 'epoch': epoch}, step=epoch)
+                self._safe_log({**log_data, 'epoch': epoch}, step_hint=epoch)
         else:
             # Single encoder case
             log_data = {k: v for k, v in accuracy_data.items() if k not in ['epoch', 'evaluation_name']}
-            wandb.log({**log_data, 'epoch': epoch}, step=epoch)
+            self._safe_log({**log_data, 'epoch': epoch}, step_hint=epoch)
     
     def log_visualizations(self, run_dir: str, epoch: int, eval_results: Dict[str, Any] = None):
         """Log ONLY latent space visualization during training (as requested)."""
@@ -85,7 +94,7 @@ class WandbLogger:
                 plot_comprehensive_latent_space(None, eval_results, run_dir)
                 latent_plot = os.path.join(run_dir, 'latent_space_visualization.png')
                 if os.path.exists(latent_plot):
-                    wandb.log({'latent_space_visualization': wandb.Image(latent_plot)}, step=epoch)
+                    self._safe_log({'latent_space_visualization': wandb.Image(latent_plot)}, step_hint=epoch)
                     print("  ✓ Logged latent space visualization")
                 else:
                     print("  ⚠ Latent space plot not found")
@@ -127,7 +136,7 @@ class WandbLogger:
             plot_path = os.path.join(run_dir, filename)
             if os.path.exists(plot_path):
                 try:
-                    wandb.log({wandb_key: wandb.Image(plot_path)}, step=step)
+                    self._safe_log({wandb_key: wandb.Image(plot_path)}, step_hint=step)
                     print(f"  ✓ Uploaded {filename}")
                     uploaded_count += 1
                 except Exception as e:
@@ -138,7 +147,7 @@ class WandbLogger:
             if os.path.exists(traj_plot):
                 try:
                     wandb_key = f'trajectory_reconstruction_sample_{i}'
-                    wandb.log({wandb_key: wandb.Image(traj_plot)}, step=step)
+                    self._safe_log({wandb_key: wandb.Image(traj_plot)}, step_hint=step)
                     print(f"  ✓ Uploaded {os.path.basename(traj_plot)}")
                     uploaded_count += 1
                 except Exception as e:
@@ -162,7 +171,7 @@ class WandbLogger:
                 grad_norms[f'grad_norm/{name}'] = param.grad.norm().item()
         
         if grad_norms:
-            wandb.log(grad_norms, step=epoch)
+            self._safe_log(grad_norms, step_hint=epoch)
     
     def upload_checkpoint(self, checkpoint_path: str, epoch: int):
         """Upload model checkpoint as WandB artifact."""
@@ -189,7 +198,7 @@ class WandbLogger:
             # Add the checkpoint file to the artifact
             artifact.add_file(checkpoint_path, name=f"checkpoint_epoch{epoch}.pt")
             
-            # Log the artifact
+            # Log the artifact (no training step associated)
             wandb.log_artifact(artifact)
             
             print(f"✓ Uploaded checkpoint for epoch {epoch} to wandb")
@@ -228,7 +237,7 @@ class WandbLogger:
                 artifact.add_file(config_path, name="model_config.json")
                 print(f"✓ Added config file: {config_path}")
             
-            # Log the artifact
+            # Log the artifact (no training step associated)
             wandb.log_artifact(artifact)
             
             print(f"✓ Uploaded final model to wandb")

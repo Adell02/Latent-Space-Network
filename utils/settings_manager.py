@@ -76,6 +76,12 @@ class SettingsManager:
             self.load_settings()
         return self._settings['evaluation_settings']
 
+    def get_specialist_training_settings(self) -> Dict[str, Any]:
+        """Get specialist training settings."""
+        if self._settings is None:
+            self.load_settings()
+        return self._settings['specialist_training']
+
     def save_settings(self, run_dir: str) -> None:
         """Save current settings to a run directory."""
         if self._settings is None:

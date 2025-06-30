@@ -40,6 +40,9 @@ def run_quick_evaluation(model, run_dir: str, epoch: int) -> Optional[Dict[str, 
             if 'evaluation_metadata' not in eval_results:
                 eval_results['evaluation_metadata'] = {}
             eval_results['evaluation_metadata']['epoch'] = epoch
+            # Capture reconstruction results
+            if 'reconstruction_results' in eval_results:
+                eval_results['trajectory_reconstruction'] = eval_results['reconstruction_results']
             return eval_results
         else:
             print(f"⚠ Quick evaluation failed for epoch {epoch}")
@@ -113,8 +116,9 @@ def log_evaluation_to_wandb(eval_results: Dict[str, Any], run_dir: str, epoch: i
         except Exception as e:
             print(f"⚠ Could not save evaluation results: {e}")
         
-        # Log all visualizations
-        wandb_logger.log_visualizations(run_dir, epoch, eval_results)
+        # Log all visualizations – ensure epoch is int for modulo check
+        epoch_step = epoch if isinstance(epoch, int) else 0
+        wandb_logger.log_visualizations(run_dir, epoch_step, eval_results)
         
     except Exception as e:
         print(f"⚠ Error logging evaluation to wandb: {e}")

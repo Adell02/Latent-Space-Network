@@ -1,0 +1,132 @@
+LatentProgramNetwork(
+  (multi_encoder): MultiEncoderLPN(
+    (encoders): ModuleList(
+      (0-3): 4 x TransformerEncoder(
+        (color_embedding): Embedding(10, 96)
+        (shape_embedding): Embedding(31, 96)
+        (row_embedding): Embedding(30, 96)
+        (col_embedding): Embedding(30, 96)
+        (channel_embedding): Embedding(2, 96)
+        (transformer_encoder): TransformerEncoder(
+          (layers): ModuleList(
+            (0-1): 2 x TransformerEncoderLayer(
+              (self_attn): MultiheadAttention(
+                (out_proj): NonDynamicallyQuantizableLinear(in_features=96, out_features=96, bias=True)
+              )
+              (linear1): Linear(in_features=96, out_features=384, bias=True)
+              (dropout): Dropout(p=1e-06, inplace=False)
+              (linear2): Linear(in_features=384, out_features=96, bias=True)
+              (norm1): LayerNorm((96,), eps=1e-05, elementwise_affine=True)
+              (norm2): LayerNorm((96,), eps=1e-05, elementwise_affine=True)
+              (dropout1): Dropout(p=1e-06, inplace=False)
+              (dropout2): Dropout(p=1e-06, inplace=False)
+            )
+          )
+        )
+        (layer_norm): LayerNorm((96,), eps=1e-05, elementwise_affine=True)
+        (fc_mu): Linear(in_features=96, out_features=128, bias=True)
+        (fc_log_var): Linear(in_features=96, out_features=128, bias=True)
+      )
+    )
+    (decoder): TransformerDecoder(
+      (output_shape_embedding): Embedding(31, 96)
+      (output_grid_embedding): Embedding(10, 96)
+      (row_embedding): Embedding(30, 96)
+      (col_embedding): Embedding(30, 96)
+      (latent_projection): Linear(in_features=128, out_features=96, bias=True)
+      (memory_projection): Sequential(
+        (0): Linear(in_features=192, out_features=96, bias=True)
+        (1): LayerNorm((96,), eps=1e-05, elementwise_affine=True)
+        (2): ReLU()
+        (3): Linear(in_features=96, out_features=96, bias=True)
+      )
+      (transformer_decoder): TransformerDecoder(
+        (layers): ModuleList(
+          (0-1): 2 x TransformerDecoderLayer(
+            (self_attn): MultiheadAttention(
+              (out_proj): NonDynamicallyQuantizableLinear(in_features=96, out_features=96, bias=True)
+            )
+            (multihead_attn): MultiheadAttention(
+              (out_proj): NonDynamicallyQuantizableLinear(in_features=96, out_features=96, bias=True)
+            )
+            (linear1): Linear(in_features=96, out_features=96, bias=True)
+            (dropout): Dropout(p=1e-06, inplace=False)
+            (linear2): Linear(in_features=96, out_features=96, bias=True)
+            (norm1): LayerNorm((96,), eps=1e-05, elementwise_affine=True)
+            (norm2): LayerNorm((96,), eps=1e-05, elementwise_affine=True)
+            (norm3): LayerNorm((96,), eps=1e-05, elementwise_affine=True)
+            (dropout1): Dropout(p=1e-06, inplace=False)
+            (dropout2): Dropout(p=1e-06, inplace=False)
+            (dropout3): Dropout(p=1e-06, inplace=False)
+          )
+        )
+      )
+      (shape_output): Linear(in_features=96, out_features=31, bias=True)
+      (grid_output): Linear(in_features=96, out_features=10, bias=True)
+      (layer_norm): LayerNorm((96,), eps=1e-05, elementwise_affine=True)
+    )
+  )
+  (encoder): TransformerEncoder(
+    (color_embedding): Embedding(10, 96)
+    (shape_embedding): Embedding(31, 96)
+    (row_embedding): Embedding(30, 96)
+    (col_embedding): Embedding(30, 96)
+    (channel_embedding): Embedding(2, 96)
+    (transformer_encoder): TransformerEncoder(
+      (layers): ModuleList(
+        (0-1): 2 x TransformerEncoderLayer(
+          (self_attn): MultiheadAttention(
+            (out_proj): NonDynamicallyQuantizableLinear(in_features=96, out_features=96, bias=True)
+          )
+          (linear1): Linear(in_features=96, out_features=384, bias=True)
+          (dropout): Dropout(p=1e-06, inplace=False)
+          (linear2): Linear(in_features=384, out_features=96, bias=True)
+          (norm1): LayerNorm((96,), eps=1e-05, elementwise_affine=True)
+          (norm2): LayerNorm((96,), eps=1e-05, elementwise_affine=True)
+          (dropout1): Dropout(p=1e-06, inplace=False)
+          (dropout2): Dropout(p=1e-06, inplace=False)
+        )
+      )
+    )
+    (layer_norm): LayerNorm((96,), eps=1e-05, elementwise_affine=True)
+    (fc_mu): Linear(in_features=96, out_features=128, bias=True)
+    (fc_log_var): Linear(in_features=96, out_features=128, bias=True)
+  )
+  (decoder): TransformerDecoder(
+    (output_shape_embedding): Embedding(31, 96)
+    (output_grid_embedding): Embedding(10, 96)
+    (row_embedding): Embedding(30, 96)
+    (col_embedding): Embedding(30, 96)
+    (latent_projection): Linear(in_features=128, out_features=96, bias=True)
+    (memory_projection): Sequential(
+      (0): Linear(in_features=192, out_features=96, bias=True)
+      (1): LayerNorm((96,), eps=1e-05, elementwise_affine=True)
+      (2): ReLU()
+      (3): Linear(in_features=96, out_features=96, bias=True)
+    )
+    (transformer_decoder): TransformerDecoder(
+      (layers): ModuleList(
+        (0-1): 2 x TransformerDecoderLayer(
+          (self_attn): MultiheadAttention(
+            (out_proj): NonDynamicallyQuantizableLinear(in_features=96, out_features=96, bias=True)
+          )
+          (multihead_attn): MultiheadAttention(
+            (out_proj): NonDynamicallyQuantizableLinear(in_features=96, out_features=96, bias=True)
+          )
+          (linear1): Linear(in_features=96, out_features=96, bias=True)
+          (dropout): Dropout(p=1e-06, inplace=False)
+          (linear2): Linear(in_features=96, out_features=96, bias=True)
+          (norm1): LayerNorm((96,), eps=1e-05, elementwise_affine=True)
+          (norm2): LayerNorm((96,), eps=1e-05, elementwise_affine=True)
+          (norm3): LayerNorm((96,), eps=1e-05, elementwise_affine=True)
+          (dropout1): Dropout(p=1e-06, inplace=False)
+          (dropout2): Dropout(p=1e-06, inplace=False)
+          (dropout3): Dropout(p=1e-06, inplace=False)
+        )
+      )
+    )
+    (shape_output): Linear(in_features=96, out_features=31, bias=True)
+    (grid_output): Linear(in_features=96, out_features=10, bias=True)
+    (layer_norm): LayerNorm((96,), eps=1e-05, elementwise_affine=True)
+  )
+)

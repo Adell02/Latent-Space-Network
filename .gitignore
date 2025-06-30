@@ -2,6 +2,7 @@ latex_original_paper/
 deploy_keys/
 sweep_configs/
 wandb/
+runs_specialist/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

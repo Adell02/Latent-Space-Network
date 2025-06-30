@@ -1,0 +1,177 @@
+import argparse
+import torch
+import os
+import pickle
+import numpy as np
+
+# --- Initialize settings FIRST so subsequent imports see the correct config ---
+from utils.settings_manager import init_settings
+settings = init_settings('model_specialist_settings.json')
+
+# Now import modules that rely on the global `settings`
+from train_specialist import main_specialist_training
+from evaluation import main_test
+from utils.model_utils import (
+    load_model,
+    save_evaluation_results
+)
+from utils.visualizers import visualize_stored_results
+
+# --------------------------------------------------
+# Load settings-driven defaults for CLI parameters
+# --------------------------------------------------
+
+data_settings = settings.get_data_settings()
+evaluation_settings = settings.get_evaluation_settings()
+specialist_settings = settings.get_specialist_training_settings()
+
+BASE_DIR = data_settings['run_base_dir']
+
+DEFAULT_EVAL_KEYS = evaluation_settings['eval_keys']
+DEFAULT_EVAL_N_SAMPLES = evaluation_settings['eval_n_samples']
+DEFAULT_EVAL_N_QUERIES = evaluation_settings['eval_n_queries']
+DEFAULT_EVAL_EPOCH = evaluation_settings['eval_epoch']
+DEFAULT_VISUALIZE_N_VALUES = evaluation_settings['visualize_n_values']
+DEFAULT_PHASES = specialist_settings['phases_to_run']
+
+EVAL_SEED = data_settings['eval_seed']
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Train, evaluate, or visualize the Specialist Multi-Encoder Network')
+    parser.add_argument('--mode', choices=['train', 'visualize', 'eval', 'all'], nargs='+', required=True,
+                      help='Mode to run: train, visualize, evaluate, or all')
+    parser.add_argument('--file_name', type=str, help='Directory storing/containing model checkpoints and results', required=True)
+    parser.add_argument('--phases', type=str, default=','.join(DEFAULT_PHASES),
+                      help='Comma-separated phases to run for training (A,B,C)')
+    parser.add_argument('--resume_from_phase', type=str, default=None,
+                      help='Phase to resume training from (A,B,C)')
+    parser.add_argument('--keys', type=str, nargs='+', default=DEFAULT_EVAL_KEYS,
+                      help='Problem keys for evaluation (space-separated)')
+    parser.add_argument('--n_eval_samples', type=int, default=DEFAULT_EVAL_N_SAMPLES,
+                      help='Numbers of input-output pairs to generate for Z optimisation during evaluation')
+    parser.add_argument('--n_eval_queries', type=int, default=DEFAULT_EVAL_N_QUERIES,
+                      help='Numbers of queries to do inference')
+    parser.add_argument('--epoch', type=str, default=DEFAULT_EVAL_EPOCH,
+                      help='Specific epoch to load for evaluation (e.g., "phase_c_final", "phase_a_final", or epoch number)')
+    parser.add_argument('--visualize_n_values', type=int, default=DEFAULT_VISUALIZE_N_VALUES,
+                      help='Numbers of input-output pairs to generate for visualization')
+    return parser.parse_args()
+
+
+def main_args():
+    args = parse_args()
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+
+    if not args.file_name:
+        raise ValueError("--file_name must be specified")
+
+    run_dir = os.path.join(BASE_DIR, args.file_name)
+
+    # ----------------------
+    # TRAINING
+    # ----------------------
+    if 'train' in args.mode or 'all' in args.mode:
+        phases_to_run = [p.strip().upper() for p in args.phases.split(',')]
+        valid_phases = ['A', 'B', 'C']
+        if not all(p in valid_phases for p in phases_to_run):
+            raise ValueError(f"Invalid phases. Valid phases are: {valid_phases}")
+
+        print(f"Starting specialist training with phases: {phases_to_run}")
+        if args.resume_from_phase:
+            print(f"Resuming from phase: {args.resume_from_phase}")
+
+        # Train the specialist model
+        results, _ = main_specialist_training(
+            args.file_name,
+            phases_to_run=phases_to_run,
+            resume_from_phase=args.resume_from_phase
+        )
+        print("Specialist training complete. Results saved in the run directory.")
+
+    # ----------------------
+    # EVALUATION
+    # ----------------------
+    if 'eval' in args.mode or 'all' in args.mode:
+        if args.epoch is None:
+            raise ValueError("--epoch must be specified for evaluation")
+        # Load model (handling specialist checkpoints)
+        model = None
+        try:
+            from models.base_model import LatentProgramNetwork
+            if args.epoch == "phase_c_final":
+                model_path = os.path.join(run_dir, 'full_joint.ckpt')
+                if os.path.exists(model_path):
+                    print(f"Loading final joint model from {model_path}")
+                    model = LatentProgramNetwork().to(device)
+                    checkpoint = torch.load(model_path, map_location=device)
+                    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                        model.load_state_dict(checkpoint['model_state_dict'])
+                    else:
+                        # Support legacy checkpoint with raw state_dict saved
+                        model.load_state_dict(checkpoint)
+                    model.eval()
+                else:
+                    model, _, _, _ = load_model(run_dir, epoch=None, device=device)
+            else:
+                epoch_int = None
+                try:
+                    epoch_int = int(args.epoch)
+                except ValueError:
+                    pass
+                model, _, _, _ = load_model(run_dir, epoch=epoch_int, device=device)
+        except Exception as e:
+            print(f"Failed to load model using specialist checkpoints: {e}. Falling back to latest checkpoint.")
+            model, _, _, _ = load_model(run_dir, epoch=None, device=device)
+
+        print("\n=== RUNNING EVALUATION ===")
+        eval_results = main_test(
+            model, args.keys, run_dir,
+            args.n_eval_samples, args.n_eval_queries, EVAL_SEED, device
+        )
+        save_evaluation_results(eval_results, run_dir)
+
+    # ----------------------
+    # VISUALIZATION
+    # ----------------------
+    if 'visualize' in args.mode or 'all' in args.mode:
+        viz_n = args.visualize_n_values or DEFAULT_VISUALIZE_N_VALUES
+        if args.n_eval_queries and viz_n > args.n_eval_queries:
+            viz_n = args.n_eval_queries
+        epoch_for_viz = None
+        try:
+            epoch_for_viz = int(args.epoch)
+        except (TypeError, ValueError):
+            pass
+        visualize_stored_results(run_dir, epoch=epoch_for_viz)
+
+
+def print_help():
+    print("""
+=== SPECIALIST TRAINING HELP ===
+
+Usage examples:
+  Train all phases:
+    python main_specialist.py --mode train --file_name my_exp
+  Train phases A,B only:
+    python main_specialist.py --mode train --file_name my_exp --phases A,B
+  Evaluate final model:
+    python main_specialist.py --mode eval --file_name my_exp --epoch phase_c_final
+  Full workflow (train+eval+viz):
+    python main_specialist.py --mode all --file_name my_exp
+""")
+
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) == 1 or '--help' in sys.argv or '-h' in sys.argv:
+        print_help()
+        sys.exit(0)
+    try:
+        main_args()
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1) 

@@ -190,7 +190,7 @@ def run_single_experiment(run_number: int, config_name: str, config: Dict[str, A
         settings.set_settings(config)
         
         # Create run name
-        run_name = f"run_{run_number}"
+        run_name = f"run_{run_number}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         
         # Create run directory
         run_dir = os.path.join(BASE_DIR, run_name)
