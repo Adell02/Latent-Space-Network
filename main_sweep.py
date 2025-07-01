@@ -88,7 +88,7 @@ def create_sweep_configurations() -> List[Dict[str, Any]]:
 
 def save_configuration(config_name: str, config: Dict[str, Any], run_number: int):
     """Save configuration to the sweep_configs folder."""
-    config_path = Path(SWEEP_CONFIG_DIR) / f"run_{run_number}_{config_name}.json"
+    config_path = Path(SWEEP_CONFIG_DIR) / f"HPC_run_{run_number}_{config_name}.json"
     config_path.parent.mkdir(exist_ok=True)
     
     # Debug: Print what's being saved

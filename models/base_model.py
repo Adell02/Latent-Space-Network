@@ -491,11 +491,8 @@ class MultiEncoderLPN(nn.Module):
     # -------------------------------------------------
     #  Re‑parameterisation
     # -------------------------------------------------
-    def _reparam(self, mu: torch.Tensor, logvar: torch.Tensor, sample: bool) -> torch.Tensor:
-        if not sample:
-            return mu
-        std = torch.exp(0.5 * logvar)
-        return mu + torch.randn_like(std) * std
+    def _reparam(self, mu: torch.Tensor, logvar: torch.Tensor, sample: bool = True) -> torch.Tensor:
+        return mu
 
     # -------------------------------------------------
     #  Forward methods for training and inference
@@ -506,7 +503,7 @@ class MultiEncoderLPN(nn.Module):
         assert 0 <= encoder_idx < self.num_encoders, f"encoder_idx {encoder_idx} out of range [0, {self.num_encoders})"
         
         mu, logvar = self.encoders[encoder_idx](input_seq, target_seq)
-        z = self._reparam(mu, logvar, sample_latent and training)
+        z = mu  # Deterministic: use mean only
         shape_logits, grid_logits = self.decoder(z, input_seq, target_seq=target_seq)
         return (shape_logits, grid_logits), mu, logvar
 
@@ -545,7 +542,7 @@ class MultiEncoderLPN(nn.Module):
                 self._debug_counter += 1
                 
             mu_star, logvar_star = gaussian_poe(mu_stack, logvar_stack, debug=debug_poe)
-            z = self._reparam(mu_star, logvar_star, sample_latent and training)
+            z = mu_star  # Deterministic latent
             x0, y0 = input_views[0]                   # decoder always conditions on *one* input grid
             # Always provide target_seq for proper loss computation, even during inference
             shape_logits, grid_logits = self.decoder(z, x0, target_seq=y0)
@@ -555,9 +552,13 @@ class MultiEncoderLPN(nn.Module):
             # This assumes input_views[0] corresponds to the current encoder being trained
             x0, y0 = input_views[0]
             mu, logvar = self.encoders[0](x0, y0)  # Use first encoder by default
-            z = self._reparam(mu, logvar, sample_latent and training)
+            z = mu  # Deterministic latent
             shape_logits, grid_logits = self.decoder(z, x0, target_seq=y0)
             return (shape_logits, grid_logits), mu, logvar
+
+    def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+        """Return mean (deterministic). Maintains compatibility."""
+        return mu
 
 class LatentProgramNetwork(nn.Module):
     """Unified LPN that supports both single and multi-encoder configurations."""
@@ -620,10 +621,9 @@ class LatentProgramNetwork(nn.Module):
         self.is_multi_encoder = True
         self.is_actually_single_encoder = (num_encoders == 1)
     
-    def reparameterize(self, mu: torch.Tensor, log_var: torch.Tensor) -> torch.Tensor:
-        std = torch.exp(0.5 * log_var)
-        eps = torch.randn_like(std)
-        return mu + eps * std
+    def _reparam(self, mu: torch.Tensor, logvar: torch.Tensor, sample: bool = True) -> torch.Tensor:
+        """Deterministic reparameterization (mean only)."""
+        return mu
 
     def forward(self, input_seq: torch.Tensor, target_seq: torch.Tensor, encoder_idx: int = None) -> Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor]:
         """Unified forward for both single and multi-encoder setups."""
@@ -638,6 +638,13 @@ class LatentProgramNetwork(nn.Module):
         return self.multi_encoder(
             input_views, training=False, sample_latent=False, use_poe=True
         )
+
+    # -----------------------------------------------------------------
+    # Compatibility helper: deterministic reparameterization (mean only)
+    # -----------------------------------------------------------------
+    def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor):
+        """Return the mean vector (no sampling)."""
+        return mu
 
 # -------------------------------------------------
 #  Convenience loss wrapper (matches existing API)
@@ -668,109 +675,41 @@ def multinomial_loss(
     kl = 0.5 * torch.sum(mu.pow(2) + logvar.exp() - 1 - logvar) / mu.size(0)
     return recon + beta * kl
 
-def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Tensor, beta: float = BETA, return_components: bool = False, encoder_idx: int = None, solo_loss_settings: dict = None) -> torch.Tensor:
+def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Tensor, beta: float = BETA, return_components: bool = False, encoder_idx: int = None) -> torch.Tensor:
     """
     Compute loss for both single and multi-encoder models.
-    For multi-encoder: adds solo-loss branch to encourage self-contained encoder representations.
-    
-    Args:
-        solo_loss_settings: Dict with keys: enabled, lambda_solo, isolate_decoder_gradients
+    For multi-encoder: adds repulsion loss to enforce specialization between encoders.
     """
-    if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder and encoder_idx is not None and solo_loss_settings and solo_loss_settings.get('enabled', False):
-        # Multi-encoder model with solo-loss branch
-        
-        # Main PoE path
-        reconstruction_poe, mu_poe, log_var_poe = model(input_seq, target_seq, encoder_idx=None)  # PoE inference
-        shape_logits_poe, grid_logits_poe = reconstruction_poe
-        
-        main_loss = multinomial_loss(
-            (shape_logits_poe, grid_logits_poe),
-            target_seq,
-            beta=beta,
-            mu=mu_poe,
-            logvar=log_var_poe
-        )
-        
-        # Solo path: current encoder only
-        mu_solo, log_var_solo = model.multi_encoder.encoders[encoder_idx](input_seq, target_seq)
-        z_solo = mu_solo  # Use mean for consistency
-        
-        # Efficient solo loss computation with proper gradient isolation
-        lambda_solo = solo_loss_settings.get('lambda_solo', 0.1)
-        isolate_gradients = solo_loss_settings.get('isolate_decoder_gradients', True)
-        
-        if isolate_gradients:
-            # Temporarily disable decoder gradients for solo computation
-            decoder_params = list(model.multi_encoder.decoder.parameters())
-            original_requires_grad = [p.requires_grad for p in decoder_params]
+    if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
+        # ----------------------------------------------------------
+        # Multi-encoder path
+        # ----------------------------------------------------------
+        if encoder_idx is None:                         # Phases B/C  (PoE training)
+            # --- hyper-parameters --------------------------------
+            rep_cfg   = settings.get_repulsion_loss_settings()
+            λ_rep     = rep_cfg.get('lambda', 0.1)      # strength of repulsion term
+            enabled   = rep_cfg.get('enabled', True)    # whether to use repulsion loss
             
-            for p in decoder_params:
-                p.requires_grad_(False)
-        
-        # Compute solo loss
-        shape_logits_solo, grid_logits_solo = model.multi_encoder.decoder(z_solo, input_seq, target_seq=target_seq)
-        
-        if isolate_gradients:
-            # Restore decoder gradients
-            for p, requires_grad in zip(decoder_params, original_requires_grad):
-                p.requires_grad_(requires_grad)
-        
-        # Efficient solo loss computation (reuse target computation)
-        shape_targets = target_seq[:, 900:902].long()
-        shape_loss_solo = F.cross_entropy(shape_logits_solo.reshape(-1, 31), shape_targets.reshape(-1))
-        
-        # Optimized grid loss computation
-        batch_size = target_seq.size(0)
-        grid_loss_solo_sum = 0.0
-        active_pixels = 0
-        
-        for i in range(batch_size):
-            r, c = map(int, target_seq[i, 900:902])
-            n_pix = r * c
-            if n_pix > 0:
-                grid_loss_solo_sum += F.cross_entropy(grid_logits_solo[i, :n_pix], target_seq[i, :n_pix].long(), reduction='sum')
-                active_pixels += n_pix
-        
-        grid_loss_solo = grid_loss_solo_sum / active_pixels if active_pixels > 0 else torch.tensor(0.0, device=target_seq.device)
-        solo_recon_loss = shape_loss_solo + grid_loss_solo
-        
-        # Combined loss: main + λ_solo * solo_loss
-        total_loss = main_loss + lambda_solo * solo_recon_loss
-        
-        if return_components:
-            # Return components from main PoE path for logging consistency
-            shape_loss = F.cross_entropy(shape_logits_poe.reshape(-1, 31), shape_targets.reshape(-1))
+            # --- collect latent distributions from all encoders ---
+            K = model.num_encoders
+            mus, logvars = [], []
+            for enc_idx in range(K):
+                mu, logvar = model.multi_encoder.encoders[enc_idx](input_seq, target_seq)
+                mus.append(mu)
+                logvars.append(logvar)
             
-            grid_loss_sum = 0.0
-            active = 0
-            for i in range(batch_size):
-                r, c = map(int, target_seq[i, 900:902])
-                n_pix = r * c
-                if n_pix > 0:
-                    grid_loss_sum += F.cross_entropy(grid_logits_poe[i, :n_pix], target_seq[i, :n_pix].long(), reduction='sum')
-                    active += n_pix
-            grid_loss = grid_loss_sum / active if active > 0 else torch.tensor(0.0, device=target_seq.device)
-            kl_loss = 0.5 * torch.sum(mu_poe.pow(2) + log_var_poe.exp() - 1 - log_var_poe) / mu_poe.size(0)
+            # --- compute PoE fusion ------------------------------
+            mu_stack = torch.stack(mus)                 # [K, B, D]
+            logvar_stack = torch.stack(logvars)         # [K, B, D]
+            mu_star, logvar_star = gaussian_poe(mu_stack, logvar_stack)
             
-            return total_loss, shape_loss, grid_loss, kl_loss
-        
-        return total_loss
-        
-    elif hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
-        # Multi-encoder model (PoE inference without solo-loss)
-        reconstruction, mu, log_var = model(input_seq, target_seq, encoder_idx=encoder_idx)
-        shape_logits, grid_logits = reconstruction
-        
-        loss = multinomial_loss(
-            (shape_logits, grid_logits),
-            target_seq,
-            beta=beta,
-            mu=mu,
-            logvar=log_var
-        )
-        
-        if return_components:
-            # Compute individual components for logging
+            # --- reparameterize ---------------------------------
+            z = mu_star  # Deterministic latent
+            
+            # --- decode -----------------------------------------
+            shape_logits, grid_logits = model.multi_encoder.decoder(z, input_seq, target_seq=target_seq)
+            
+            # --- reconstruction loss ----------------------------
             shape_targets = target_seq[:, 900:902].long()
             shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
             
@@ -783,11 +722,75 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
                     grid_loss_sum += F.cross_entropy(grid_logits[i, :n_pix], target_seq[i, :n_pix].long(), reduction='sum')
                     active += n_pix
             grid_loss = grid_loss_sum / active if active > 0 else torch.tensor(0.0, device=target_seq.device)
-            kl_loss = 0.5 * torch.sum(mu.pow(2) + log_var.exp() - 1 - log_var) / mu.size(0)
+            rec_loss = shape_loss + grid_loss
             
-            return loss, shape_loss, grid_loss, kl_loss
-        
-        return loss
+            # --- KL to prior for every encoder ------------------
+            kl_prior = 0.5 * torch.stack([
+                (mu.pow(2) + logvar.exp() - 1 - logvar).sum(1)
+                for mu, logvar in zip(mus, logvars)
+            ]).mean()
+            
+            # --- pairwise repulsive KL (closed form for Gaussians) ---
+            if enabled and K > 1:
+                kl_matrix = []
+                z_dim = mus[0].size(1)  # latent dimension
+                for j in range(K):
+                    for k in range(j+1, K):
+                        mu_j, lv_j = mus[j], logvars[j]
+                        mu_k, lv_k = mus[k], logvars[k]
+                        var_j, var_k = lv_j.exp(), lv_k.exp()
+                        
+                        kl_jk = 0.5 * (
+                            (var_j / var_k).sum(1)
+                          + ((mu_k - mu_j).pow(2) / var_k).sum(1)
+                          - z_dim
+                          + (lv_k - lv_j).sum(1)
+                        )
+                        kl_matrix.append(kl_jk)
+                
+                repulsion = torch.stack(kl_matrix).mean() if kl_matrix else torch.tensor(0.0, device=input_seq.device)
+                total_loss = rec_loss + beta * kl_prior - λ_rep * repulsion
+            else:
+                repulsion = torch.tensor(0.0, device=input_seq.device)
+                total_loss = rec_loss + beta * kl_prior
+            
+            if return_components:
+                return total_loss, shape_loss, grid_loss, kl_prior
+            
+            return total_loss
+            
+        else:                                          # Phase A (individual encoder training)
+            # Single encoder training mode
+            reconstruction, mu, log_var = model(input_seq, target_seq, encoder_idx=encoder_idx)
+            shape_logits, grid_logits = reconstruction
+            
+            loss = multinomial_loss(
+                (shape_logits, grid_logits),
+                target_seq,
+                beta=beta,
+                mu=mu,
+                logvar=log_var
+            )
+            
+            if return_components:
+                # Compute individual components for logging
+                shape_targets = target_seq[:, 900:902].long()
+                shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
+                
+                batch_size = target_seq.size(0)
+                grid_loss_sum, active = 0.0, 0
+                for i in range(batch_size):
+                    r, c = map(int, target_seq[i, 900:902])
+                    n_pix = r * c
+                    if n_pix > 0:
+                        grid_loss_sum += F.cross_entropy(grid_logits[i, :n_pix], target_seq[i, :n_pix].long(), reduction='sum')
+                        active += n_pix
+                grid_loss = grid_loss_sum / active if active > 0 else torch.tensor(0.0, device=target_seq.device)
+                kl_loss = 0.5 * torch.sum(mu.pow(2) + log_var.exp() - 1 - log_var) / mu.size(0)
+                
+                return loss, shape_loss, grid_loss, kl_loss
+            
+            return loss
     else:
         # Single encoder model (original implementation)
         reconstruction, mu, log_var = model(input_seq, target_seq)

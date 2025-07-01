@@ -504,6 +504,8 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
     data_settings = settings.get_data_settings()
     model_architecture = settings.get_model_architecture()
     training_settings = settings.get_training_settings()
+    latent_optimization = settings.get_latent_optimization()
+    repulsion_loss_settings = settings.get_repulsion_loss_settings()
     wandb_settings = settings.get_wandb_settings()
     specialist_settings = settings.get_specialist_training_settings()
     

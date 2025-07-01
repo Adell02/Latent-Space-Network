@@ -306,7 +306,7 @@ def main_training(file_store_name):
     model_architecture = settings.get_model_architecture()
     training_settings = settings.get_training_settings()
     latent_optimization = settings.get_latent_optimization()
-    solo_loss_settings = settings.get_solo_loss_settings()
+    repulsion_loss_settings = settings.get_repulsion_loss_settings()
     wandb_settings = settings.get_wandb_settings()
 
     # Initialize wandb for training mode (will be done after run_dir is created)

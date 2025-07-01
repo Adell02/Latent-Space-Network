@@ -8,7 +8,7 @@
     ],
     "training_seed": 42,
     "eval_seed": 1,
-    "n": 10,
+    "n": 200,
     "run_base_dir": "runs_re_arc"
   },
   "evaluation_settings": {
@@ -17,7 +17,7 @@
     ],
     "eval_n_samples": 2,
     "eval_n_queries": 100,
-    "eval_epoch": 3,
+    "eval_epoch": 50,
     "visualize_n_values": 2
   },
   "latent_optimization": {
@@ -28,7 +28,7 @@
     },
     "inference": {
       "enabled": true,
-      "num_steps": 10,
+      "num_steps": 100,
       "learning_rate": 0.1
     },
     "method": "gradient",
@@ -60,7 +60,7 @@
     "use_gradient_checkpointing": true
   },
   "training_settings": {
-    "num_epochs": 3,
+    "num_epochs": 50,
     "batch_size": 8,
     "gradient_accumulation_steps": 2,
     "learning_rate": 0.0004,
@@ -73,11 +73,9 @@
       "warmup_epochs": 20,
       "lr_min": 1e-06
     },
-    "solo_loss": {
-      "enabled": false,
-      "lambda_solo": 0.2,
-      "isolate_decoder_gradients": true,
-      "log_frequency": 100
+    "repulsion_loss": {
+      "enabled": true,
+      "lambda": 0.1
     },
     "wandb": {
       "enabled": true,
