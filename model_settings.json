@@ -45,8 +45,8 @@
     }
   },  
   "model_architecture": {
-    "num_encoders": 4,
-    "encoder_layers": 2,
+    "num_encoders": 1,
+    "encoder_layers": 8,
     "decoder_layers": 2,
     "encoder_heads": 6,
     "decoder_heads": 6,
