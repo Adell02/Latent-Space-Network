@@ -49,54 +49,61 @@ def create_sweep_configurations() -> List[Dict[str, Any]]:
     print(f"  Base encoder_layers: {base_config.get('model_architecture', {}).get('encoder_layers', 'NOT FOUND')}")
     
     # Configuration 1: Single Encoder Baseline ~ 1.2 M params
-    config_1 = copy.deepcopy(base_config)
-    config_1['model_architecture']['num_encoders'] = 1
-    config_1['model_architecture']['encoder_layers'] = 8
+    # config_1 = copy.deepcopy(base_config)
+    # config_1['model_architecture']['num_encoders'] = 1
+    # config_1['model_architecture']['encoder_layers'] = 8
     
-    # Remove any project_name from wandb config to ensure environment variable is used
-    if 'training_settings' in config_1 and 'wandb' in config_1['training_settings']:
-       config_1['training_settings']['wandb'].pop('project_name', None)
+    # # Remove any project_name from wandb config to ensure environment variable is used
+    # if 'training_settings' in config_1 and 'wandb' in config_1['training_settings']:
+    #    config_1['training_settings']['wandb'].pop('project_name', None)
     
-    print(f"Config 1: num_encoders={config_1['model_architecture']['num_encoders']}, encoder_layers={config_1['model_architecture']['encoder_layers']}")
-    configurations.append(("1200k_param_1_enc", config_1))
+    # print(f"Config 1: num_encoders={config_1['model_architecture']['num_encoders']}, encoder_layers={config_1['model_architecture']['encoder_layers']}")
+    # configurations.append(("1200k_param_1_enc", config_1))
     
-    # Configuration 2: Multi-Encoder (2 encoders) ~ 1.2 M params
-    config_2 = copy.deepcopy(base_config)
-    config_2["model_architecture"]["num_encoders"] = 2
-    config_2["model_architecture"]["encoder_layers"] = 4
+    # # Configuration 2: Multi-Encoder (2 encoders) ~ 1.2 M params
+    # config_2 = copy.deepcopy(base_config)
+    # config_2["model_architecture"]["num_encoders"] = 2
+    # config_2["model_architecture"]["encoder_layers"] = 4
     
-    # Remove any project_name from wandb config to ensure environment variable is used
-    if 'training_settings' in config_2 and 'wandb' in config_2['training_settings']:
-        config_2['training_settings']['wandb'].pop('project_name', None)
+    # # Remove any project_name from wandb config to ensure environment variable is used
+    # if 'training_settings' in config_2 and 'wandb' in config_2['training_settings']:
+    #     config_2['training_settings']['wandb'].pop('project_name', None)
     
-    print(f"Config 2: num_encoders={config_2['model_architecture']['num_encoders']}, encoder_layers={config_2['model_architecture']['encoder_layers']}")
-    configurations.append(("1200k_param_2_enc", config_2))
+    # print(f"Config 2: num_encoders={config_2['model_architecture']['num_encoders']}, encoder_layers={config_2['model_architecture']['encoder_layers']}")
+    # configurations.append(("1200k_param_2_enc", config_2))
     
-    # Configuration 3: Multi-Encoder (4 encoders) ~ 1.2 M params
-    config_3 = copy.deepcopy(base_config)
-    config_3["model_architecture"]["num_encoders"] = 4
-    config_3["model_architecture"]["encoder_layers"] = 2
+    # # Configuration 3: Multi-Encoder (4 encoders) ~ 1.2 M params
+    # config_3 = copy.deepcopy(base_config)
+    # config_3["model_architecture"]["num_encoders"] = 4
+    # config_3["model_architecture"]["encoder_layers"] = 2
     
-    # Remove any project_name from wandb config to ensure environment variable is used
-    if 'training_settings' in config_3 and 'wandb' in config_3['training_settings']:
-        config_3['training_settings']['wandb'].pop('project_name', None)
+    # # Remove any project_name from wandb config to ensure environment variable is used
+    # if 'training_settings' in config_3 and 'wandb' in config_3['training_settings']:
+    #     config_3['training_settings']['wandb'].pop('project_name', None)
     
-    print(f"Config 3: num_encoders={config_3['model_architecture']['num_encoders']}, encoder_layers={config_3['model_architecture']['encoder_layers']}")
-    configurations.append(("1200k_param_4_enc", config_3))
+    # print(f"Config 3: num_encoders={config_3['model_architecture']['num_encoders']}, encoder_layers={config_3['model_architecture']['encoder_layers']}")
+    # configurations.append(("1200k_param_4_enc", config_3))
 
-    # Train with fewer samples
+    # Different Model Sizes
     config_4 = copy.deepcopy(base_config)
-    config_4["data_settings"]["n"] = 50
+    config_4["model_architecture"]["encoder_hidden_dim"] = 48
 
     print(f"Config 4: num_encoders={config_4['model_architecture']['num_encoders']}, encoder_layers={config_4['model_architecture']['encoder_layers']}")
-    configurations.append(("50_samples", config_4))
+    configurations.append(("48_encoder_hidden_dim", config_4))
 
-    # Train with more samples
+    # Different Model Sizes
     config_5 = copy.deepcopy(base_config)
-    config_5["data_settings"]["n"] = 500
+    config_5["model_architecture"]["encoder_hidden_dim"] = 96
 
     print(f"Config 5: num_encoders={config_5['model_architecture']['num_encoders']}, encoder_layers={config_5['model_architecture']['encoder_layers']}")
-    configurations.append(("500_samples", config_5))
+    configurations.append(("96_encoder_hidden_dim", config_5))
+
+    # Different Model Sizes
+    config_6 = copy.deepcopy(base_config)
+    config_6["model_architecture"]["encoder_hidden_dim"] = 180
+
+    print(f"Config 6: num_encoders={config_6['model_architecture']['num_encoders']}, encoder_layers={config_6['model_architecture']['encoder_layers']}")
+    configurations.append(("180_encoder_hidden_dim", config_6))
 
     # Train with different latent dimensions
     config_6 = copy.deepcopy(base_config)
@@ -125,34 +132,6 @@ def create_sweep_configurations() -> List[Dict[str, Any]]:
 
     print(f"Config 9: num_encoders={config_9['model_architecture']['num_encoders']}, encoder_layers={config_9['model_architecture']['encoder_layers']}")
     configurations.append(("1024_latent_dim", config_9))
-    
-    # Different Beta values
-    config_10 = copy.deepcopy(base_config)
-    config_10["training_settings"]["beta"] = 0.001
-
-    print(f"Config 10: num_encoders={config_10['model_architecture']['num_encoders']}, encoder_layers={config_10['model_architecture']['encoder_layers']}")
-    configurations.append(("0.001_beta", config_10))
-
-    # Different Beta values
-    config_11 = copy.deepcopy(base_config)
-    config_11["training_settings"]["beta"] = 0.01
-
-    print(f"Config 11: num_encoders={config_11['model_architecture']['num_encoders']}, encoder_layers={config_11['model_architecture']['encoder_layers']}")
-    configurations.append(("0.01_beta", config_11))
-
-    # Different Beta values
-    config_12 = copy.deepcopy(base_config)
-    config_12["training_settings"]["beta"] = 0.1
-
-    print(f"Config 12: num_encoders={config_12['model_architecture']['num_encoders']}, encoder_layers={config_12['model_architecture']['encoder_layers']}")
-    configurations.append(("0.1_beta", config_12))
-
-    # Different Beta values
-    config_13 = copy.deepcopy(base_config)
-    config_13["training_settings"]["beta"] = 0.5
-
-    print(f"Config 13: num_encoders={config_13['model_architecture']['num_encoders']}, encoder_layers={config_13['model_architecture']['encoder_layers']}")
-    configurations.append(("0.5_beta", config_13))
 
     # Different repulsion loss values
     config_14 = copy.deepcopy(base_config)
@@ -177,10 +156,10 @@ def create_sweep_configurations() -> List[Dict[str, Any]]:
 
     # Different repulsion loss values
     config_17 = copy.deepcopy(base_config)
-    config_17["training_settings"]["repulsion_loss"]["lambda"] = 0.5
+    config_17["training_settings"]["repulsion_loss"]["lambda"] = 1
 
     print(f"Config 17: num_encoders={config_17['model_architecture']['num_encoders']}, encoder_layers={config_17['model_architecture']['encoder_layers']}")
-    configurations.append(("0.5_repulsion_loss", config_17))
+    configurations.append(("1_repulsion_loss", config_17))
 
     return configurations
 

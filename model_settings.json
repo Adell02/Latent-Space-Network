@@ -8,7 +8,7 @@
     ],
     "training_seed": 42,
     "eval_seed": 1,
-    "n": 200,
+    "n": 50,
     "run_base_dir": "runs_re_arc"
   },
   "evaluation_settings": {
@@ -45,8 +45,8 @@
     }
   },  
   "model_architecture": {
-    "num_encoders": 1,
-    "encoder_layers": 8,
+    "num_encoders": 4,
+    "encoder_layers": 2,
     "decoder_layers": 2,
     "encoder_heads": 6,
     "decoder_heads": 6,
