@@ -682,7 +682,8 @@ def main_training(file_store_name):
             logger.info(f"Running evaluation and visualization logging for epoch {epoch+1}...")
             eval_results = run_quick_evaluation(model, run_dir, epoch + 1)
             if eval_results:
-                log_evaluation_to_wandb(eval_results, run_dir, epoch + 1, wandb_logger)
+                # Pass the current in-memory model to avoid loading from disk
+                log_evaluation_to_wandb(eval_results, run_dir, epoch + 1, wandb_logger, current_model=model)
             else:
                 # Log visualizations without evaluation results (training-only visualizations)
                 wandb_logger.log_visualizations(run_dir, epoch + 1)

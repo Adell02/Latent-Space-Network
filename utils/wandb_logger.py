@@ -78,33 +78,60 @@ class WandbLogger:
             log_data = {k: v for k, v in accuracy_data.items() if k not in ['epoch', 'evaluation_name']}
             self._safe_log({**log_data, 'epoch': epoch}, step_hint=epoch)
     
-    def log_visualizations(self, run_dir: str, epoch: int, eval_results: Dict[str, Any] = None):
-        """Log ONLY latent space visualization during training (as requested)."""
+    def log_visualizations(self, run_dir: str, epoch: int, eval_results: Dict[str, Any] = None, trajectory_plots: Dict[str, str] = None):
+        """Log visualizations including trajectory plots to wandb."""
         if not self.is_initialized or epoch % self.log_interval != 0:
             return
             
-        print(f"Logging latent space visualization for epoch {epoch}...")
+        print(f"Logging visualizations for epoch {epoch}...")
         
         try:
             # Import visualization function
             from utils.visualizers import plot_comprehensive_latent_space
             
-            # ONLY log latent space visualization during training
+            # Log latent space visualization during training
             try:
                 plot_comprehensive_latent_space(None, eval_results, run_dir)
                 latent_plot = os.path.join(run_dir, 'latent_space_visualization.png')
                 if os.path.exists(latent_plot):
-                    self._safe_log({'latent_space_visualization': wandb.Image(latent_plot)}, step_hint=epoch)
+                    # Use consistent step parameter for slider visualization
+                    self._safe_log({'latent_space': wandb.Image(latent_plot)}, step_hint=epoch)
                     print("  ✓ Logged latent space visualization")
                 else:
                     print("  ⚠ Latent space plot not found")
             except Exception as e:
                 print(f"  ⚠ Could not create/log latent space visualization: {e}")
             
-            print("  Note: Other plots will be uploaded when running 'visualize' command")
+            # Log trajectory plots if available
+            if trajectory_plots:
+                print(f"  Logging {len(trajectory_plots)} trajectory plots...")
+                trajectory_logged = 0
+                
+                # Group all trajectory plots in a single log entry for slider visualization
+                trajectory_images = {}
+                
+                for plot_key, plot_path in trajectory_plots.items():
+                    if os.path.exists(plot_path):
+                        try:
+                            # Use consistent key naming for slider visualization
+                            wandb_key = f'trajectory_{plot_key}'
+                            trajectory_images[wandb_key] = wandb.Image(plot_path)
+                            trajectory_logged += 1
+                        except Exception as e:
+                            print(f"    ⚠ Failed to prepare {plot_key}: {e}")
+                    else:
+                        print(f"    ⚠ Trajectory plot not found: {plot_path}")
+                
+                # Log all trajectory images with the same step for slider visualization
+                if trajectory_images:
+                    self._safe_log(trajectory_images, step_hint=epoch)
+                    print(f"  ✓ Successfully logged {trajectory_logged}/{len(trajectory_plots)} trajectory plots")
+                
+            else:
+                print("  No trajectory plots to log for this epoch")
             
         except Exception as e:
-            print(f"⚠ Error logging latent space visualization: {e}")
+            print(f"⚠ Error logging visualizations: {e}")
     
     def upload_all_plots(self, run_dir: str, epoch: int = None):
         """Upload all existing plots to wandb when running visualize command."""
@@ -116,7 +143,7 @@ class WandbLogger:
         
         # Define plot files to look for and their wandb keys
         plot_files = [
-            ('latent_space_visualization.png', 'latent_space_visualization'),
+            ('latent_space_visualization.png', 'latent_space'),
             ('epoch_accuracies.png', 'epoch_accuracies'),
             ('z_optimization_losses.png', 'z_optimization_losses'),
             ('multi_encoder_training_accuracies.png', 'multi_encoder_training_accuracies'),
@@ -127,6 +154,8 @@ class WandbLogger:
         # Also look for trajectory reconstruction plots (pattern-based)
         import glob
         trajectory_plots = glob.glob(os.path.join(run_dir, 'multi_encoder_trajectory_reconstruction_sample_*.png'))
+        # Look for new trajectory plots from training epochs
+        epoch_trajectory_plots = glob.glob(os.path.join(run_dir, 'trajectory_epoch*_*.png'))
         
         uploaded_count = 0
         step = epoch if epoch else 0
@@ -152,6 +181,45 @@ class WandbLogger:
                     uploaded_count += 1
                 except Exception as e:
                     print(f"  ⚠ Failed to upload {os.path.basename(traj_plot)}: {e}")
+        
+        # Upload epoch trajectory plots with epoch-based steps for slider visualization
+        # Group by key_sample pattern for consistent keys across epochs
+        epoch_trajectory_dict = {}
+        
+        for epoch_traj_plot in epoch_trajectory_plots:
+            if os.path.exists(epoch_traj_plot):
+                try:
+                    # Extract epoch and key_sample from filename
+                    filename = os.path.basename(epoch_traj_plot)
+                    # Format: trajectory_epoch{epoch}_{key}_sample{sample_idx}.png
+                    parts = filename.replace('.png', '').split('_')
+                    if len(parts) >= 4 and parts[0] == 'trajectory' and parts[1].startswith('epoch'):
+                        epoch_num = int(parts[1].replace('epoch', ''))
+                        key = parts[2]
+                        sample_idx = parts[3].replace('sample', '')
+                        
+                        # Create consistent key for slider visualization
+                        plot_key = f'{key}_sample{sample_idx}'
+                        
+                        # Group by key_sample
+                        if plot_key not in epoch_trajectory_dict:
+                            epoch_trajectory_dict[plot_key] = []
+                        
+                        # Store epoch and path
+                        epoch_trajectory_dict[plot_key].append((epoch_num, epoch_traj_plot))
+                except Exception as e:
+                    print(f"  ⚠ Failed to process {os.path.basename(epoch_traj_plot)}: {e}")
+        
+        # Upload each trajectory plot with its corresponding epoch as step
+        for plot_key, epoch_paths in epoch_trajectory_dict.items():
+            for epoch_num, plot_path in epoch_paths:
+                try:
+                    wandb_key = f'trajectory_{plot_key}'
+                    self._safe_log({wandb_key: wandb.Image(plot_path)}, step_hint=epoch_num)
+                    print(f"  ✓ Uploaded {os.path.basename(plot_path)} (epoch {epoch_num})")
+                    uploaded_count += 1
+                except Exception as e:
+                    print(f"  ⚠ Failed to upload {os.path.basename(plot_path)}: {e}")
         
         print(f"  📊 Total plots uploaded: {uploaded_count}")
         

@@ -65,7 +65,9 @@ class SettingsManager:
             'api_key': None,
             'log_interval': 1,
             'log_visualizations': True,
-            'log_gradients': False
+            'log_gradients': False,
+            'log_trajectory_plots': True,
+            'trajectory_max_samples': 3
         })
 
     def get_latent_optimization(self) -> Dict[str, Any]:
