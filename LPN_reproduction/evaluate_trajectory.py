@@ -662,6 +662,16 @@ def visualize_multi_encoder_comprehensive_trajectory(trajectory_info, model, sav
                 ax_enc_recon.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
                 ax_enc_recon.set_title(f'Encoder {enc_idx}\n{recon_rows}×{recon_cols}', fontsize=10)
                 
+                # === NEW: print latent μ / σ averages under the image ===
+                enc_traj = individual_trajectories.get(encoder_key, {}) if 'individual_trajectories' in locals() else {}
+                enc_mu = enc_traj.get('mu')
+                enc_log_var = enc_traj.get('log_var')
+                if enc_mu is not None and enc_log_var is not None:
+                    enc_mu_mean = float(np.mean(enc_mu))
+                    enc_sigma_mean = float(np.mean(np.exp(0.5 * enc_log_var)))
+                    ax_enc_recon.text(0.5, -0.12, f"μ={enc_mu_mean:.2f} σ={enc_sigma_mean:.2f}",
+                                      transform=ax_enc_recon.transAxes, ha='center', va='top', fontsize=8)
+                
                 # Calculate and plot error map
                 if recon_rows == target_shape[0] and recon_cols == target_shape[1]:
                     error_map = recon_grid.astype(float) - target_grid.astype(float)
@@ -716,6 +726,14 @@ def visualize_multi_encoder_comprehensive_trajectory(trajectory_info, model, sav
                         # Plot reconstruction
                         ax_poe_recon.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
                         ax_poe_recon.set_title(f'PoE {display_label}\n{recon_rows}×{recon_cols}', fontsize=10)
+                        
+                        # === NEW: μ/σ text for PoE ===
+                        if trajectory_info.get('z_vectors'):
+                            poe_z_vec = trajectory_info['z_vectors'][0]  # initial PoE z
+                            poe_mu_mean = float(np.mean(poe_z_vec))
+                            poe_sigma_mean = float(np.std(poe_z_vec))
+                            ax_poe_recon.text(0.5, -0.12, f"μ={poe_mu_mean:.2f} σ={poe_sigma_mean:.2f}",
+                                              transform=ax_poe_recon.transAxes, ha='center', va='top', fontsize=8)
                         
                         # Calculate and plot error map
                         if recon_rows == target_shape[0] and recon_cols == target_shape[1]:

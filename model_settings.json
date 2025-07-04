@@ -82,7 +82,7 @@
         "type": "linear",         
         "start": 0.0,             
         "end":   0.5,
-        "warmup_epochs": 2
+        "warmup_epochs": 0
       }
     },
     "wandb": {
