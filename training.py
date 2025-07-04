@@ -220,6 +220,9 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed
     epoch_kl_loss_sum = 0
     epoch_repulsion_loss_sum = 0  # New: track repulsion loss
     
+    # Track the repulsion lambda used in this epoch (joint training)
+    current_lambda_rep = 0.0  # default in case repulsion not used
+
     optimizer.zero_grad() # Ensure gradients are zeroed at the start of accumulation cycle / epoch
 
     logger.info("-" * 60)
@@ -255,8 +258,8 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed
                         if sched_type == 'linear':
                             lam_start = schedule_cfg.get('start', 0.0)
                             lam_end = schedule_cfg.get('end', base_lambda)
-                            progress = (epoch_idx - 1) / (effective_total - 1)
-                            λ_rep = lam_start + (lam_end - lam_start) * progress
+                            denom = max(effective_total - 1, 1)
+                            progress = (epoch_idx - 1) / denom
                         elif sched_type == 'exponential':
                             lam_start = schedule_cfg.get('start', 0.01)
                             rate = schedule_cfg.get('rate', 1.05)
@@ -279,8 +282,12 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed
                 logvar_stack = torch.stack(logvars)         # [K, B, D]
                 mu_star, logvar_star = gaussian_poe(mu_stack, logvar_stack)
                 
-                # Deterministic latent
-                z = mu_star
+                # 1) Stabilise variance (exp(logvar) stays in a safe range)
+                logvar_star = logvar_star.clamp(min=-8.0, max=4.0)
+
+                # 2) Sample latent with re-parameterisation so σ² receives gradient
+                eps = torch.randn_like(mu_star)
+                z = mu_star + eps * torch.exp(0.5 * logvar_star)
                 
                 # Decode
                 shape_logits, grid_logits = model.multi_encoder.decoder(z, input_seq, target_seq=target_seq)
@@ -290,7 +297,8 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed
                 shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
                 
                 batch_size = target_seq.size(0)
-                grid_loss_sum, active = 0.0, 0
+                grid_loss_sum = torch.tensor(0.0, device=target_seq.device)
+                active = 0
                 for i in range(batch_size):
                     r, c = map(int, target_seq[i, 900:902])
                     n_pix = r * c
@@ -413,7 +421,7 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed
         logger.info(f"  Final Avg Total Loss: {avg_loss_for_epoch:.4f}")
     logger.info("=" * 60)
 
-    return avg_loss_for_epoch, avg_shape_loss, avg_grid_loss, avg_kl_loss, avg_repulsion_loss
+    return avg_loss_for_epoch, avg_shape_loss, avg_grid_loss, avg_kl_loss, avg_repulsion_loss, current_lambda_rep
 
 
 def main_training(file_store_name):
@@ -718,7 +726,7 @@ def main_training(file_store_name):
                     combined_dataloader = encoder_dataloaders[0]
 
                 # Train with joint training
-                avg_loss, avg_shape_loss, avg_grid_loss, avg_kl_loss, avg_repulsion_loss = train_model(
+                avg_loss, avg_shape_loss, avg_grid_loss, avg_kl_loss, avg_repulsion_loss, current_lambda_rep = train_model(
                     model, combined_dataloader, optimizer, run_dir, logger, 
                     scaler, use_mixed_precision, gradient_accumulation_steps,
                     current_epoch_num=epoch+1, total_epochs=NUM_EPOCHS, 
@@ -736,6 +744,7 @@ def main_training(file_store_name):
                     'avg_grid_loss': avg_grid_loss,
                     'avg_kl_loss': avg_kl_loss,
                     'avg_repulsion_loss': avg_repulsion_loss,
+                    'repulsion_lambda': current_lambda_rep,
                     'avg_total_loss': avg_loss,
                     'learning_rate': current_lr
                 })
@@ -752,7 +761,7 @@ def main_training(file_store_name):
                     logger.info(f"\n--- Training Encoder {encoder_idx} ---")
                     print(f"Training Encoder {encoder_idx}...")
                     
-                    avg_loss, avg_shape_loss, avg_grid_loss, avg_kl_loss, avg_repulsion_loss = train_model(
+                    avg_loss, avg_shape_loss, avg_grid_loss, avg_kl_loss, avg_repulsion_loss, current_lambda_rep = train_model(
                         model, encoder_dataloaders[encoder_idx], optimizer, run_dir, logger, 
                         scaler, use_mixed_precision, gradient_accumulation_steps,
                         current_epoch_num=epoch+1, total_epochs=NUM_EPOCHS, encoder_idx=encoder_idx
@@ -779,7 +788,7 @@ def main_training(file_store_name):
                 })
         else:
             # Single encoder training
-            avg_loss, avg_shape_loss, avg_grid_loss, avg_kl_loss, avg_repulsion_loss = train_model(
+            avg_loss, avg_shape_loss, avg_grid_loss, avg_kl_loss, avg_repulsion_loss, current_lambda_rep = train_model(
                 model, dataloader, optimizer, run_dir, logger, 
                 scaler, use_mixed_precision, gradient_accumulation_steps,
                 current_epoch_num=epoch+1, total_epochs=NUM_EPOCHS
@@ -887,6 +896,7 @@ def main_training(file_store_name):
                         'avg_grid_loss': avg_grid_loss,
                         'avg_kl_loss': avg_kl_loss,
                         'avg_repulsion_loss': avg_repulsion_loss,
+                        'repulsion_lambda': current_lambda_rep,
                         'avg_total_loss': avg_loss,
                         'training_mode': 'joint'
                     })
