@@ -373,14 +373,15 @@ def init_wandb_for_mode(mode: str, run_dir: str = None) -> Optional[WandbLogger]
             print(f"⚠ Wandb not enabled in settings for {mode}")
             return None
             
-        # Always prioritize environment variable for project name (especially for sweeps)
-        project_name = os.environ.get('WANDB_PROJECT_NAME')
-        
-        # Only fall back to config if environment variable is not set
-        if not project_name:
-            project_name = wandb_settings.get('project_name')
-            
-        # Only use run_dir as last resort (and only if not in sweep mode)
+        # Always first try the value from model_settings.json
+        project_name = wandb_settings.get('project_name')
+
+        # Allow environment variable to override if explicitly set (e.g. CI/CD)
+        env_override = os.environ.get('WANDB_PROJECT_NAME')
+        if env_override:
+            project_name = env_override
+
+        # Last resort: derive from run_dir
         if not project_name and run_dir and not os.environ.get('WANDB_PROJECT_NAME'):
             project_name = os.path.basename(run_dir)
         

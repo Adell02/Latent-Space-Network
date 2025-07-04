@@ -82,6 +82,7 @@
       "enabled": true,
       "entity": "ga624-imperial-college-london",
       "api_key": "e2853fdc991b057f1cebf7df2a747ecca6fdaf6c",
+      "project_name" : "HPC_RL_sweep",
       "log_interval": 1,
       "log_visualizations": true,
       "log_gradients": false,

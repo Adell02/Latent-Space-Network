@@ -85,66 +85,72 @@ def create_sweep_configurations() -> List[Dict[str, Any]]:
     # configurations.append(("1200k_param_4_enc", config_3))
 
     # Different repulsion loss values
-    config_1_rl = copy.deepcopy(base_config)
-    config_1_rl["training_settings"]["repulsion_loss"]["lambda"] = 1
+    for i in range(0,10):
+        config_i_rl = copy.deepcopy(base_config)
+        config_i_rl["training_settings"]["repulsion_loss"]["lambda"] = exp(-i)
+        print(f"Config {i}_rl: num_encoders={config_i_rl['model_architecture']['num_encoders']}, encoder_layers={config_i_rl['model_architecture']['encoder_layers']}")
+        configurations.append(f"{i}_repulsion_loss", config_i_rl)
 
-    print(f"Config 1_rl: num_encoders={config_1_rl['model_architecture']['num_encoders']}, encoder_layers={config_1_rl['model_architecture']['encoder_layers']}")
-    configurations.append(("1_repulsion_loss", config_1_rl))
+    # config_1_rl = copy.deepcopy(base_config)
+    # config_1_rl["training_settings"]["repulsion_loss"]["lambda"] = 1
 
-    config_0_5_rl = copy.deepcopy(base_config)
-    config_0_5_rl["training_settings"]["repulsion_loss"]["lambda"] = 0.5
+    # print(f"Config 1_rl: num_encoders={config_1_rl['model_architecture']['num_encoders']}, encoder_layers={config_1_rl['model_architecture']['encoder_layers']}")
+    # configurations.append(("1_repulsion_loss", config_1_rl))
+
+    # config_0_5_rl = copy.deepcopy(base_config)
+    # config_0_5_rl["training_settings"]["repulsion_loss"]["lambda"] = 0.5
     
-    print(f"Config 0_5_rl: num_encoders={config_0_5_rl['model_architecture']['num_encoders']}, encoder_layers={config_0_5_rl['model_architecture']['encoder_layers']}")
-    configurations.append(("0_5_repulsion_loss", config_0_5_rl))
+    # print(f"Config 0_5_rl: num_encoders={config_0_5_rl['model_architecture']['num_encoders']}, encoder_layers={config_0_5_rl['model_architecture']['encoder_layers']}")
+    # configurations.append(("0_5_repulsion_loss", config_0_5_rl))
 
-    config_0_rl = copy.deepcopy(base_config)
-    config_0_rl["training_settings"]["repulsion_loss"]["lambda"] = 0
+    # config_0_rl = copy.deepcopy(base_config)
+    # config_0_rl["training_settings"]["repulsion_loss"]["lambda"] = 0
 
-    print(f"Config 0_rl: num_encoders={config_0_rl['model_architecture']['num_encoders']}, encoder_layers={config_0_rl['model_architecture']['encoder_layers']}")
-    configurations.append(("0_repulsion_loss", config_0_rl))
+    # print(f"Config 0_rl: num_encoders={config_0_rl['model_architecture']['num_encoders']}, encoder_layers={config_0_rl['model_architecture']['encoder_layers']}")
+    # configurations.append(("0_repulsion_loss", config_0_rl))
 
-
-    # Different Model Sizes
-    config_24_hd = copy.deepcopy(base_config)
-    config_24_hd["model_architecture"]["encoder_hidden_dim"] = 24
-
-    print(f"Config 24_hd: num_encoders={config_24_hd['model_architecture']['num_encoders']}, encoder_layers={config_24_hd['model_architecture']['encoder_layers']}")
-    configurations.append(("24_encoder_hidden_dim", config_24_hd))
 
     # Different Model Sizes
-    config_96_hd = copy.deepcopy(base_config)
-    config_96_hd["model_architecture"]["encoder_hidden_dim"] = 96
+    # config_24_hd = copy.deepcopy(base_config)
+    # config_24_hd["model_architecture"]["encoder_hidden_dim"] = 24
 
-    print(f"Config 96_hd: num_encoders={config_96_hd['model_architecture']['num_encoders']}, encoder_layers={config_96_hd['model_architecture']['encoder_layers']}")
-    configurations.append(("96_encoder_hidden_dim", config_96_hd))
+    # print(f"Config 24_hd: num_encoders={config_24_hd['model_architecture']['num_encoders']}, encoder_layers={config_24_hd['model_architecture']['encoder_layers']}")
+    # configurations.append(("24_encoder_hidden_dim", config_24_hd))
 
-    # Different Model Sizes
-    config_180_hd = copy.deepcopy(base_config)
-    config_180_hd["model_architecture"]["encoder_hidden_dim"] = 180
+    # # Different Model Sizes
+    # config_96_hd = copy.deepcopy(base_config)
+    # config_96_hd["model_architecture"]["encoder_hidden_dim"] = 96
 
-    print(f"Config 180_hd: num_encoders={config_180_hd['model_architecture']['num_encoders']}, encoder_layers={config_180_hd['model_architecture']['encoder_layers']}")
-    configurations.append(("180_encoder_hidden_dim", config_180_hd))
+    # print(f"Config 96_hd: num_encoders={config_96_hd['model_architecture']['num_encoders']}, encoder_layers={config_96_hd['model_architecture']['encoder_layers']}")
+    # configurations.append(("96_encoder_hidden_dim", config_96_hd))
 
-    # Train with different latent dimensions
-    config_16_ld = copy.deepcopy(base_config)
-    config_16_ld["model_architecture"]["latent_dim"] = 16
+    # # Different Model Sizes
+    # config_180_hd = copy.deepcopy(base_config)
+    # config_180_hd["model_architecture"]["encoder_hidden_dim"] = 180
 
-    print(f"Config 16_ld: num_encoders={config_16_ld['model_architecture']['num_encoders']}, encoder_layers={config_16_ld['model_architecture']['encoder_layers']}")
-    configurations.append(("16_latent_dim", config_16_ld))
+    # print(f"Config 180_hd: num_encoders={config_180_hd['model_architecture']['num_encoders']}, encoder_layers={config_180_hd['model_architecture']['encoder_layers']}")
+    # configurations.append(("180_encoder_hidden_dim", config_180_hd))
 
-    # Train with different latent dimensions
-    config_64_ld = copy.deepcopy(base_config)
-    config_64_ld["model_architecture"]["latent_dim"] = 64
+    # # Train with different latent dimensions
+    # config_16_ld = copy.deepcopy(base_config)
+    # config_16_ld["model_architecture"]["latent_dim"] = 16
 
-    print(f"Config 64_ld: num_encoders={config_64_ld['model_architecture']['num_encoders']}, encoder_layers={config_64_ld['model_architecture']['encoder_layers']}")
-    configurations.append(("64_latent_dim", config_64_ld))
+    # print(f"Config 16_ld: num_encoders={config_16_ld['model_architecture']['num_encoders']}, encoder_layers={config_16_ld['model_architecture']['encoder_layers']}")
+    # configurations.append(("16_latent_dim", config_16_ld))
 
-    # Train with different latent dimensions
-    config_1024_ld = copy.deepcopy(base_config)
-    config_1024_ld["model_architecture"]["latent_dim"] = 1024
+    # # Train with different latent dimensions
+    # config_64_ld = copy.deepcopy(base_config)
+    # config_64_ld["model_architecture"]["latent_dim"] = 64
 
-    print(f"Config 1024_ld: num_encoders={config_1024_ld['model_architecture']['num_encoders']}, encoder_layers={config_1024_ld['model_architecture']['encoder_layers']}")
-    configurations.append(("1024_latent_dim", config_1024_ld))    
+    # print(f"Config 64_ld: num_encoders={config_64_ld['model_architecture']['num_encoders']}, encoder_layers={config_64_ld['model_architecture']['encoder_layers']}")
+    # configurations.append(("64_latent_dim", config_64_ld))
+
+    # # Train with different latent dimensions
+    # config_1024_ld = copy.deepcopy(base_config)
+    # config_1024_ld["model_architecture"]["latent_dim"] = 1024
+
+    # print(f"Config 1024_ld: num_encoders={config_1024_ld['model_architecture']['num_encoders']}, encoder_layers={config_1024_ld['model_architecture']['encoder_layers']}")
+    # configurations.append(("1024_latent_dim", config_1024_ld))    
 
     return configurations
 
