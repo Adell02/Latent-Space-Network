@@ -87,8 +87,8 @@ def create_sweep_configurations() -> List[Dict[str, Any]]:
     # Different repulsion loss values
     for i in range(0,10):
         config_i_rl = copy.deepcopy(base_config)
-        config_i_rl["training_settings"]["repulsion_loss"]["lambda"] = exp(-i)
-        print(f"Config {i}_rl: num_encoders={config_i_rl['model_architecture']['num_encoders']}, encoder_layers={config_i_rl['model_architecture']['encoder_layers']}")
+        config_i_rl["training_settings"]["repulsion_loss"]["schedule"]["warmup_epochs"] = i
+        print(f"Config {i}_rl: warmup_epochs={i}")
         configurations.append(f"{i}_repulsion_loss", config_i_rl)
 
     # config_1_rl = copy.deepcopy(base_config)

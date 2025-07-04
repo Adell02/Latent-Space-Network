@@ -239,9 +239,32 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed
         with torch.amp.autocast(device_type=device.type, enabled=use_mixed_precision):
             # Joint training mode with repulsion loss
             if joint_training:
-                # Get repulsion loss settings
+                # Get repulsion loss settings and optional schedule
                 rep_cfg = settings.get_repulsion_loss_settings()
-                λ_rep = rep_cfg.get('lambda', 0.1)
+                base_lambda = rep_cfg.get('lambda', 0.1)
+                schedule_cfg = rep_cfg.get('schedule', None)
+
+                if schedule_cfg:
+                    sched_type = schedule_cfg.get('type', 'linear').lower()
+                    warmup_epochs = schedule_cfg.get('warmup_epochs', 0)
+                    if current_epoch_num <= warmup_epochs:
+                        λ_rep = 0.0  # No repulsion during warm-up
+                    else:
+                        epoch_idx = current_epoch_num - warmup_epochs  # 1-indexed inside schedule window
+                        effective_total = max(total_epochs - warmup_epochs, 1)
+                        if sched_type == 'linear':
+                            lam_start = schedule_cfg.get('start', 0.0)
+                            lam_end = schedule_cfg.get('end', base_lambda)
+                            progress = (epoch_idx - 1) / (effective_total - 1)
+                            λ_rep = lam_start + (lam_end - lam_start) * progress
+                        elif sched_type == 'exponential':
+                            lam_start = schedule_cfg.get('start', 0.01)
+                            rate = schedule_cfg.get('rate', 1.05)
+                            λ_rep = lam_start * (rate ** (epoch_idx - 1))
+                        else:
+                            λ_rep = base_lambda  # unknown schedule
+                else:
+                    λ_rep = base_lambda
                 
                 # Collect latent distributions from all encoders
                 K = model.num_encoders
@@ -313,6 +336,7 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed
                 grid_loss_comp = grid_loss
                 kl_loss_comp = kl_prior
                 repulsion_comp = repulsion_loss
+                current_lambda_rep = λ_rep
             else:
                 # Original training modes (single encoder or individual encoder training)
                 if encoder_idx is not None:
@@ -348,7 +372,11 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed
             # Log individual unscaled losses for the current batch/step
             if joint_training:
                 logger.info(f"Joint Training - Epoch [{current_epoch_num}/{total_epochs}] Batch [{batch_idx + 1}/{total_batches}] ({progress:.1f}%)")
-                logger.info(f"  Step Loss: {loss.item() * gradient_accumulation_steps:.4f} (Shape: {shape_loss_comp.item():.4f}, Grid: {grid_loss_comp.item():.4f}, KL: {kl_loss_comp.item():.4f}, Repulsion: {repulsion_comp.item():.4f})")
+                logger.info(
+                    f"  Step Loss: {loss.item() * gradient_accumulation_steps:.4f} "
+                    f"(Shape: {shape_loss_comp.item():.4f}, Grid: {grid_loss_comp.item():.4f}, "
+                    f"KL: {kl_loss_comp.item():.4f}, Repulsion: {repulsion_comp.item():.4f}, λ: {current_lambda_rep:.4f})"
+                )
             elif encoder_idx is not None:
                 logger.info(f"Encoder {encoder_idx} - Epoch [{current_epoch_num}/{total_epochs}] Batch [{batch_idx + 1}/{total_batches}] ({progress:.1f}%)")
                 logger.info(f"  Step Loss: {loss.item() * gradient_accumulation_steps:.4f} (Shape: {shape_loss_comp.item():.4f}, Grid: {grid_loss_comp.item():.4f}, KL: {kl_loss_comp.item():.4f})")
@@ -370,6 +398,7 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed
         logger.info(f"  Final Avg KL Loss: {avg_kl_loss:.4f}")
         logger.info(f"  Final Avg Repulsion Loss: {avg_repulsion_loss:.4f}")
         logger.info(f"  Final Avg Total Loss: {avg_loss_for_epoch:.4f}")
+        logger.info(f"  Repulsion λ (epoch): {current_lambda_rep:.4f}")
     elif encoder_idx is not None:
         logger.info(f"Encoder {encoder_idx} - Epoch {current_epoch_num} Summary:")
         logger.info(f"  Final Avg Shape Loss: {avg_shape_loss:.4f}")
