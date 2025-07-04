@@ -1,10 +1,11 @@
 import torch
 from torch.optim import Adam
+import torch.nn.functional as F
 import json
 import numpy as np
 import os
 
-from models.base_model import LatentProgramNetwork, compute_loss
+from models.base_model import LatentProgramNetwork, compute_loss, gaussian_poe
 from utils.settings_manager import settings
 from re_arc.main import generate_and_process_tasks
 from utils.latent_functions import get_optimized_z
@@ -211,17 +212,20 @@ def evaluate_accuracy(model, dataloader, device, is_multi_encoder=False, encoder
     
     return accuracy_metrics
 
-def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed_precision, gradient_accumulation_steps, current_epoch_num, total_epochs, encoder_idx=None):
+def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed_precision, gradient_accumulation_steps, current_epoch_num, total_epochs, encoder_idx=None, joint_training=False):
     model.train()
     epoch_total_loss = 0
     epoch_shape_loss_sum = 0
     epoch_grid_loss_sum = 0
     epoch_kl_loss_sum = 0
+    epoch_repulsion_loss_sum = 0  # New: track repulsion loss
     
     optimizer.zero_grad() # Ensure gradients are zeroed at the start of accumulation cycle / epoch
 
     logger.info("-" * 60)
-    if encoder_idx is not None:
+    if joint_training:
+        logger.info(f"Starting joint training batch loop with repulsion loss - Epoch {current_epoch_num}/{total_epochs}...")
+    elif encoder_idx is not None:
         logger.info(f"Starting training batch loop for Encoder {encoder_idx} - Epoch {current_epoch_num}/{total_epochs}...")
     else:
         logger.info(f"Starting training batch loop for Epoch {current_epoch_num}/{total_epochs}...")
@@ -233,18 +237,96 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed
         target_seq = target_seq.to(device)
 
         with torch.amp.autocast(device_type=device.type, enabled=use_mixed_precision):
-            # Pass encoder_idx for multi-encoder training, beta from global settings
-            if encoder_idx is not None:
-                # Multi-encoder: train specific encoder
-                loss, shape_loss_comp, grid_loss_comp, kl_loss_comp = compute_loss(
-                    model, input_seq, target_seq, beta=BETA, return_components=True, encoder_idx=encoder_idx
-                )
+            # Joint training mode with repulsion loss
+            if joint_training:
+                # Get repulsion loss settings
+                rep_cfg = settings.get_repulsion_loss_settings()
+                λ_rep = rep_cfg.get('lambda', 0.1)
+                
+                # Collect latent distributions from all encoders
+                K = model.num_encoders
+                mus, logvars = [], []
+                for enc_idx in range(K):
+                    mu, logvar = model.multi_encoder.encoders[enc_idx](input_seq, target_seq)
+                    mus.append(mu)
+                    logvars.append(logvar)
+                
+                # Compute PoE fusion
+                mu_stack = torch.stack(mus)                 # [K, B, D]
+                logvar_stack = torch.stack(logvars)         # [K, B, D]
+                mu_star, logvar_star = gaussian_poe(mu_stack, logvar_stack)
+                
+                # Deterministic latent
+                z = mu_star
+                
+                # Decode
+                shape_logits, grid_logits = model.multi_encoder.decoder(z, input_seq, target_seq=target_seq)
+                
+                # Compute reconstruction loss
+                shape_targets = target_seq[:, 900:902].long()
+                shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
+                
+                batch_size = target_seq.size(0)
+                grid_loss_sum, active = 0.0, 0
+                for i in range(batch_size):
+                    r, c = map(int, target_seq[i, 900:902])
+                    n_pix = r * c
+                    if n_pix > 0:
+                        grid_loss_sum += F.cross_entropy(grid_logits[i, :n_pix], target_seq[i, :n_pix].long(), reduction='sum')
+                        active += n_pix
+                grid_loss = grid_loss_sum / active if active > 0 else torch.tensor(0.0, device=target_seq.device)
+                rec_loss = shape_loss + grid_loss
+                
+                # KL to prior for every encoder
+                kl_prior = 0.5 * torch.stack([
+                    (mu.pow(2) + logvar.exp() - 1 - logvar).sum(1)
+                    for mu, logvar in zip(mus, logvars)
+                ]).mean()
+                
+                # Pairwise repulsive KL (closed form for Gaussians)
+                repulsion_loss = torch.tensor(0.0, device=target_seq.device)
+                if K > 1:
+                    kl_matrix = []
+                    z_dim = mus[0].size(1)  # latent dimension
+                    for j in range(K):
+                        for k in range(j+1, K):
+                            mu_j, lv_j = mus[j], logvars[j]
+                            mu_k, lv_k = mus[k], logvars[k]
+                            var_j, var_k = lv_j.exp(), lv_k.exp()
+                            
+                            kl_jk = 0.5 * (
+                                (var_j / var_k).sum(1)
+                              + ((mu_k - mu_j).pow(2) / var_k).sum(1)
+                              - z_dim
+                              + (lv_k - lv_j).sum(1)
+                            )
+                            kl_matrix.append(kl_jk)
+                    
+                    repulsion_loss = torch.stack(kl_matrix).mean() if kl_matrix else torch.tensor(0.0, device=input_seq.device)
+                
+                # Total loss with repulsion term
+                loss = rec_loss + BETA * kl_prior - λ_rep * repulsion_loss
+                loss = loss / gradient_accumulation_steps
+                
+                # Store components for logging
+                shape_loss_comp = shape_loss
+                grid_loss_comp = grid_loss
+                kl_loss_comp = kl_prior
+                repulsion_comp = repulsion_loss
             else:
-                # Single encoder or inference mode
-                loss, shape_loss_comp, grid_loss_comp, kl_loss_comp = compute_loss(
-                    model, input_seq, target_seq, beta=BETA, return_components=True
-                )
-            loss = loss / gradient_accumulation_steps
+                # Original training modes (single encoder or individual encoder training)
+                if encoder_idx is not None:
+                    # Multi-encoder: train specific encoder
+                    loss, shape_loss_comp, grid_loss_comp, kl_loss_comp = compute_loss(
+                        model, input_seq, target_seq, beta=BETA, return_components=True, encoder_idx=encoder_idx
+                    )
+                else:
+                    # Single encoder or inference mode
+                    loss, shape_loss_comp, grid_loss_comp, kl_loss_comp = compute_loss(
+                        model, input_seq, target_seq, beta=BETA, return_components=True
+                    )
+                loss = loss / gradient_accumulation_steps
+                repulsion_comp = torch.tensor(0.0, device=input_seq.device)  # No repulsion in original modes
         
         scaler.scale(loss).backward()
 
@@ -257,36 +339,52 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed
         epoch_shape_loss_sum += shape_loss_comp.item()
         epoch_grid_loss_sum += grid_loss_comp.item()
         epoch_kl_loss_sum += kl_loss_comp.item()
+        epoch_repulsion_loss_sum += repulsion_comp.item()
         
         progress = (batch_idx + 1) / total_batches * 100
         # Log less frequently if accumulating gradients
         log_frequency = gradient_accumulation_steps * 5 
         if (batch_idx + 1) % log_frequency == 0 or (batch_idx + 1) == total_batches:
             # Log individual unscaled losses for the current batch/step
-            if encoder_idx is not None:
+            if joint_training:
+                logger.info(f"Joint Training - Epoch [{current_epoch_num}/{total_epochs}] Batch [{batch_idx + 1}/{total_batches}] ({progress:.1f}%)")
+                logger.info(f"  Step Loss: {loss.item() * gradient_accumulation_steps:.4f} (Shape: {shape_loss_comp.item():.4f}, Grid: {grid_loss_comp.item():.4f}, KL: {kl_loss_comp.item():.4f}, Repulsion: {repulsion_comp.item():.4f})")
+            elif encoder_idx is not None:
                 logger.info(f"Encoder {encoder_idx} - Epoch [{current_epoch_num}/{total_epochs}] Batch [{batch_idx + 1}/{total_batches}] ({progress:.1f}%)")
+                logger.info(f"  Step Loss: {loss.item() * gradient_accumulation_steps:.4f} (Shape: {shape_loss_comp.item():.4f}, Grid: {grid_loss_comp.item():.4f}, KL: {kl_loss_comp.item():.4f})")
             else:
                 logger.info(f"Epoch [{current_epoch_num}/{total_epochs}] Batch [{batch_idx + 1}/{total_batches}] ({progress:.1f}%)")
-            logger.info(f"  Step Loss: {loss.item() * gradient_accumulation_steps:.4f} (Shape: {shape_loss_comp.item():.4f}, Grid: {grid_loss_comp.item():.4f}, KL: {kl_loss_comp.item():.4f})")
-
+                logger.info(f"  Step Loss: {loss.item() * gradient_accumulation_steps:.4f} (Shape: {shape_loss_comp.item():.4f}, Grid: {grid_loss_comp.item():.4f}, KL: {kl_loss_comp.item():.4f})")
 
     avg_loss_for_epoch = epoch_total_loss / total_batches
     avg_shape_loss = epoch_shape_loss_sum / total_batches
     avg_grid_loss = epoch_grid_loss_sum / total_batches
     avg_kl_loss = epoch_kl_loss_sum / total_batches
+    avg_repulsion_loss = epoch_repulsion_loss_sum / total_batches
     
     logger.info("=" * 60)
-    if encoder_idx is not None:
+    if joint_training:
+        logger.info(f"Joint Training - Epoch {current_epoch_num} Summary:")
+        logger.info(f"  Final Avg Shape Loss: {avg_shape_loss:.4f}")
+        logger.info(f"  Final Avg Grid Loss: {avg_grid_loss:.4f}")
+        logger.info(f"  Final Avg KL Loss: {avg_kl_loss:.4f}")
+        logger.info(f"  Final Avg Repulsion Loss: {avg_repulsion_loss:.4f}")
+        logger.info(f"  Final Avg Total Loss: {avg_loss_for_epoch:.4f}")
+    elif encoder_idx is not None:
         logger.info(f"Encoder {encoder_idx} - Epoch {current_epoch_num} Summary:")
+        logger.info(f"  Final Avg Shape Loss: {avg_shape_loss:.4f}")
+        logger.info(f"  Final Avg Grid Loss: {avg_grid_loss:.4f}")
+        logger.info(f"  Final Avg KL Loss: {avg_kl_loss:.4f}")
+        logger.info(f"  Final Avg Total Loss: {avg_loss_for_epoch:.4f}")
     else:
         logger.info(f"Epoch {current_epoch_num} Summary:")
-    logger.info(f"  Final Avg Shape Loss: {avg_shape_loss:.4f}")
-    logger.info(f"  Final Avg Grid Loss: {avg_grid_loss:.4f}")
-    logger.info(f"  Final Avg KL Loss: {avg_kl_loss:.4f}")
-    logger.info(f"  Final Avg Total Loss: {avg_loss_for_epoch:.4f}")
+        logger.info(f"  Final Avg Shape Loss: {avg_shape_loss:.4f}")
+        logger.info(f"  Final Avg Grid Loss: {avg_grid_loss:.4f}")
+        logger.info(f"  Final Avg KL Loss: {avg_kl_loss:.4f}")
+        logger.info(f"  Final Avg Total Loss: {avg_loss_for_epoch:.4f}")
     logger.info("=" * 60)
 
-    return avg_loss_for_epoch, avg_shape_loss, avg_grid_loss, avg_kl_loss
+    return avg_loss_for_epoch, avg_shape_loss, avg_grid_loss, avg_kl_loss, avg_repulsion_loss
 
 
 def main_training(file_store_name):
@@ -334,6 +432,10 @@ def main_training(file_store_name):
     
     set_seed(data_settings['training_seed'])
 
+    SPLIT_ACROSS_ENCODERS = data_settings.get('split_across_encoders', True)
+    # Check if multi-encoder training is enabled
+    NUM_ENCODERS = model_architecture.get('num_encoders', 1)
+    is_multi_encoder = NUM_ENCODERS > 1
 
     run_dir = create_run_directory(file_store_name)
     logger = setup_logging(run_dir)
@@ -353,46 +455,74 @@ def main_training(file_store_name):
     logger.info("Generating and preparing data...")
     print("Generating and preparing data...")
 
-    # Check if multi-encoder training is enabled
-    NUM_ENCODERS = model_architecture.get('num_encoders', 1)
-    is_multi_encoder = NUM_ENCODERS > 1
-    
     if is_multi_encoder:
         logger.info(f"Multi-encoder training enabled with {NUM_ENCODERS} encoders")
         print(f"Multi-encoder training enabled with {NUM_ENCODERS} encoders")
         
-        # Use key-based dataset splitting for multi-encoder training
-        logger.info("Using key-based dataset splitting for multi-encoder training")
-        print("Using key-based dataset splitting for multi-encoder training")
-        
-        dataset_splits, key_to_encoder_mapping, splitting_statistics = split_dataset_by_keys_for_multi_encoder(
-            TRAINING_KEYS, NUM_ENCODERS, N_EXAMPLES_PER_TASK, generate_and_process_tasks
-        )
-        
-        # Store splitting information for later use
-        training_metadata = {
-            'key_to_encoder_mapping': key_to_encoder_mapping,
-            'splitting_statistics': splitting_statistics,
-            'training_keys': TRAINING_KEYS,
-            'num_encoders': NUM_ENCODERS
-        }
-        
-        # Create dataloaders for each encoder
-        encoder_dataloaders = []
-        for i, (enc_inputs, enc_outputs) in enumerate(dataset_splits):
-            if enc_inputs and enc_outputs:
-                dataloader = prepare_dataloader(enc_inputs, enc_outputs, BATCH_SIZE)
-                encoder_dataloaders.append(dataloader)
-                
-                # Log which keys are trained by this encoder
-                encoder_keys = splitting_statistics['keys_per_encoder'][i]
-                logger.info(f"Encoder {i}: {len(enc_inputs)} samples from keys {encoder_keys}")
-                print(f"Encoder {i}: {len(enc_inputs)} samples from keys {encoder_keys}")
-            else:
-                # Create empty dataloader for consistency
-                encoder_dataloaders.append(prepare_dataloader([], [], BATCH_SIZE))
-                logger.info(f"Encoder {i}: No data assigned")
-                print(f"Encoder {i}: No data assigned")
+        if SPLIT_ACROSS_ENCODERS:
+            # ---------------------- KEY-BASED SPLITTING ----------------------
+            logger.info("Using key-based dataset splitting for multi-encoder training (split_across_encoders = True)")
+            print("Using key-based dataset splitting for multi-encoder training (split_across_encoders = True)")
+            
+            dataset_splits, key_to_encoder_mapping, splitting_statistics = split_dataset_by_keys_for_multi_encoder(
+                TRAINING_KEYS, NUM_ENCODERS, N_EXAMPLES_PER_TASK, generate_and_process_tasks
+            )
+            
+            # Store splitting information for later use
+            training_metadata = {
+                'key_to_encoder_mapping': key_to_encoder_mapping,
+                'splitting_statistics': splitting_statistics,
+                'training_keys': TRAINING_KEYS,
+                'num_encoders': NUM_ENCODERS,
+                'split_across_encoders': True
+            }
+            
+            # Create dataloaders for each encoder
+            encoder_dataloaders = []
+            for i, (enc_inputs, enc_outputs) in enumerate(dataset_splits):
+                if enc_inputs and enc_outputs:
+                    dataloader = prepare_dataloader(enc_inputs, enc_outputs, BATCH_SIZE)
+                    encoder_dataloaders.append(dataloader)
+                    
+                    # Log which keys are trained by this encoder
+                    encoder_keys = splitting_statistics['keys_per_encoder'][i]
+                    logger.info(f"Encoder {i}: {len(enc_inputs)} samples from keys {encoder_keys}")
+                    print(f"Encoder {i}: {len(enc_inputs)} samples from keys {encoder_keys}")
+                else:
+                    # Create empty dataloader for consistency
+                    encoder_dataloaders.append(prepare_dataloader([], [], BATCH_SIZE))
+                    logger.info(f"Encoder {i}: No data assigned")
+                    print(f"Encoder {i}: No data assigned")
+        else:
+            # ---------------------- MIXED DATASET (NO SPLIT) ------------------
+            logger.info("split_across_encoders = False → using mixed dataset for all encoders")
+            print("split_across_encoders = False → using mixed dataset for all encoders")
+            
+            all_input_sequences = []
+            all_output_sequences = []
+            for task_key in TRAINING_KEYS:
+                try:
+                    _, _, _, task_input_sequences, task_output_sequences = generate_and_process_tasks(task_key, N_EXAMPLES_PER_TASK)
+                    all_input_sequences.extend(task_input_sequences)
+                    all_output_sequences.extend(task_output_sequences)
+                    logger.info(f"Generated {len(task_input_sequences)} pairs for task {task_key}")
+                except Exception as e:
+                    logger.error(f"Error generating data for task {task_key}: {e}")
+                    continue
+            if not all_input_sequences:
+                logger.error("No data generated for mixed dataset. Exiting training.")
+                print("No data generated for mixed dataset. Exiting training.")
+                return None, None
+            mixed_dataloader = prepare_dataloader(all_input_sequences, all_output_sequences, BATCH_SIZE)
+            # Use the same dataloader reference for each encoder to keep downstream code intact
+            encoder_dataloaders = [mixed_dataloader for _ in range(NUM_ENCODERS)]
+            
+            training_metadata = {
+                'training_keys': TRAINING_KEYS,
+                'num_encoders': NUM_ENCODERS,
+                'split_across_encoders': False,
+                'mixed_dataset_samples': len(all_input_sequences)
+            }
     else:
         # Single encoder training - generate data normally
         logger.info("Generating data for single encoder training...")
@@ -527,41 +657,100 @@ def main_training(file_store_name):
         logger.info("=" * 80)
 
         if is_multi_encoder:
-            # Multi-encoder training: train each encoder individually
-            epoch_losses = []
-            epoch_metrics_list = []
+            # Check if we should use joint training with repulsion loss
+            repulsion_loss_settings = settings.get_repulsion_loss_settings()
+            use_joint_training = repulsion_loss_settings.get('enabled', True)
             
-            for encoder_idx in range(NUM_ENCODERS):
-                logger.info(f"\n--- Training Encoder {encoder_idx} ---")
-                print(f"Training Encoder {encoder_idx}...")
+            if use_joint_training:
+                # Joint training: train all encoders together with repulsion loss
+                logger.info(f"\n--- Joint Training with Repulsion Loss ---")
+                print(f"Joint training all encoders with repulsion loss...")
                 
-                avg_loss, avg_shape_loss, avg_grid_loss, avg_kl_loss = train_model(
-                    model, encoder_dataloaders[encoder_idx], optimizer, run_dir, logger, 
+                # Build (or reuse) combined dataloader
+                if SPLIT_ACROSS_ENCODERS:
+                    combined_input_sequences = []
+                    combined_output_sequences = []
+                    for encoder_dataloader in encoder_dataloaders:
+                        for batch_input, batch_output in encoder_dataloader:
+                            combined_input_sequences.extend(batch_input.tolist())
+                            combined_output_sequences.extend(batch_output.tolist())
+                    import random
+                    combined_indices = list(range(len(combined_input_sequences)))
+                    random.shuffle(combined_indices)
+                    shuffled_input_sequences = [combined_input_sequences[i] for i in combined_indices]
+                    shuffled_output_sequences = [combined_output_sequences[i] for i in combined_indices]
+                    combined_dataloader = prepare_dataloader(
+                        shuffled_input_sequences,
+                        shuffled_output_sequences,
+                        BATCH_SIZE
+                    )
+                else:
+                    # No split: reuse the first encoder dataloader (all data already mixed)
+                    combined_dataloader = encoder_dataloaders[0]
+
+                # Train with joint training
+                avg_loss, avg_shape_loss, avg_grid_loss, avg_kl_loss, avg_repulsion_loss = train_model(
+                    model, combined_dataloader, optimizer, run_dir, logger, 
                     scaler, use_mixed_precision, gradient_accumulation_steps,
-                    current_epoch_num=epoch+1, total_epochs=NUM_EPOCHS, encoder_idx=encoder_idx
+                    current_epoch_num=epoch+1, total_epochs=NUM_EPOCHS, 
+                    joint_training=True
                 )
                 
-                epoch_losses.append(avg_loss)
-                epoch_metrics_list.append({
-                    'encoder_idx': encoder_idx,
+                avg_epoch_loss = avg_loss  # Ensure variable exists for downstream checkpoint/save logic
+
+                # Store metrics
+                results['epoch_losses'].append(avg_loss)
+                results['epoch_metrics'].append({
+                    'epoch': epoch + 1,
+                    'training_mode': 'joint',
                     'avg_shape_loss': avg_shape_loss,
                     'avg_grid_loss': avg_grid_loss,
                     'avg_kl_loss': avg_kl_loss,
-                    'avg_total_loss': avg_loss
+                    'avg_repulsion_loss': avg_repulsion_loss,
+                    'avg_total_loss': avg_loss,
+                    'learning_rate': current_lr
                 })
-            
-            # Average losses across all encoders for epoch summary
-            avg_epoch_loss = sum(epoch_losses) / len(epoch_losses)
-            results['epoch_losses'].append(avg_epoch_loss)
-            results['epoch_metrics'].append({
-                'epoch': epoch + 1,
-                'multi_encoder_metrics': epoch_metrics_list,
-                'avg_total_loss': avg_epoch_loss,
-                'learning_rate': current_lr
-            })
+                
+                # Log to console
+                logger.info(f"Joint training completed for epoch {epoch+1}")
+                print(f"Epoch {epoch+1} completed. Joint training loss: {avg_loss:.4f}")
+            else:
+                # Original multi-encoder training: train each encoder individually
+                epoch_losses = []
+                epoch_metrics_list = []
+                
+                for encoder_idx in range(NUM_ENCODERS):
+                    logger.info(f"\n--- Training Encoder {encoder_idx} ---")
+                    print(f"Training Encoder {encoder_idx}...")
+                    
+                    avg_loss, avg_shape_loss, avg_grid_loss, avg_kl_loss, avg_repulsion_loss = train_model(
+                        model, encoder_dataloaders[encoder_idx], optimizer, run_dir, logger, 
+                        scaler, use_mixed_precision, gradient_accumulation_steps,
+                        current_epoch_num=epoch+1, total_epochs=NUM_EPOCHS, encoder_idx=encoder_idx
+                    )
+                    
+                    epoch_losses.append(avg_loss)
+                    epoch_metrics_list.append({
+                        'encoder_idx': encoder_idx,
+                        'avg_shape_loss': avg_shape_loss,
+                        'avg_grid_loss': avg_grid_loss,
+                        'avg_kl_loss': avg_kl_loss,
+                        'avg_total_loss': avg_loss
+                    })
+                
+                # Average losses across all encoders for epoch summary
+                avg_epoch_loss = sum(epoch_losses) / len(epoch_losses)
+                results['epoch_losses'].append(avg_epoch_loss)
+                results['epoch_metrics'].append({
+                    'epoch': epoch + 1,
+                    'training_mode': 'individual',
+                    'multi_encoder_metrics': epoch_metrics_list,
+                    'avg_total_loss': avg_epoch_loss,
+                    'learning_rate': current_lr
+                })
         else:
             # Single encoder training
-            avg_loss, avg_shape_loss, avg_grid_loss, avg_kl_loss = train_model(
+            avg_loss, avg_shape_loss, avg_grid_loss, avg_kl_loss, avg_repulsion_loss = train_model(
                 model, dataloader, optimizer, run_dir, logger, 
                 scaler, use_mixed_precision, gradient_accumulation_steps,
                 current_epoch_num=epoch+1, total_epochs=NUM_EPOCHS
@@ -581,8 +770,12 @@ def main_training(file_store_name):
 
         logger.info(f"\nEpoch {epoch+1}/{NUM_EPOCHS} completed.")
         if is_multi_encoder:
-            logger.info(f"Average Loss across encoders: {avg_epoch_loss:.4f}")
-            print(f"Epoch {epoch+1} completed. Average Loss across encoders: {avg_epoch_loss:.4f}")
+            if use_joint_training:
+                logger.info(f"Joint Training Loss: {avg_loss:.4f}")
+                print(f"Epoch {epoch+1} completed. Joint Training Loss: {avg_loss:.4f}")
+            else:
+                logger.info(f"Average Loss across encoders: {avg_epoch_loss:.4f}")
+                print(f"Epoch {epoch+1} completed. Average Loss across encoders: {avg_epoch_loss:.4f}")
         else:
             logger.info(f"Average Loss: {avg_loss:.4f}")
             print(f"Epoch {epoch+1} completed. Average Loss: {avg_loss:.4f}")
@@ -658,13 +851,25 @@ def main_training(file_store_name):
         # Log training metrics to wandb
         if wandb_logger:
             if is_multi_encoder:
-                # Log average metrics across encoders
-                wandb_logger.log_training_metrics(epoch + 1, {
-                    'avg_shape_loss': sum(m['avg_shape_loss'] for m in epoch_metrics_list) / len(epoch_metrics_list),
-                    'avg_grid_loss': sum(m['avg_grid_loss'] for m in epoch_metrics_list) / len(epoch_metrics_list),
-                    'avg_kl_loss': sum(m['avg_kl_loss'] for m in epoch_metrics_list) / len(epoch_metrics_list),
-                    'avg_total_loss': avg_epoch_loss
-                })
+                if use_joint_training:
+                    # Log joint training metrics including repulsion loss
+                    wandb_logger.log_training_metrics(epoch + 1, {
+                        'avg_shape_loss': avg_shape_loss,
+                        'avg_grid_loss': avg_grid_loss,
+                        'avg_kl_loss': avg_kl_loss,
+                        'avg_repulsion_loss': avg_repulsion_loss,
+                        'avg_total_loss': avg_loss,
+                        'training_mode': 'joint'
+                    })
+                else:
+                    # Log average metrics across encoders
+                    wandb_logger.log_training_metrics(epoch + 1, {
+                        'avg_shape_loss': sum(m['avg_shape_loss'] for m in epoch_metrics_list) / len(epoch_metrics_list),
+                        'avg_grid_loss': sum(m['avg_grid_loss'] for m in epoch_metrics_list) / len(epoch_metrics_list),
+                        'avg_kl_loss': sum(m['avg_kl_loss'] for m in epoch_metrics_list) / len(epoch_metrics_list),
+                        'avg_total_loss': avg_epoch_loss,
+                        'training_mode': 'individual'
+                    })
                 # Log accuracy metrics
                 wandb_logger.log_accuracy_metrics(epoch + 1, epoch_accuracy_data)
             else:

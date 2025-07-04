@@ -364,9 +364,16 @@ def safe_extract_reconstruction_grid(shape_logits, grid_logits):
         else:
             return None, 0, 0
         
-        # Validate dimensions
+        # Validate dimensions – if invalid, fall back to best effort based on available pixels
         if recon_rows <= 0 or recon_cols <= 0 or recon_rows > 30 or recon_cols > 30:
-            return None, recon_rows, recon_cols
+            # Fallback: try to infer square grid size from available predictions (≤30)
+            total_pred = len(pred_grid_flat.flatten() if hasattr(pred_grid_flat, 'flatten') else pred_grid_flat)
+            if total_pred > 0:
+                side = int(np.sqrt(total_pred))
+                side = max(1, min(30, side))
+                recon_rows = recon_cols = side
+            else:
+                return None, recon_rows, recon_cols
         
         # Handle grid prediction data - fix the shape issue
         # pred_grid_flat might be (1, 900) instead of (900,), so flatten it
@@ -389,6 +396,11 @@ def safe_extract_reconstruction_grid(shape_logits, grid_logits):
                 recon_grid = grid_predictions[:needed_pixels].reshape(recon_rows, recon_cols)
                 return recon_grid, recon_rows, recon_cols
             else:
+                # Fallback: reshape using whatever pixels are available into square grid
+                side = int(np.sqrt(available_pixels))
+                if side > 0:
+                    recon_grid = grid_predictions[:side*side].reshape(side, side)
+                    return recon_grid, side, side
                 return None, recon_rows, recon_cols
         else:
             return None, recon_rows, recon_cols

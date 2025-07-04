@@ -222,7 +222,7 @@ def generate_and_process_tasks(key, n_examples, plot=False, print_data=False,n_p
         tuple: Arrays of input and output sequences.
     """
     # Define the file path for the JSON file associated with the key
-    file_path = f're_arc/arc_original/training/{key}.json'
+    file_path = f'arc_original/training/{key}.json'
 
     if os.path.exists(file_path):
         # Load the JSON file containing the task data

@@ -8,6 +8,8 @@ import wandb
 import torch
 import os
 from typing import Dict, Any, List, Optional
+import re
+from datetime import datetime
 
 class WandbLogger:
     """Minimal wandb logger that reuses existing visualization functions."""
@@ -30,6 +32,11 @@ class WandbLogger:
         # Set API key if provided
         if self.api_key:
             os.environ["WANDB_API_KEY"] = self.api_key
+        
+        # Make sure run name is safe and unique
+        if run_name is None:
+            run_name = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        run_name = _slugify(run_name)
         
         try:
             self.run = wandb.init(
@@ -144,6 +151,7 @@ class WandbLogger:
         # Define plot files to look for and their wandb keys
         plot_files = [
             ('latent_space_visualization.png', 'latent_space'),
+            ('comprehensive_latent_space.png', 'latent_space_comprehensive'),
             ('epoch_accuracies.png', 'epoch_accuracies'),
             ('z_optimization_losses.png', 'z_optimization_losses'),
             ('multi_encoder_training_accuracies.png', 'multi_encoder_training_accuracies'),
@@ -405,3 +413,12 @@ def init_wandb_for_mode(mode: str, run_dir: str = None) -> Optional[WandbLogger]
     except Exception as e:
         print(f"⚠ Could not initialize wandb for {mode}: {e}")
         return None 
+
+# --------------------------------------------------
+# Helper: sanitize a string so WandB run / artifact names are safe
+# --------------------------------------------------
+def _slugify(value: str) -> str:
+    """Convert arbitrary string to safe slug for WandB names."""
+    if value is None:
+        return None
+    return re.sub(r"[^A-Za-z0-9_\-]+", "_", str(value))[:128]
