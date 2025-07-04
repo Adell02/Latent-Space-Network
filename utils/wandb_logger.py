@@ -376,10 +376,11 @@ def init_wandb_for_mode(mode: str, run_dir: str = None) -> Optional[WandbLogger]
         # Always first try the value from model_settings.json
         project_name = wandb_settings.get('project_name')
 
-        # Allow environment variable to override if explicitly set (e.g. CI/CD)
-        env_override = os.environ.get('WANDB_PROJECT_NAME')
-        if env_override:
-            project_name = env_override
+        # Fall back to environment variable only if the setting does not specify a project name
+        if not project_name:
+            env_override = os.environ.get('WANDB_PROJECT_NAME')
+            if env_override:
+                project_name = env_override
 
         # Last resort: derive from run_dir
         if not project_name and run_dir and not os.environ.get('WANDB_PROJECT_NAME'):

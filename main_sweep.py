@@ -17,7 +17,7 @@ import shutil
 import copy
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Tuple
 import torch
 
 # Import existing modules
@@ -32,7 +32,7 @@ SWEEP_CONFIG_DIR = "sweep_configs"
 WANDB_PROJECT = "LARGE_multiencoder_sweep"
 BASE_DIR = "runs_re_arc"
 
-def create_sweep_configurations() -> List[Dict[str, Any]]:
+def create_sweep_configurations() -> List[Tuple[str, Dict[str, Any]]]:
     """
     Define comprehensive hyperparameter configurations for the sweep.
     Returns a list of configuration dictionaries.
@@ -89,7 +89,7 @@ def create_sweep_configurations() -> List[Dict[str, Any]]:
         config_i_rl = copy.deepcopy(base_config)
         config_i_rl["training_settings"]["repulsion_loss"]["schedule"]["warmup_epochs"] = i
         print(f"Config {i}_rl: warmup_epochs={i}")
-        configurations.append(f"{i}_repulsion_loss", config_i_rl)
+        configurations.append((f"{i}_repulsion_loss", config_i_rl))
 
     # config_1_rl = copy.deepcopy(base_config)
     # config_1_rl["training_settings"]["repulsion_loss"]["lambda"] = 1
