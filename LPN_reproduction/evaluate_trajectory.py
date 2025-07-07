@@ -12,6 +12,7 @@ from sklearn.manifold import TSNE
 from sklearn.preprocessing import StandardScaler
 from tabulate import tabulate
 from sklearn.neighbors import NearestNeighbors
+from scipy.stats import norm
 
 # Add the parent directory to the Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -505,6 +506,14 @@ def visualize_all_samples_comprehensive(trajectory_info_list, model, save_path, 
     
     print(f"Comprehensive visualization saved to {save_path}")
 
+def _plot_gaussian(ax, mu, sigma, color, label):
+    """Quick helper – plot 1-D Gaussian PDF."""
+    xs = np.linspace(mu - 4*sigma, mu + 4*sigma, 200)
+    ax.plot(xs, norm.pdf(xs, mu, sigma), color=color, lw=2)
+    ax.set_title(label, fontsize=9)
+    ax.set_yticks([])
+    ax.grid(alpha=0.3)
+
 def visualize_multi_encoder_comprehensive_trajectory(trajectory_info, model, save_path, run_dir, device='cuda'):
     """
     Create a comprehensive visualization for multi-encoder models showing:
@@ -533,7 +542,7 @@ def visualize_multi_encoder_comprehensive_trajectory(trajectory_info, model, sav
     # Row 0: Input | Merged Latent Space (5 cols) | Loss Plot (2 cols)
     # Row 1: Target | Individual Encoder Reconstructions (4 cols) | PoE Reconstructions (3 cols)
     # Row 2: Error | Individual Encoder Error Maps (4 cols) | PoE Error Maps (3 cols)
-    gs = fig.add_gridspec(3, 8, width_ratios=[1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1], height_ratios=[1, 1.5, 1.5])
+    gs = fig.add_gridspec(4, 8, width_ratios=[1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1], height_ratios=[1, 1.5, 1.5, 1.5])
     
     # Input and Target (left column)
     ax_input = fig.add_subplot(gs[0, 0])
@@ -776,6 +785,42 @@ def visualize_multi_encoder_comprehensive_trajectory(trajectory_info, model, sav
             ax_poe_error.set_title(f'PoE Error {i}', fontsize=10)
             ax_poe_error.axis('off')
     
+    # NEW SECTION ➜ overlay all Gaussians on ONE axis
+    # ------------------------------------------------------------------
+    # Replace the previous per-column axes list with a single combined axis
+    ax_gauss = fig.add_subplot(gs[3, 1:7])          # span the central columns
+    ax_gauss.set_title('Latent 1-D PDFs (all encoders + PoE)', fontsize=11)
+    ax_gauss.set_yticks([])                         # pdf height is not important numerically
+    ax_gauss.grid(alpha=0.3)
+
+    enc_colors = plt.cm.Set1(np.linspace(0, 1, num_encoders))
+
+    # 1. Individual encoders
+    for enc_idx in range(num_encoders):
+        enc_traj = individual_trajectories.get(f'encoder_{enc_idx}', {})
+        enc_mu, enc_log_var = enc_traj.get('mu'), enc_traj.get('log_var')
+        if enc_mu is None or enc_log_var is None:
+            continue
+        mu_val  = float(np.mean(enc_mu))
+        sigma_v = float(np.mean(np.exp(0.5 * enc_log_var)))
+        xs = np.linspace(mu_val - 4 * sigma_v, mu_val + 4 * sigma_v, 200)
+        ax_gauss.plot(xs, norm.pdf(xs, mu_val, sigma_v),
+                      color=enc_colors[enc_idx],
+                      lw=2,
+                      label=f'Enc {enc_idx}: μ={mu_val:.2f} σ={sigma_v:.2f}')
+
+    # 2. PoE
+    poe_mu_mean   = float(np.mean(trajectory_info['z_vectors'][0]))
+    poe_sigma_est = float(np.std(trajectory_info['z_vectors'][0]))
+    xs_poe = np.linspace(poe_mu_mean - 4 * poe_sigma_est,
+                         poe_mu_mean + 4 * poe_sigma_est, 200)
+    ax_gauss.plot(xs_poe, norm.pdf(xs_poe, poe_mu_mean, poe_sigma_est),
+                  color='k', lw=3, label=f'PoE: μ={poe_mu_mean:.2f} σ≈{poe_sigma_est:.2f}')
+
+    ax_gauss.legend(fontsize=8)
+
+    # ------------------------------------------------------------------
+    # tighten layout / save as before
     plt.suptitle(f'Multi-Encoder Analysis: Individual vs PoE ({num_encoders} Encoders)', fontsize=16, y=0.98)
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.subplots_adjust(hspace=0.4, wspace=0.3)

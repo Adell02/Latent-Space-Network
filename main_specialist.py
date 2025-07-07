@@ -34,6 +34,10 @@ DEFAULT_EVAL_EPOCH = evaluation_settings['eval_epoch']
 DEFAULT_VISUALIZE_N_VALUES = evaluation_settings['visualize_n_values']
 DEFAULT_PHASES = specialist_settings['phases_to_run']
 
+# Ensure default phases are valid for the new approach
+if DEFAULT_PHASES and any(p not in ['A', 'B'] for p in DEFAULT_PHASES):
+    DEFAULT_PHASES = ['A', 'B']
+
 EVAL_SEED = data_settings['eval_seed']
 
 
@@ -43,9 +47,9 @@ def parse_args():
                       help='Mode to run: train, visualize, evaluate, or all')
     parser.add_argument('--file_name', type=str, help='Directory storing/containing model checkpoints and results', required=True)
     parser.add_argument('--phases', type=str, default=','.join(DEFAULT_PHASES),
-                      help='Comma-separated phases to run for training (A,B,C)')
+                      help='Comma-separated phases to run for training (A,B)')
     parser.add_argument('--resume_from_phase', type=str, default=None,
-                      help='Phase to resume training from (A,B,C)')
+                      help='Phase to resume training from (A,B)')
     parser.add_argument('--keys', type=str, nargs='+', default=DEFAULT_EVAL_KEYS,
                       help='Problem keys for evaluation (space-separated)')
     parser.add_argument('--n_eval_samples', type=int, default=DEFAULT_EVAL_N_SAMPLES,
@@ -74,7 +78,7 @@ def main_args():
     # ----------------------
     if 'train' in args.mode or 'all' in args.mode:
         phases_to_run = [p.strip().upper() for p in args.phases.split(',')]
-        valid_phases = ['A', 'B', 'C']
+        valid_phases = ['A', 'B']
         if not all(p in valid_phases for p in phases_to_run):
             raise ValueError(f"Invalid phases. Valid phases are: {valid_phases}")
 
@@ -151,15 +155,21 @@ def print_help():
     print("""
 === SPECIALIST TRAINING HELP ===
 
+This specialist training implements a 2-phase approach:
+- Phase A: Train each encoder with its independent decoder on domain-specific data
+- Phase B: Train shared decoder using PoE (Product of Experts) of all encoders
+
 Usage examples:
   Train all phases:
     python main_specialist.py --mode train --file_name my_exp
-  Train phases A,B only:
-    python main_specialist.py --mode train --file_name my_exp --phases A,B
-  Evaluate final model:
+  Train Phase A only:
+    python main_specialist.py --mode train --file_name my_exp --phases A
+  Evaluate final model (after Phase B):
     python main_specialist.py --mode eval --file_name my_exp --epoch phase_c_final
   Full workflow (train+eval+viz):
     python main_specialist.py --mode all --file_name my_exp
+
+The final model uses PoE to combine specialized encoders for improved performance.
 """)
 
 

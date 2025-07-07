@@ -305,29 +305,33 @@ def load_all_encoder_checkpoints(model: nn.Module, run_dir: str, device: str = '
 
 
 def save_decoder_checkpoint(model: nn.Module, run_dir: str) -> str:
-    """Save decoder checkpoint."""
-    if hasattr(model, 'multi_encoder') and hasattr(model.multi_encoder, 'decoder'):
+    """Save shared decoder checkpoint."""
+    if hasattr(model, 'multi_encoder') and hasattr(model.multi_encoder, 'shared_decoder'):
+        decoder_state = model.multi_encoder.shared_decoder.state_dict()
+    elif hasattr(model, 'multi_encoder') and hasattr(model.multi_encoder, 'decoder'):
         decoder_state = model.multi_encoder.decoder.state_dict()
     elif hasattr(model, 'decoder'):
         decoder_state = model.decoder.state_dict()
     else:
         raise ValueError("Model does not have decoder")
     
-    checkpoint_path = os.path.join(run_dir, 'decoder.ckpt')
+    checkpoint_path = os.path.join(run_dir, 'shared_decoder.ckpt')
     torch.save(decoder_state, checkpoint_path)
     return checkpoint_path
 
 
 def load_decoder_checkpoint(model: nn.Module, run_dir: str, device: str = 'cuda') -> None:
-    """Load decoder checkpoint."""
-    checkpoint_path = os.path.join(run_dir, 'decoder.ckpt')
+    """Load shared decoder checkpoint."""
+    checkpoint_path = os.path.join(run_dir, 'shared_decoder.ckpt')
     
     if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"Decoder checkpoint not found: {checkpoint_path}")
+        raise FileNotFoundError(f"Shared decoder checkpoint not found: {checkpoint_path}")
     
     decoder_state = torch.load(checkpoint_path, map_location=device)
     
-    if hasattr(model, 'multi_encoder') and hasattr(model.multi_encoder, 'decoder'):
+    if hasattr(model, 'multi_encoder') and hasattr(model.multi_encoder, 'shared_decoder'):
+        model.multi_encoder.shared_decoder.load_state_dict(decoder_state)
+    elif hasattr(model, 'multi_encoder') and hasattr(model.multi_encoder, 'decoder'):
         model.multi_encoder.decoder.load_state_dict(decoder_state)
     elif hasattr(model, 'decoder'):
         model.decoder.load_state_dict(decoder_state)
@@ -335,14 +339,129 @@ def load_decoder_checkpoint(model: nn.Module, run_dir: str, device: str = 'cuda'
         raise ValueError("Model does not have decoder")
 
 
+def save_independent_decoder_checkpoint(model: nn.Module, encoder_idx: int, run_dir: str) -> str:
+    """Save individual independent decoder checkpoint."""
+    if hasattr(model, 'multi_encoder') and hasattr(model.multi_encoder, 'independent_decoders'):
+        decoder_state = model.multi_encoder.independent_decoders[encoder_idx].state_dict()
+    else:
+        raise ValueError("Model does not have independent decoders")
+    
+    checkpoint_path = os.path.join(run_dir, f'independent_decoder_{encoder_idx}.ckpt')
+    torch.save(decoder_state, checkpoint_path)
+    return checkpoint_path
+
+
+def load_independent_decoder_checkpoint(model: nn.Module, encoder_idx: int, run_dir: str, device: str = 'cuda') -> None:
+    """Load individual independent decoder checkpoint."""
+    checkpoint_path = os.path.join(run_dir, f'independent_decoder_{encoder_idx}.ckpt')
+    
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Independent decoder checkpoint not found: {checkpoint_path}")
+    
+    decoder_state = torch.load(checkpoint_path, map_location=device)
+    
+    if hasattr(model, 'multi_encoder') and hasattr(model.multi_encoder, 'independent_decoders'):
+        model.multi_encoder.independent_decoders[encoder_idx].load_state_dict(decoder_state)
+    else:
+        raise ValueError("Model does not have independent decoders")
+
+
+def save_all_independent_decoder_checkpoints(model: nn.Module, run_dir: str) -> List[str]:
+    """Save all independent decoder checkpoints."""
+    if not hasattr(model, 'multi_encoder') or not hasattr(model.multi_encoder, 'independent_decoders'):
+        raise ValueError("Model does not have independent decoders")
+    
+    num_encoders = len(model.multi_encoder.independent_decoders)
+    checkpoint_paths = []
+    
+    for encoder_idx in range(num_encoders):
+        checkpoint_path = save_independent_decoder_checkpoint(model, encoder_idx, run_dir)
+        checkpoint_paths.append(checkpoint_path)
+    
+    return checkpoint_paths
+
+
+def load_all_independent_decoder_checkpoints(model: nn.Module, run_dir: str, device: str = 'cuda') -> None:
+    """Load all independent decoder checkpoints."""
+    if not hasattr(model, 'multi_encoder') or not hasattr(model.multi_encoder, 'independent_decoders'):
+        raise ValueError("Model does not have independent decoders")
+    
+    num_encoders = len(model.multi_encoder.independent_decoders)
+    
+    for encoder_idx in range(num_encoders):
+        try:
+            load_independent_decoder_checkpoint(model, encoder_idx, run_dir, device)
+            print(f"✓ Loaded independent decoder {encoder_idx} checkpoint")
+        except FileNotFoundError:
+            print(f"⚠ Independent decoder {encoder_idx} checkpoint not found - will start from random initialization")
+
+
+def initialize_shared_decoder_from_independent_decoders(model: nn.Module, run_dir: str, device: str = 'cuda') -> None:
+    """
+    Initialize shared decoder with averaged weights from all independent decoders.
+    This provides a good starting point for Phase B training.
+    
+    Args:
+        model: Multi-encoder model with independent and shared decoders
+        run_dir: Run directory containing independent decoder checkpoints
+        device: Device for loading checkpoints
+    """
+    if not hasattr(model, 'multi_encoder'):
+        raise ValueError("Model does not have multi-encoder structure")
+    
+    if not hasattr(model.multi_encoder, 'independent_decoders'):
+        raise ValueError("Model does not have independent decoders")
+    
+    if not hasattr(model.multi_encoder, 'shared_decoder'):
+        raise ValueError("Model does not have shared decoder")
+    
+    num_encoders = len(model.multi_encoder.independent_decoders)
+    print(f"\nInitializing shared decoder from {num_encoders} independent decoders...")
+    
+    # First, ensure all independent decoders are loaded
+    load_all_independent_decoder_checkpoints(model, run_dir, device)
+    
+    # Get the shared decoder's state dict structure
+    shared_decoder_state = model.multi_encoder.shared_decoder.state_dict()
+    
+    # Collect all independent decoder states
+    independent_states = []
+    for encoder_idx in range(num_encoders):
+        independent_state = model.multi_encoder.independent_decoders[encoder_idx].state_dict()
+        independent_states.append(independent_state)
+    
+    # Average the weights across all independent decoders
+    averaged_state = {}
+    for key in shared_decoder_state.keys():
+        if key in independent_states[0]:  # Ensure the key exists in independent decoders
+            # Stack tensors from all independent decoders and compute mean
+            stacked_weights = torch.stack([state[key] for state in independent_states])
+            averaged_state[key] = torch.mean(stacked_weights, dim=0)
+            print(f"  ✓ Averaged parameter: {key} (shape: {averaged_state[key].shape})")
+        else:
+            # Keep original weights if not found in independent decoders
+            averaged_state[key] = shared_decoder_state[key]
+            print(f"  ⚠ Kept original parameter: {key} (not found in independent decoders)")
+    
+    # Load the averaged weights into the shared decoder
+    model.multi_encoder.shared_decoder.load_state_dict(averaged_state)
+    
+    print("✓ Shared decoder initialized with averaged weights from independent decoders")
+    print("  This provides a warm start for Phase B training based on Phase A knowledge")
+
+
 def save_full_model_checkpoint(model: nn.Module, optimizer: torch.optim.Optimizer, epoch: int, loss: float, run_dir: str) -> str:
     """Save full model checkpoint with complete structure."""
     checkpoint = {
         'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
         'epoch': epoch,
         'loss': loss,
     }
+    
+    # Only save optimizer state if provided
+    if optimizer is not None:
+        checkpoint['optimizer_state_dict'] = optimizer.state_dict()
+    
     checkpoint_path = os.path.join(run_dir, 'full_joint.ckpt')
     torch.save(checkpoint, checkpoint_path)
     return checkpoint_path

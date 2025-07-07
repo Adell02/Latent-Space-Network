@@ -91,7 +91,7 @@ def collect_single_encoder_latent_data(model, dataloader, device, max_samples=10
             
             # Get latent representations - always use mean vectors
             mu, log_var = model.encoder(batch_input, batch_target)
-            z = mu  # Use mean for consistency
+            z = model.reparameterize(mu, log_var)
             
             # Store data
             batch_size = min(batch_input.size(0), max_samples - sample_count)
@@ -163,11 +163,11 @@ def evaluate_accuracy(model, dataloader, device, is_multi_encoder=False, encoder
                     else:
                         # PoE inference
                         mu_eval, log_var_eval = model(batch_input_eval, batch_target_eval)[1:3]
-                    z_eval = mu_eval  # Use mean for consistency
+                    z_eval = model.reparameterize(mu_eval, log_var_eval)
                 else:
                     # Single encoder
                     mu_eval, log_var_eval = model.encoder(batch_input_eval, batch_target_eval)
-                    z_eval = mu_eval  # Use mean for consistency
+                    z_eval = model.reparameterize(mu_eval, log_var_eval)
 
             # Decode
             shape_logits_eval, grid_logits_eval = model.decoder(z_eval, batch_input_eval, target_seq=batch_target_eval)

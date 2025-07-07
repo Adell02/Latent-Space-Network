@@ -8,7 +8,7 @@ import os
 import pickle
 import tempfile
 import shutil
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 from utils.settings_manager import settings
 
 def generate_trajectory_plots(eval_results: Dict[str, Any], run_dir: str, epoch: int, max_samples: int = 3, current_model=None) -> Dict[str, str]:
@@ -118,11 +118,20 @@ def generate_trajectory_plots(eval_results: Dict[str, Any], run_dir: str, epoch:
     
     return trajectory_plots
 
-def run_quick_evaluation(model, run_dir: str, epoch: int) -> Optional[Dict[str, Any]]:
+def run_quick_evaluation(model, run_dir: str, epoch: int, eval_keys: List[str] = None, 
+                        encoder_idx: int = None, use_independent_decoder: bool = False) -> Optional[Dict[str, Any]]:
     """
     Run a quick evaluation using existing evaluation functions.
     Uses the current model state (which should be the latest trained state).
     Returns evaluation results for wandb logging.
+    
+    Args:
+        model: Model to evaluate
+        run_dir: Run directory
+        epoch: Current epoch
+        eval_keys: Keys to evaluate (if None, uses settings default)
+        encoder_idx: Specific encoder to use (None for PoE inference)
+        use_independent_decoder: Whether to use independent decoder vs shared decoder
     """
     try:
         # Import evaluation functions
@@ -130,18 +139,23 @@ def run_quick_evaluation(model, run_dir: str, epoch: int) -> Optional[Dict[str, 
         
         # Get evaluation settings
         eval_settings = settings.get_evaluation_settings()
-        eval_keys = eval_settings.get('eval_keys', ['00d62c1b'])
+        if eval_keys is None:
+            eval_keys = eval_settings.get('eval_keys', ['00d62c1b'])
         n_samples = eval_settings.get('eval_n_samples', 2)
         n_queries = eval_settings.get('eval_n_queries', 10)  # Reduced for quick eval
         eval_seed = settings.get_data_settings().get('eval_seed', 42)
         
-        print(f"Running quick evaluation for epoch {epoch}...")
+        # Create descriptive evaluation name
+        eval_mode = "PoE" if encoder_idx is None else f"Encoder_{encoder_idx}"
+        decoder_mode = "independent" if use_independent_decoder else "shared"
+        print(f"Running quick evaluation for epoch {epoch} ({eval_mode} + {decoder_mode} decoder)...")
         print(f"  Keys: {eval_keys}")
         print(f"  Samples: {n_samples}, Queries: {n_queries}")
         
         # Use the provided model directly (it should be the latest trained state)
         device = next(model.parameters()).device
-        eval_results = main_test(model, eval_keys, run_dir, n_samples, n_queries, eval_seed, device)
+        eval_results = main_test(model, eval_keys, run_dir, n_samples, n_queries, eval_seed, device,
+                               encoder_idx=encoder_idx, use_independent_decoder=use_independent_decoder)
         
         if eval_results:
             print(f"✓ Quick evaluation completed for epoch {epoch}")
@@ -185,7 +199,7 @@ def should_run_evaluation(epoch: int, log_interval: int, total_epochs: int) -> b
     
     return False
 
-def log_evaluation_to_wandb(eval_results: Dict[str, Any], run_dir: str, epoch: int, wandb_logger, current_model=None):
+def log_evaluation_to_wandb(eval_results: Dict[str, Any], run_dir: str, epoch: int, wandb_logger, current_model=None, phase=None):
     """
     Log evaluation results and visualizations to wandb.
     
@@ -195,6 +209,7 @@ def log_evaluation_to_wandb(eval_results: Dict[str, Any], run_dir: str, epoch: i
         epoch: Current epoch
         wandb_logger: Wandb logger instance
         current_model: Optional in-memory model to use instead of loading from disk
+        phase: Optional phase identifier for specialist training
     """
     if not wandb_logger or not wandb_logger.is_initialized:
         return
@@ -205,12 +220,15 @@ def log_evaluation_to_wandb(eval_results: Dict[str, Any], run_dir: str, epoch: i
             agg_metrics = eval_results['aggregated_metrics']
             avg_metrics = agg_metrics.get('average_metrics', {})
             
+            # Add phase prefix if provided
+            prefix = f"{phase}_" if phase else "eval_"
+            
             eval_metrics = {
-                'eval_shape_accuracy': avg_metrics.get('avg_shape_accuracy', 0.0),
-                'eval_grid_accuracy': avg_metrics.get('avg_grid_accuracy', 0.0),
-                'eval_sample_exact_accuracy': avg_metrics.get('avg_sample_exact_accuracy', 0.0),
-                'eval_support_loss': avg_metrics.get('avg_support_loss', 0.0),
-                'eval_query_loss': avg_metrics.get('avg_query_loss', 0.0),
+                f'{prefix}shape_accuracy': avg_metrics.get('avg_shape_accuracy', 0.0),
+                f'{prefix}grid_accuracy': avg_metrics.get('avg_grid_accuracy', 0.0),
+                f'{prefix}sample_exact_accuracy': avg_metrics.get('avg_sample_exact_accuracy', 0.0),
+                f'{prefix}support_loss': avg_metrics.get('avg_support_loss', 0.0),
+                f'{prefix}query_loss': avg_metrics.get('avg_query_loss', 0.0),
             }
             wandb_logger.log_training_metrics(epoch, eval_metrics)
             print(f"✓ Logged evaluation metrics to wandb")

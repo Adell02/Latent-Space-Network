@@ -439,11 +439,11 @@ def encode_training_sequences(model, run_dir, device='cuda', max_samples=500, ba
                 if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
                     # Multi-encoder: use PoE inference
                     mu, log_var = model(batch_input, batch_output)[1:3]
-                    z = mu  # Use mean for consistency
+                    z = model.reparameterize(mu, log_var)
                 else:
                     # Single encoder
                     mu, log_var = model.encoder(batch_input, batch_output)
-                    z = mu  # Use mean for consistency
+                    z = model.reparameterize(mu, log_var)
                 
                 # Compute loss for this encoded latent (equivalent to initial trajectory loss)
                 # Handle both single and multi-encoder models for decoding
@@ -512,7 +512,8 @@ def encode_training_sequences(model, run_dir, device='cuda', max_samples=500, ba
 # Run Inference
 ##############################
 
-def main_test(model, keys, run_dir, n_samples, n_queries, seed, device='cuda'):
+def main_test(model, keys, run_dir, n_samples, n_queries, seed, device='cuda', 
+              encoder_idx=None, use_independent_decoder=False):
     """
     Generate new data and evaluate the model on it with key-specific evaluation.
     Each key is evaluated separately with its own support->optimization->queries cycle.
@@ -523,12 +524,18 @@ def main_test(model, keys, run_dir, n_samples, n_queries, seed, device='cuda'):
         n_samples: Number of input-output pairs to generate for support (should match eval_n_samples)
         n_queries: Number of queries to do inference (should match eval_n_queries)
         device: Device to run evaluation on
+        encoder_idx: Specific encoder to use (None for PoE inference in multi-encoder)
+        use_independent_decoder: Whether to use independent decoder vs shared decoder
     
     Returns:
         dict: Dictionary containing evaluation results structured by key   
     """
 
     set_seed(seed)
+    # Create evaluation mode description
+    eval_mode = "PoE" if encoder_idx is None else f"Encoder_{encoder_idx}"
+    decoder_mode = "independent" if use_independent_decoder else "shared"
+    
     results = {
         'evaluation_metadata': {
             'keys': keys,
@@ -538,7 +545,10 @@ def main_test(model, keys, run_dir, n_samples, n_queries, seed, device='cuda'):
             'device': str(device),
             'seed': seed,
             'evaluation_strategy': 'key_specific_separate_evaluation',
-            'latent_type': 'mean'
+            'latent_type': 'mean',
+            'encoder_idx': encoder_idx,
+            'use_independent_decoder': use_independent_decoder,
+            'evaluation_mode': f"{eval_mode}+{decoder_mode}_decoder"
         },
         'key_results': {},
         'aggregated_metrics': {}
@@ -610,8 +620,9 @@ def main_test(model, keys, run_dir, n_samples, n_queries, seed, device='cuda'):
             print(f"  Query: {len(input_queries_sequences)} samples, batch size: {query_batch_size}")
             
             # Evaluate model on this specific key
-            print(f"  Running evaluation for key '{key}'...")
-            key_metrics = evaluate_model(model, samples_dataloader, queries_dataloader, device=device)
+            print(f"  Running evaluation for key '{key}' ({eval_mode} + {decoder_mode} decoder)...")
+            key_metrics = evaluate_model(model, samples_dataloader, queries_dataloader, device=device,
+                                       encoder_idx=encoder_idx, use_independent_decoder=use_independent_decoder)
             
             # Store key-specific results with structured information
             results['key_results'][key] = {
@@ -703,7 +714,8 @@ def main_test(model, keys, run_dir, n_samples, n_queries, seed, device='cuda'):
     return results
 
 
-def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda'):
+def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda',
+                  encoder_idx=None, use_independent_decoder=False):
     """
     Evaluate model performance on dataloaders.
     For multi-encoder models: each encoder processes the same sample, then PoE combines them.
@@ -713,6 +725,8 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
         samples_dataloader: DataLoader containing support samples for latent optimization
         queries_dataloader: DataLoader containing query samples for evaluation
         device: Device to run evaluation on
+        encoder_idx: Specific encoder to use (None for PoE inference in multi-encoder)
+        use_independent_decoder: Whether to use independent decoder vs shared decoder
         
     Returns:
         dict: Dictionary containing evaluation metrics and reconstruction results
@@ -724,10 +738,15 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
     is_multi_encoder = hasattr(model, 'is_multi_encoder') and model.is_multi_encoder
     num_encoders = getattr(model, 'num_encoders', 1) if is_multi_encoder else 1
     
+    # Create evaluation mode description
+    eval_mode = "PoE" if encoder_idx is None else f"Encoder_{encoder_idx}"
+    decoder_mode = "independent" if use_independent_decoder else "shared"
+    
     print(f"=== EVALUATION SETUP ===")
     print(f"Model type: {'Multi-encoder' if is_multi_encoder else 'Single encoder'}")
     if is_multi_encoder:
         print(f"Number of encoders: {num_encoders}")
+    print(f"Evaluation mode: {eval_mode} + {decoder_mode} decoder")
     print(f"Latent optimization enabled: {optimize_z_inference}")
     if optimize_z_inference:
         print(f"Optimization steps: {latent_optimization['inference']['num_steps']}")
@@ -795,12 +814,15 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
         if optimize_z_inference:
             print(f"  Optimizing latent z for support batch {batch_idx+1}...")
             # Latent optimization - works for both single and multi-encoder
+            # Use specialist parameters for latent optimization if provided
             z_optimized, losses, trajectory = get_optimized_z(
                 model, batch_input_s, batch_target_s, 
                 num_steps=latent_optimization['inference']['num_steps'],
                 lr=latent_optimization['inference']['learning_rate'],
                 context='inference',
-                return_trajectory=True
+                return_trajectory=True,
+                encoder_idx=encoder_idx,
+                use_independent_decoder=use_independent_decoder
             )
             current_z_for_this_sample_batch = z_optimized
             z_optimization_logs.append(trajectory.get('losses', []) if trajectory else losses)
@@ -830,7 +852,7 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
                                 enc_mu, enc_log_var = model.multi_encoder.encoders[enc_idx](
                                     batch_input_s[i:i+1], batch_target_s[i:i+1]
                                 )
-                                enc_z = enc_mu  # Use mean for consistency
+                                enc_z = model.reparameterize(enc_mu, enc_log_var)
                                 
                                 sample_trajectory['individual_encoder_trajectories'][f'encoder_{enc_idx}'] = {
                                     'mu': enc_mu.cpu().numpy(),
@@ -878,7 +900,7 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
                             # Fallback: independent z (should not happen normally)
                             with torch.no_grad():
                                 enc_mu, enc_log_var = model.encoder(batch_input_s[i:i+1], batch_target_s[i:i+1])
-                                enc_z = enc_mu  # Use mean for consistency
+                                enc_z = model.reparameterize(enc_mu, enc_log_var)
                                 
                                 sample_trajectory['individual_encoder_trajectories']['encoder_0'] = {
                                     'mu': enc_mu.cpu().numpy(),
@@ -960,11 +982,11 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
                         [(batch_input_s, batch_target_s) for _ in range(num_encoders)],
                         training=False, sample_latent=False, use_poe=True
                     )[1:3]  # Get mu, log_var from PoE
-                    current_z_for_this_sample_batch = mu  # Use mean for deterministic inference
+                    current_z_for_this_sample_batch = model.reparameterize(mu, log_var)
                 else:
                     # Single encoder
                     mu, log_var = model.encoder(batch_input_s, batch_target_s)
-                    current_z_for_this_sample_batch = mu  # Use mean for consistency
+                    current_z_for_this_sample_batch = model.reparameterize(mu, log_var)
                 print(f"Using encoder z (no optimization) for batch {batch_idx+1}")
         
         # Store z vectors from all support samples
@@ -997,7 +1019,7 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
                     # Also store individual encoder reconstructions for analysis
                     for enc_idx in range(num_encoders):
                         enc_mu, enc_log_var = model.multi_encoder.encoders[enc_idx](batch_input_s, batch_target_s)
-                        enc_z = enc_mu  # Use mean for deterministic inference
+                        enc_z = model.reparameterize(enc_mu, enc_log_var)
                         enc_shape_logits, enc_grid_logits = model.multi_encoder.decoder(
                             enc_z, batch_input_s, target_seq=batch_target_s
                         )
@@ -1139,7 +1161,7 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda')
                 for enc_idx in range(num_encoders):
                     # Get individual encoder output
                     enc_mu, enc_log_var = model.multi_encoder.encoders[enc_idx](batch_input_q, batch_target_q)
-                    enc_z = enc_mu  # Use mean for deterministic inference
+                    enc_z = model.reparameterize(enc_mu, enc_log_var)
                     enc_shape_logits, enc_grid_logits = model.multi_encoder.decoder(
                         enc_z, batch_input_q, target_seq=batch_target_q
                     )

@@ -7,8 +7,8 @@
       "0a938d79"
     ],
     "training_seed": 42,
-    "eval_seed": 1,
-    "n": 200,
+    "eval_seed": 42,
+    "n": 50,
     "run_base_dir": "runs_specialist"
   },
   "evaluation_settings": {
@@ -17,8 +17,8 @@
     ],
     "eval_n_samples": 2,
     "eval_n_queries": 100,
-    "eval_epoch": "phase_c_final",
-    "visualize_n_values": 2
+    "eval_epoch": "phase_b_final",
+    "visualize_n_values": 4
   },
   "latent_optimization": {
     "training": {
@@ -60,7 +60,7 @@
     "use_gradient_checkpointing": true
   },
   "training_settings": {
-    "num_epochs": 20,
+    "num_epochs": 200,
     "batch_size": 8,
     "gradient_accumulation_steps": 2,
     "learning_rate": 0.0004,
@@ -81,29 +81,27 @@
     },
     "wandb": {
       "enabled": true,
+      "project_name": "latent-space-network-specialist",
       "entity": "ga624-imperial-college-london",
       "api_key": "e2853fdc991b057f1cebf7df2a747ecca6fdaf6c",
       "log_interval": 1,
       "log_visualizations": true,
-      "log_gradients": false
+      "log_gradients": false,
+      "log_trajectory_plots": true,
+      "trajectory_max_samples": 3
     }
   },
   "specialist_training": {
     "phase_a": {
-      "epochs": 20,
+      "epochs": 100,
       "description": "Encoder pre-training phase"
     },
     "phase_b": {
-      "epochs": 30,
+      "epochs": 100,
       "description": "Decoder training phase"
-    },
-    "phase_c": {
-      "epochs": 10,
-      "encoder_lr_multiplier": 0.05,
-      "description": "Joint fine-tuning phase"
     },
     "evaluation_between_phases": true,
     "save_phase_checkpoints": true,
-    "phases_to_run": ["A", "B", "C"]
+    "phases_to_run": ["A", "B"]
   }
 } 

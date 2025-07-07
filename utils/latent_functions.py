@@ -4,9 +4,14 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from utils.settings_manager import settings
 
-def optimize_latent_z(lpn, input_seq, target_seq, num_steps=None, lr=None, return_trajectory=False):
+def optimize_latent_z(lpn, input_seq, target_seq, num_steps=None, lr=None, return_trajectory=False,
+                     encoder_idx=None, use_independent_decoder=False):
     """
     Optimize latent z via gradient descent with per-sample loss tracking.
+    
+    Args:
+        encoder_idx: Specific encoder to use (None for PoE inference in multi-encoder)
+        use_independent_decoder: Whether to use independent decoder vs shared decoder
     """
     # Get settings from settings manager (moved inside function for sweep compatibility)
     latent_optimization = settings.get_latent_optimization()
@@ -23,8 +28,12 @@ def optimize_latent_z(lpn, input_seq, target_seq, num_steps=None, lr=None, retur
     # Get initial latent parameters from the model and compute initial z.
     with torch.no_grad():
         if hasattr(lpn, 'is_multi_encoder') and lpn.is_multi_encoder:
-            # For multi-encoder, use PoE inference mode
-            reconstruction, mu, log_var = lpn(input_seq, target_seq)
+            if encoder_idx is not None:
+                # Use specific encoder
+                mu, log_var = lpn.multi_encoder.encoders[encoder_idx](input_seq, target_seq)
+            else:
+                # For multi-encoder, use PoE inference mode
+                reconstruction, mu, log_var = lpn(input_seq, target_seq)
         else:
             # For single encoder
             mu, log_var = lpn.encoder(input_seq, target_seq)
@@ -35,7 +44,12 @@ def optimize_latent_z(lpn, input_seq, target_seq, num_steps=None, lr=None, retur
     # Compute individual initial losses for each sample
     with torch.no_grad():
         if hasattr(lpn, 'is_multi_encoder') and lpn.is_multi_encoder:
-            shape_logits_init, grid_logits_init = lpn.multi_encoder.decoder(z, input_seq, target_seq=target_seq)
+            if use_independent_decoder and encoder_idx is not None:
+                # Use specific encoder's independent decoder
+                shape_logits_init, grid_logits_init = lpn.multi_encoder.independent_decoders[encoder_idx](z, input_seq, target_seq=target_seq)
+            else:
+                # Use shared decoder (default for multi-encoder)
+                shape_logits_init, grid_logits_init = lpn.multi_encoder.shared_decoder(z, input_seq, target_seq=target_seq)
         else:
             shape_logits_init, grid_logits_init = lpn.decoder(z, input_seq, target_seq=target_seq)
         
@@ -88,7 +102,12 @@ def optimize_latent_z(lpn, input_seq, target_seq, num_steps=None, lr=None, retur
         
         # Decode using the current z
         if hasattr(lpn, 'is_multi_encoder') and lpn.is_multi_encoder:
-            shape_logits, grid_logits = lpn.multi_encoder.decoder(z, input_seq, target_seq=target_seq)
+            if use_independent_decoder and encoder_idx is not None:
+                # Use specific encoder's independent decoder
+                shape_logits, grid_logits = lpn.multi_encoder.independent_decoders[encoder_idx](z, input_seq, target_seq=target_seq)
+            else:
+                # Use shared decoder (default for multi-encoder)
+                shape_logits, grid_logits = lpn.multi_encoder.shared_decoder(z, input_seq, target_seq=target_seq)
         else:
             shape_logits, grid_logits = lpn.decoder(z, input_seq, target_seq=target_seq)
 
@@ -494,7 +513,8 @@ def voronoi_optimize_latent_z(lpn, input_seq, target_seq, population_size=None,
 ##############################
 # Helper: Choose Optimization Method
 ##############################
-def get_optimized_z(lpn, input_seq, target_seq, num_steps=None, lr=None, context='training', return_trajectory=False):
+def get_optimized_z(lpn, input_seq, target_seq, num_steps=None, lr=None, context='training', 
+                   return_trajectory=False, encoder_idx=None, use_independent_decoder=False):
     """
     Returns an optimized latent z using either gradient-based, evolutionary, or Voronoi-inspired search,
     depending on the optimization method setting.
@@ -507,6 +527,8 @@ def get_optimized_z(lpn, input_seq, target_seq, num_steps=None, lr=None, context
         lr: Learning rate (overrides settings if provided)
         context: 'training' or 'inference' - determines which settings to use as defaults
         return_trajectory: Whether to return trajectory information
+        encoder_idx: Specific encoder to use (None for PoE inference in multi-encoder)
+        use_independent_decoder: Whether to use independent decoder vs shared decoder
     """
     # Get settings from settings manager (moved inside function for sweep compatibility)
     latent_optimization = settings.get_latent_optimization()
@@ -531,7 +553,8 @@ def get_optimized_z(lpn, input_seq, target_seq, num_steps=None, lr=None, context
             with torch.enable_grad():
                 return optimize_latent_z(lpn, input_seq, target_seq, 
                                        num_steps=final_num_steps, lr=final_lr, 
-                                       return_trajectory=return_trajectory)
+                                       return_trajectory=return_trajectory,
+                                       encoder_idx=encoder_idx, use_independent_decoder=use_independent_decoder)
         elif optimization_method == "evolutionary":
             # For evolutionary and voronoi, we don't use num_steps/lr but their own parameters
             # However, we could map num_steps to num_generations if needed
@@ -544,8 +567,12 @@ def get_optimized_z(lpn, input_seq, target_seq, num_steps=None, lr=None, context
             # Unknown method, fall back to basic sampling
             with torch.no_grad():
                 if hasattr(lpn, 'is_multi_encoder') and lpn.is_multi_encoder:
-                    # For multi-encoder, use PoE inference mode
-                    reconstruction, mu, log_var = lpn(input_seq, target_seq)
+                    if encoder_idx is not None:
+                        # Use specific encoder
+                        mu, log_var = lpn.multi_encoder.encoders[encoder_idx](input_seq, target_seq)
+                    else:
+                        # Use PoE inference mode
+                        reconstruction, mu, log_var = lpn(input_seq, target_seq)
                     z = lpn.reparameterize(mu, log_var)
                 else:
                     # For single encoder
@@ -559,8 +586,12 @@ def get_optimized_z(lpn, input_seq, target_seq, num_steps=None, lr=None, context
         # Optimization disabled, just use basic sampling
         with torch.no_grad():
             if hasattr(lpn, 'is_multi_encoder') and lpn.is_multi_encoder:
-                # For multi-encoder, use PoE inference mode
-                reconstruction, mu, log_var = lpn(input_seq, target_seq)
+                if encoder_idx is not None:
+                    # Use specific encoder
+                    mu, log_var = lpn.multi_encoder.encoders[encoder_idx](input_seq, target_seq)
+                else:
+                    # Use PoE inference mode
+                    reconstruction, mu, log_var = lpn(input_seq, target_seq)
                 z = lpn.reparameterize(mu, log_var)
             else:
                 # For single encoder

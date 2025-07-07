@@ -56,13 +56,19 @@ class WandbLogger:
             return False
         
     def _safe_log(self, data: Dict[str, Any], step_hint: Any = None):
-        """Internal helper that logs without violating wandb step monotonicity."""
+        """Log data safely to wandb, handling exceptions."""
         if not self.is_initialized:
             return
-        if isinstance(step_hint, int):
-            wandb.log(data, step=step_hint)
-        else:
-            wandb.log(data)  # Let wandb autoincrement
+ 
+        try:
+            # Only use step if it is numeric (int or float). Otherwise, let wandb assign the next step.
+            if isinstance(step_hint, (int, float)):
+                self.run.log(data, step=int(step_hint))
+            else:
+                # Fallback: no explicit step → wandb will auto-increment
+                self.run.log(data)
+        except Exception as e:
+            print(f"⚠ Wandb logging failed: {e}")
 
     def log_training_metrics(self, epoch: Any, metrics: Dict[str, float]):
         """Log training metrics (epoch may be int or str)."""
@@ -87,7 +93,7 @@ class WandbLogger:
     
     def log_visualizations(self, run_dir: str, epoch: int, eval_results: Dict[str, Any] = None, trajectory_plots: Dict[str, str] = None):
         """Log visualizations including trajectory plots to wandb."""
-        if not self.is_initialized or epoch % self.log_interval != 0:
+        if not self.is_initialized:
             return
             
         print(f"Logging visualizations for epoch {epoch}...")
@@ -96,43 +102,43 @@ class WandbLogger:
             # Import visualization function
             from utils.visualizers import plot_comprehensive_latent_space
             
-            # Log latent space visualization during training
-            try:
-                plot_comprehensive_latent_space(None, eval_results, run_dir)
-                latent_plot = os.path.join(run_dir, 'latent_space_visualization.png')
-                if os.path.exists(latent_plot):
-                    # Use consistent step parameter for slider visualization
-                    self._safe_log({'latent_space': wandb.Image(latent_plot)}, step_hint=epoch)
-                    print("  ✓ Logged latent space visualization")
-                else:
-                    print("  ⚠ Latent space plot not found")
-            except Exception as e:
-                print(f"  ⚠ Could not create/log latent space visualization: {e}")
+            # Log latent space visualization during training (only on log intervals)
+            if epoch % self.log_interval == 0:
+                try:
+                    plot_comprehensive_latent_space(None, eval_results, run_dir)
+                    latent_plot = os.path.join(run_dir, 'latent_space_visualization.png')
+                    if os.path.exists(latent_plot):
+                        # Use consistent step parameter for slider visualization
+                        self._safe_log({'latent_space': wandb.Image(latent_plot)}, step_hint=epoch)
+                        print("  ✓ Logged latent space visualization")
+                    else:
+                        print("  ⚠ Latent space plot not found")
+                except Exception as e:
+                    print(f"  ⚠ Could not create/log latent space visualization: {e}")
             
-            # Log trajectory plots if available
+            # Log trajectory plots if available - ALWAYS log trajectory plots when available
             if trajectory_plots:
                 print(f"  Logging {len(trajectory_plots)} trajectory plots...")
                 trajectory_logged = 0
                 
-                # Group all trajectory plots in a single log entry for slider visualization
-                trajectory_images = {}
-                
+                # Log each trajectory plot with consistent key and proper epoch step
                 for plot_key, plot_path in trajectory_plots.items():
                     if os.path.exists(plot_path):
                         try:
-                            # Use consistent key naming for slider visualization
+                            # Use consistent key naming for slider visualization across epochs
+                            # Format: trajectory_{key}_sample{idx} 
                             wandb_key = f'trajectory_{plot_key}'
-                            trajectory_images[wandb_key] = wandb.Image(plot_path)
+                            
+                            # Log with proper epoch step for slider visualization
+                            self._safe_log({wandb_key: wandb.Image(plot_path)}, step_hint=epoch)
                             trajectory_logged += 1
+                            print(f"    ✓ Logged {wandb_key} at step {epoch}")
                         except Exception as e:
-                            print(f"    ⚠ Failed to prepare {plot_key}: {e}")
+                            print(f"    ⚠ Failed to log {plot_key}: {e}")
                     else:
                         print(f"    ⚠ Trajectory plot not found: {plot_path}")
                 
-                # Log all trajectory images with the same step for slider visualization
-                if trajectory_images:
-                    self._safe_log(trajectory_images, step_hint=epoch)
-                    print(f"  ✓ Successfully logged {trajectory_logged}/{len(trajectory_plots)} trajectory plots")
+                print(f"  ✓ Successfully logged {trajectory_logged}/{len(trajectory_plots)} trajectory plots")
                 
             else:
                 print("  No trajectory plots to log for this epoch")
@@ -375,13 +381,13 @@ def init_wandb_for_mode(mode: str, run_dir: str = None) -> Optional[WandbLogger]
             
         # Always first try the value from model_settings.json
         project_name = wandb_settings.get('project_name')
-
+        
         # Fall back to environment variable only if the setting does not specify a project name
         if not project_name:
             env_override = os.environ.get('WANDB_PROJECT_NAME')
             if env_override:
                 project_name = env_override
-
+            
         # Last resort: derive from run_dir
         if not project_name and run_dir and not os.environ.get('WANDB_PROJECT_NAME'):
             project_name = os.path.basename(run_dir)
@@ -390,11 +396,12 @@ def init_wandb_for_mode(mode: str, run_dir: str = None) -> Optional[WandbLogger]
         if not project_name:
             project_name = f"latent-space-network-{mode}"
         
-        # Create run name - use run_dir basename for run name, not project name
+        # Create run name with timestamp - use run_dir basename for run name, not project name
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         if run_dir:
-            run_name = f"{os.path.basename(run_dir)}_{mode}"
+            run_name = f"{os.path.basename(run_dir)}_{mode}_{timestamp}"
         else:
-            run_name = f"{project_name}_{mode}"
+            run_name = f"{project_name}_{mode}_{timestamp}"
         
         # Initialize wandb logger
         wandb_logger = init_wandb_logger(
