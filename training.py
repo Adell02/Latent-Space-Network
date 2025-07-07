@@ -246,7 +246,7 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed
                 rep_cfg = settings.get_repulsion_loss_settings()
                 base_lambda = rep_cfg.get('lambda', 0.1)
                 schedule_cfg = rep_cfg.get('schedule', None)
-
+                λ_rep = 0.0
                 if schedule_cfg:
                     sched_type = schedule_cfg.get('type', 'linear').lower()
                     warmup_epochs = schedule_cfg.get('warmup_epochs', 0)
@@ -260,6 +260,7 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed
                             lam_end = schedule_cfg.get('end', base_lambda)
                             denom = max(effective_total - 1, 1)
                             progress = (epoch_idx - 1) / denom
+                            λ_rep = lam_start + progress * (lam_end - lam_start)
                         elif sched_type == 'exponential':
                             lam_start = schedule_cfg.get('start', 0.01)
                             rate = schedule_cfg.get('rate', 1.05)
