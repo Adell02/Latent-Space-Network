@@ -85,11 +85,13 @@ def create_sweep_configurations() -> List[Tuple[str, Dict[str, Any]]]:
     # configurations.append(("1200k_param_4_enc", config_3))
 
     # Different repulsion loss values
-    for i in range(0,10):
-        config_i_rl = copy.deepcopy(base_config)
-        config_i_rl["training_settings"]["repulsion_loss"]["schedule"]["warmup_epochs"] = i
-        print(f"Config {i}_rl: warmup_epochs={i}")
-        configurations.append((f"{i}_repulsion_loss", config_i_rl))
+    #for i in range(0,10):
+    #    config_i_rl = copy.deepcopy(base_config)
+    #    config_i_rl["training_settings"]["repulsion_loss"]["schedule"]["warmup_epochs"] = i
+    #    print(f"Config {i}_rl: warmup_epochs={i}")
+    #    configurations.append((f"{i}_repulsion_loss", config_i_rl))
+
+    configurations.append("base_config", base_config) 
 
     # config_1_rl = copy.deepcopy(base_config)
     # config_1_rl["training_settings"]["repulsion_loss"]["lambda"] = 1

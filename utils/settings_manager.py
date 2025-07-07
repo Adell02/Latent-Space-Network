@@ -44,6 +44,10 @@ class SettingsManager:
         """Get repulsion loss settings."""
         return self.get_training_settings().get('repulsion_loss', {'enabled': True, 'lambda': 0.1})
 
+    def get_specialist_separable_settings(self) -> dict:
+        """Get specialist separable training settings."""
+        return self.get_training_settings().get('specialist_separable_training', {'enabled': True, 'beta_in': 0.1, 'alpha_out': 1.0})
+
     def get_solo_loss_settings(self) -> Dict[str, Any]:
         """Get solo loss settings."""
         if self._settings is None:

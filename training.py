@@ -115,6 +115,47 @@ def collect_single_encoder_latent_data(model, dataloader, device, max_samples=10
     return latent_data
 
 ##############################
+# Specialist Separable Training Helpers
+##############################
+
+def create_specialist_mixed_dataloader(encoder_datasets, batch_size, shuffle=True):
+    """
+    Create a mixed dataloader that samples from all encoder datasets and tags each sample with task_id.
+    
+    Args:
+        encoder_datasets: List of (inputs, outputs) for each encoder
+        batch_size: Batch size for the combined dataloader
+        shuffle: Whether to shuffle the combined dataset
+    
+    Returns:
+        DataLoader yielding (input_seq, target_seq, task_ids)
+    """
+    import random
+    from torch.utils.data import Dataset, DataLoader
+    
+    class SpecialistMixedDataset(Dataset):
+        def __init__(self, encoder_datasets, shuffle=True):
+            self.samples = []
+            
+            # Combine all encoder datasets with task_ids
+            for encoder_idx, (inputs, outputs) in enumerate(encoder_datasets):
+                for inp, out in zip(inputs, outputs):
+                    self.samples.append((inp, out, encoder_idx))
+            
+            if shuffle:
+                random.shuffle(self.samples)
+        
+        def __len__(self):
+            return len(self.samples)
+        
+        def __getitem__(self, idx):
+            inp, out, task_id = self.samples[idx]
+            return torch.tensor(inp, dtype=torch.float32), torch.tensor(out, dtype=torch.float32), torch.tensor(task_id, dtype=torch.long)
+    
+    dataset = SpecialistMixedDataset(encoder_datasets, shuffle)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=False)  # Already shuffled in dataset
+
+##############################
 # Main Training Function
 ##############################
 
@@ -234,16 +275,119 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed
         logger.info(f"Starting training batch loop for Epoch {current_epoch_num}/{total_epochs}...")
     total_batches = len(dataloader)
 
-    for batch_idx, (input_seq, target_seq) in enumerate(dataloader):
+    # Check if this is specialist separable training with task_ids
+    sample_batch = next(iter(dataloader))
+    has_task_ids = len(sample_batch) == 3  # (input_seq, target_seq, task_ids)
+    
+    for batch_idx, batch_data in enumerate(dataloader):
         device = next(model.parameters()).device
-        input_seq = input_seq.to(device)
-        target_seq = target_seq.to(device)
+        
+        # Unpack batch data based on format
+        if has_task_ids:
+            input_seq, target_seq, task_ids = batch_data
+            input_seq = input_seq.to(device)
+            target_seq = target_seq.to(device)
+            task_ids = task_ids.to(device)
+        else:
+            input_seq, target_seq = batch_data
+            input_seq = input_seq.to(device)
+            target_seq = target_seq.to(device)
+            task_ids = None
 
         with torch.amp.autocast(device_type=device.type, enabled=use_mixed_precision):
-            # Joint training mode with repulsion loss
+            # Joint training mode - choose between specialist separable or traditional
             if joint_training:
-                # Get repulsion loss settings and optional schedule
-                rep_cfg = settings.get_repulsion_loss_settings()
+                # Check if specialist separable training is enabled and we have task_ids
+                specialist_cfg = settings.get_specialist_separable_settings()
+                use_specialist_separable = specialist_cfg.get('enabled', False) and has_task_ids
+                
+                if use_specialist_separable:
+                    # SPECIALIST SEPARABLE TRAINING ALGORITHM
+                    
+                    # Get specialist training parameters
+                    beta_in = specialist_cfg.get('beta_in', 0.1)   # KL weight for owners
+                    alpha_out = specialist_cfg.get('alpha_out', 1.0)  # KL weight for non-owners
+                    
+                    K = model.num_encoders
+                    batch_size = input_seq.size(0)
+                    
+                    # Collect latent distributions from all encoders
+                    mus, logvars = [], []
+                    for enc_idx in range(K):
+                        mu, logvar = model.multi_encoder.encoders[enc_idx](input_seq, target_seq)
+                        mus.append(mu)
+                        logvars.append(logvar)
+                    
+                    # Initialize loss components
+                    total_loss = torch.tensor(0.0, device=input_seq.device)
+                    shape_loss_sum = torch.tensor(0.0, device=input_seq.device)
+                    grid_loss_sum = torch.tensor(0.0, device=input_seq.device)
+                    kl_in_sum = torch.tensor(0.0, device=input_seq.device)
+                    kl_out_sum = torch.tensor(0.0, device=input_seq.device)
+                    
+                    # Process each sample in the batch
+                    for sample_idx in range(batch_size):
+                        task_id = task_ids[sample_idx].item()
+                        sample_input = input_seq[sample_idx:sample_idx+1]
+                        sample_target = target_seq[sample_idx:sample_idx+1]
+                        
+                        # Owner encoder forward pass with decoder
+                        owner_mu = mus[task_id][sample_idx:sample_idx+1]
+                        owner_logvar = logvars[task_id][sample_idx:sample_idx+1]
+                        
+                        # Reparameterization for owner encoder
+                        eps = torch.randn_like(owner_mu)
+                        z_owner = owner_mu + eps * torch.exp(0.5 * owner_logvar)
+                        
+                        # Decode with owner latent
+                        shape_logits, grid_logits = model.multi_encoder.decoder(z_owner, sample_input, target_seq=sample_target)
+                        
+                        # Reconstruction loss (owner only)
+                        shape_targets = sample_target[:, 900:902].long()
+                        shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
+                        
+                        r, c = map(int, sample_target[0, 900:902])
+                        n_pix = r * c
+                        if n_pix > 0:
+                            grid_loss = F.cross_entropy(grid_logits[0, :n_pix], sample_target[0, :n_pix].long())
+                        else:
+                            grid_loss = torch.tensor(0.0, device=input_seq.device)
+                        
+                        reconstruction_loss = shape_loss + grid_loss
+                        
+                        # KL losses for all encoders
+                        for enc_idx in range(K):
+                            mu_k = mus[enc_idx][sample_idx:sample_idx+1]
+                            logvar_k = logvars[enc_idx][sample_idx:sample_idx+1]
+                            kl_k = 0.5 * torch.sum(mu_k.pow(2) + logvar_k.exp() - 1 - logvar_k)
+                            
+                            if enc_idx == task_id:
+                                # Owner encoder: β * KL-in
+                                kl_in_sum += beta_in * kl_k
+                                total_loss += reconstruction_loss + beta_in * kl_k
+                            else:
+                                # Non-owner encoder: α * KL-out (detached from decoder)
+                                kl_out_sum += alpha_out * kl_k.detach()  # Detach to prevent decoder gradients
+                                total_loss += alpha_out * kl_k.detach()
+                        
+                        shape_loss_sum += shape_loss
+                        grid_loss_sum += grid_loss
+                    
+                    # Average over batch
+                    loss = total_loss / batch_size
+                    loss = loss / gradient_accumulation_steps
+                    
+                    # Store components for logging
+                    shape_loss_comp = shape_loss_sum / batch_size
+                    grid_loss_comp = grid_loss_sum / batch_size
+                    kl_loss_comp = (kl_in_sum + kl_out_sum) / batch_size
+                    repulsion_comp = torch.tensor(0.0, device=input_seq.device)  # No repulsion in specialist training
+                    current_lambda_rep = 0.0
+                
+                else:
+                    # TRADITIONAL JOINT TRAINING WITH REPULSION LOSS
+                    # Get repulsion loss settings and optional schedule
+                    rep_cfg = settings.get_repulsion_loss_settings()
                 base_lambda = rep_cfg.get('lambda', 0.1)
                 schedule_cfg = rep_cfg.get('schedule', None)
 
@@ -705,22 +849,34 @@ def main_training(file_store_name):
                 
                 # Build (or reuse) combined dataloader
                 if SPLIT_ACROSS_ENCODERS:
-                    combined_input_sequences = []
-                    combined_output_sequences = []
-                    for encoder_dataloader in encoder_dataloaders:
-                        for batch_input, batch_output in encoder_dataloader:
-                            combined_input_sequences.extend(batch_input.tolist())
-                            combined_output_sequences.extend(batch_output.tolist())
-                    import random
-                    combined_indices = list(range(len(combined_input_sequences)))
-                    random.shuffle(combined_indices)
-                    shuffled_input_sequences = [combined_input_sequences[i] for i in combined_indices]
-                    shuffled_output_sequences = [combined_output_sequences[i] for i in combined_indices]
-                    combined_dataloader = prepare_dataloader(
-                        shuffled_input_sequences,
-                        shuffled_output_sequences,
-                        BATCH_SIZE
-                    )
+                    # Check if specialist separable training is enabled
+                    specialist_cfg = settings.get_specialist_separable_settings()
+                    use_specialist_separable = specialist_cfg.get('enabled', False)
+                    
+                    if use_specialist_separable:
+                        # Use specialist mixed dataloader with task_ids
+                        combined_dataloader = create_specialist_mixed_dataloader(
+                            dataset_splits, BATCH_SIZE, shuffle=True
+                        )
+                        logger.info("Created specialist mixed dataloader with task_ids")
+                    else:
+                        # Traditional combined dataloader (without task_ids)
+                        combined_input_sequences = []
+                        combined_output_sequences = []
+                        for encoder_dataloader in encoder_dataloaders:
+                            for batch_input, batch_output in encoder_dataloader:
+                                combined_input_sequences.extend(batch_input.tolist())
+                                combined_output_sequences.extend(batch_output.tolist())
+                        import random
+                        combined_indices = list(range(len(combined_input_sequences)))
+                        random.shuffle(combined_indices)
+                        shuffled_input_sequences = [combined_input_sequences[i] for i in combined_indices]
+                        shuffled_output_sequences = [combined_output_sequences[i] for i in combined_indices]
+                        combined_dataloader = prepare_dataloader(
+                            shuffled_input_sequences,
+                            shuffled_output_sequences,
+                            BATCH_SIZE
+                        )
                 else:
                     # No split: reuse the first encoder dataloader (all data already mixed)
                     combined_dataloader = encoder_dataloaders[0]
