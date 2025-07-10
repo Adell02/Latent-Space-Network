@@ -6,6 +6,13 @@ Implements 2-phase training approach:
 - Phase A: Train each encoder with its independent decoder on domain-specific data
 - Phase B: Train shared decoder using PoE of all pre-trained encoders
 
+ENHANCED MULTI-KEY EVALUATION SYSTEM:
+- Evaluates ALL keys specified in evaluation_settings['eval_keys'] independently
+- Each key generates its own reconstructions and trajectory visualizations  
+- Metrics (grid accuracy, pixel accuracy, etc.) are aggregated across ALL keys
+- Provides comprehensive evaluation while maintaining efficiency
+- Supports different eval_keys from training_keys for validation
+
 Usage:
     python train_specialist.py [--phases A,B] [--resume_from_phase PHASE]
 """
@@ -126,25 +133,25 @@ def generate_specialist_reconstruction_plot(model, dataloader, device, epoch, ph
             
             # Input
             axes[0].imshow(input_grid, cmap='viridis', interpolation='nearest')
-            axes[0].set_title(f'Input\n{input_shape[0]}×{input_shape[1]}')
+            axes[0].set_title(f'Input (Train)\n{input_shape[0]}×{input_shape[1]}')
             axes[0].axis('off')
             
             # Target
             axes[1].imshow(target_grid, cmap='viridis', interpolation='nearest')
-            axes[1].set_title(f'Target\n{target_shape[0]}×{target_shape[1]}')
+            axes[1].set_title(f'Target (Train)\n{target_shape[0]}×{target_shape[1]}')
             axes[1].axis('off')
             
             # Reconstruction
             axes[2].imshow(recon_grid, cmap='viridis', interpolation='nearest')
-            axes[2].set_title(f'Reconstruction\n{recon_shape[0]}×{recon_shape[1]}')
+            axes[2].set_title(f'Reconstruction (Train)\n{recon_shape[0]}×{recon_shape[1]}')
             axes[2].axis('off')
             
-            # Set overall title
+            # Set overall title with clear data source indication
             if phase == 'A':
-                fig.suptitle(f'Phase A Epoch {epoch}: Encoder {encoder_idx} + Independent Decoder', fontsize=14)
+                fig.suptitle(f'Phase A Epoch {epoch}: Encoder {encoder_idx} + Independent Decoder\nTRAINING DATA (Key: {key})', fontsize=14)
                 wandb_key = f'encoder_{encoder_idx}_{key}'
             else:
-                fig.suptitle(f'Phase B Epoch {epoch}: PoE + Shared Decoder', fontsize=14)
+                fig.suptitle(f'Phase B Epoch {epoch}: PoE + Shared Decoder\nTRAINING DATA (Key: {key})', fontsize=14)
                 wandb_key = f'poe_{key}'
             
             plt.tight_layout()
@@ -173,18 +180,112 @@ def generate_specialist_reconstruction_plot(model, dataloader, device, epoch, ph
         return None, None
 
 
+def generate_latent_histograms(model, dataloader, device, encoder_idx, epoch, wandb_logger, global_step):
+    """
+    Generate histograms of latent means and log(sigmas) for a specific encoder.
+    
+    Args:
+        model: Current model state
+        dataloader: Data loader with samples
+        device: Device to run on
+        encoder_idx: Encoder index
+        epoch: Current epoch
+        wandb_logger: WandB logger instance
+        global_step: Global training step
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import tempfile
+    import os
+    
+    model.eval()
+    all_mus = []
+    all_log_vars = []
+    
+    with torch.no_grad():
+        # Collect latent statistics from a subset of data (efficient)
+        for batch_idx, (input_seq, target_seq) in enumerate(dataloader):
+            if batch_idx >= 20:  # Limit to 20 batches for efficiency
+                break
+                
+            input_seq = input_seq.to(device)
+            target_seq = target_seq.to(device)
+            
+            # Get latent distributions from specific encoder
+            mu, log_var = model.multi_encoder.encoders[encoder_idx](input_seq, target_seq)
+            all_mus.append(mu.cpu().numpy())
+            all_log_vars.append(log_var.cpu().numpy())
+    
+    if not all_mus:
+        return
+    
+    # Concatenate all samples
+    all_mus = np.concatenate(all_mus, axis=0).flatten()
+    all_log_vars = np.concatenate(all_log_vars, axis=0).flatten()
+    
+    # Create histogram plot
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    
+    # Histogram of means
+    ax1.hist(all_mus, bins=50, alpha=0.7, color='blue', edgecolor='black')
+    ax1.axvline(0, color='red', linestyle='--', alpha=0.8, label='Prior μ=0')
+    ax1.set_xlabel('Latent Mean (μ)')
+    ax1.set_ylabel('Frequency')
+    ax1.set_title(f'Encoder {encoder_idx} - Latent Means\nEpoch {epoch}')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # Add statistics
+    mu_mean, mu_std = np.mean(all_mus), np.std(all_mus)
+    ax1.text(0.05, 0.95, f'μ={mu_mean:.3f}, σ={mu_std:.3f}', 
+             transform=ax1.transAxes, va='top', bbox=dict(boxstyle='round', facecolor='wheat'))
+    
+    # Histogram of log variances
+    ax2.hist(all_log_vars, bins=50, alpha=0.7, color='green', edgecolor='black')
+    ax2.axvline(0, color='red', linestyle='--', alpha=0.8, label='Prior log σ²=0')
+    ax2.set_xlabel('Log Variance (log σ²)')
+    ax2.set_ylabel('Frequency')
+    ax2.set_title(f'Encoder {encoder_idx} - Log Variances\nEpoch {epoch}')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    # Add statistics
+    logvar_mean, logvar_std = np.mean(all_log_vars), np.std(all_log_vars)
+    ax2.text(0.05, 0.95, f'μ={logvar_mean:.3f}, σ={logvar_std:.3f}', 
+             transform=ax2.transAxes, va='top', bbox=dict(boxstyle='round', facecolor='lightgreen'))
+    
+    plt.suptitle(f'Phase A: Encoder {encoder_idx} Latent Distributions\nTraining Epoch {epoch}', fontsize=14)
+    plt.tight_layout()
+    
+    # Save and log to wandb
+    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
+        plt.savefig(tmp_file.name, dpi=150, bbox_inches='tight')
+        temp_plot_path = tmp_file.name
+    plt.close()
+    
+    if wandb_logger:
+        try:
+            import wandb
+            wandb_logger._safe_log({
+                f"phase_a_latents/encoder_{encoder_idx}_histograms": wandb.Image(temp_plot_path),
+                f"phase_a_latents/encoder_{encoder_idx}_mu_mean": mu_mean,
+                f"phase_a_latents/encoder_{encoder_idx}_mu_std": mu_std,
+                f"phase_a_latents/encoder_{encoder_idx}_logvar_mean": logvar_mean,
+                f"phase_a_latents/encoder_{encoder_idx}_logvar_std": logvar_std,
+            }, step_hint=global_step)
+            print(f"✓ Logged latent histograms for Encoder {encoder_idx} at epoch {epoch}")
+        except Exception as e:
+            print(f"⚠ Failed to log latent histograms: {e}")
+        finally:
+            os.unlink(temp_plot_path)
+    
+    model.train()
+
+
 def generate_phase_b_final_comparison_plot(model, encoder_datasets, device, run_dir, wandb_logger, global_step):
     """
-    Generate a comprehensive comparison plot showing each encoder's reconstruction 
-    (using their independent decoders) vs PoE reconstruction (using shared decoder)
-    with bar graph of sigma values showing uncertainty distributions.
-    
-    VISUALIZATION BEHAVIOR:
-    - Each encoder uses its own INDEPENDENT DECODER for reconstruction comparison
-    - PoE uses the SHARED DECODER for reconstruction 
-    - Shows uncertainty distributions (sigma bar graph) for all latent representations
-    - Demonstrates encoder specialization vs PoE combination
-    - Uses representative sample selection to ensure fair comparison
+    Generate comprehensive encoder vs PoE comparison plots and accuracy matrix.
+    Creates separate figures for training and evaluation data, plus accuracy matrix.
     
     Args:
         model: Current model state
@@ -198,264 +299,305 @@ def generate_phase_b_final_comparison_plot(model, encoder_datasets, device, run_
     import torch
     import numpy as np
     from utils.data_preparation import extract_grid_from_sequence
-    from utils.settings_manager import settings
+    from utils.model_utils import prepare_dataloader
+    from re_arc.main import generate_and_process_tasks
+    from utils.evaluation_utils import run_quick_evaluation
     import tempfile
     import os
-    import random
     
     model.eval()
     with torch.no_grad():
         num_encoders = len(encoder_datasets)
         
-        # Get settings for reproducible sample selection
+        # Get evaluation settings to use ALL eval_keys
+        eval_settings = settings.get_evaluation_settings()
+        eval_keys = eval_settings.get('eval_keys', ['00d62c1b'])
         data_settings = settings.get_data_settings()
-        training_keys = data_settings.get('training_keys', [])
         eval_seed = data_settings.get('eval_seed', 42)
+        n_samples_per_key = eval_settings.get('eval_n_samples', 2)
         
-        # Set seed for deterministic sample selection
-        random.seed(eval_seed)
-        np.random.seed(eval_seed)
-        torch.manual_seed(eval_seed)
+        print(f"Creating Phase B final plots for keys: {eval_keys}")
+        print(f"Using {n_samples_per_key} samples per key")
         
-        # Find a representative sample that exists across multiple encoders for fair comparison
-        representative_sample = None
-        sample_info = None
+        # 1. COMPREHENSIVE ANALYSIS WITH TRAINING DATA
+        print("\n=== Creating comprehensive analysis with TRAINING DATA ===")
+        _create_comprehensive_analysis_plot(model, encoder_datasets, device, "training", 
+                                           n_samples_per_key, wandb_logger, global_step, "training")
         
-        # Strategy: Use first available sample from the encoder with most data
-        encoder_with_most_data = 0
-        max_samples = 0
-        for enc_idx, (inputs, outputs) in enumerate(encoder_datasets):
-            if inputs and outputs and len(inputs) > max_samples:
-                max_samples = len(inputs)
-                encoder_with_most_data = enc_idx
+        # 2. COMPREHENSIVE ANALYSIS WITH EVALUATION DATA  
+        print("\n=== Creating comprehensive analysis with EVALUATION DATA ===")
+        from utils.model_utils import set_seed
+        set_seed(eval_seed)
         
-        inputs, outputs = encoder_datasets[encoder_with_most_data]
-        if not inputs or not outputs:
-            print(f"⚠ Warning: No data available for Phase B final comparison plot")
-            return
+        eval_samples = []
+        for eval_key in eval_keys:
+            try:
+                print(f"Generating evaluation data for key '{eval_key}'...")
+                _, _, _, input_sequences, output_sequences = generate_and_process_tasks(eval_key, n_samples_per_key)
+                
+                if not input_sequences or not output_sequences:
+                    print(f"⚠ Warning: No evaluation data for key '{eval_key}', skipping...")
+                    continue
+                
+                eval_dataloader = prepare_dataloader(input_sequences, output_sequences, batch_size=1)
+                key_samples = []
+                for i, (input_seq, target_seq) in enumerate(eval_dataloader):
+                    if i >= n_samples_per_key:
+                        break
+                    input_seq, target_seq = input_seq.to(device), target_seq.to(device)
+                    key_samples.append((input_seq, target_seq, eval_key, i))
+                
+                eval_samples.extend(key_samples)
+                print(f"✓ Loaded {len(key_samples)} evaluation samples from key '{eval_key}'")
+                
+            except Exception as e:
+                print(f"⚠ Warning: Failed to generate evaluation data for key '{eval_key}': {e}")
+                continue
+        
+        if eval_samples:
+            _create_comprehensive_analysis_plot(model, eval_samples, device, "evaluation", 
+                                               n_samples_per_key, wandb_logger, global_step, "evaluation")
+        else:
+            print("⚠ Error: No evaluation data could be generated - skipping evaluation analysis")
+        
+        # 3. ACCURACY MATRIX (KEY vs ENCODER/POE)
+        print("\n=== Creating accuracy matrix ===")
+        _create_accuracy_matrix(model, eval_keys, num_encoders, device, wandb_logger, global_step)
+
+
+def _create_comprehensive_analysis_plot(model, data_source, device, data_type, n_samples_per_key, wandb_logger, global_step, source_name):
+    """Create comprehensive encoder vs PoE analysis plot (without bar graph)."""
+    import matplotlib.pyplot as plt
+    import tempfile
+    import os
+    from utils.data_preparation import extract_grid_from_sequence
+    
+    if data_type == "training":
+        # Use training data from encoder datasets
+        num_encoders = len(data_source)
+        all_samples = []
+        for enc_idx, (inputs, outputs) in enumerate(data_source):
+            if inputs and outputs:
+                from utils.model_utils import prepare_dataloader
+                dataloader = prepare_dataloader(inputs, outputs, batch_size=1)
+                for i, (input_seq, target_seq) in enumerate(dataloader):
+                    if i >= n_samples_per_key:
+                        break
+                    input_seq, target_seq = input_seq.to(device), target_seq.to(device)
+                    all_samples.append((input_seq, target_seq, f"training_enc_{enc_idx}", i))
+    else:
+        # Use evaluation data 
+        all_samples = data_source
+        num_encoders = len(model.multi_encoder.encoders)
+    
+    if not all_samples:
+        print(f"⚠ No {data_type} data available for analysis")
+        return
+    
+    print(f"Analyzing {len(all_samples)} {data_type} samples...")
+    
+    # Process samples for visualization
+    sample_data = []
+    for sample_idx, (input_seq, target_seq, source_key, sample_num) in enumerate(all_samples):
+        if sample_idx >= min(len(all_samples), n_samples_per_key * 4):  # Limit for visualization
+            break
             
-        # Log which encoder's data we're using for transparency
-        encoder_keys = []
+        # Extract grids
+        input_grid, input_shape = extract_grid_from_sequence(input_seq[0].cpu().numpy())
+        target_grid, target_shape = extract_grid_from_sequence(target_seq[0].cpu().numpy())
+        
+        # Get encoder reconstructions
+        encoder_reconstructions = []
+        for enc_idx in range(num_encoders):
+            mu, log_var = model.multi_encoder.encoders[enc_idx](input_seq, target_seq)
+            z = model.reparameterize(mu, log_var)
+            shape_logits, grid_logits = model.multi_encoder.independent_decoders[enc_idx](
+                z, input_seq, target_seq=target_seq
+            )
+            
+            shape_pred = shape_logits[0].argmax(dim=-1).cpu().numpy()
+            grid_pred = grid_logits[0].argmax(dim=-1).cpu().numpy()
+            recon_seq = target_seq[0].cpu().numpy().copy()
+            recon_seq[900:902] = shape_pred
+            if len(shape_pred) >= 2 and shape_pred[0] > 0 and shape_pred[1] > 0:
+                recon_seq[:min(len(grid_pred), 900)] = grid_pred[:min(len(grid_pred), 900)]
+            recon_grid, recon_shape = extract_grid_from_sequence(recon_seq)
+            encoder_reconstructions.append((recon_grid, recon_shape))
+        
+        # Get PoE reconstruction
+        mu_poe, log_var_poe = model(input_seq, target_seq)[1:3]
+        z_poe = model.reparameterize(mu_poe, log_var_poe)
+        shape_logits_poe, grid_logits_poe = model.multi_encoder.shared_decoder(z_poe, input_seq, target_seq=target_seq)
+        
+        shape_pred_poe = shape_logits_poe[0].argmax(dim=-1).cpu().numpy()
+        grid_pred_poe = grid_logits_poe[0].argmax(dim=-1).cpu().numpy()
+        recon_seq_poe = target_seq[0].cpu().numpy().copy()
+        recon_seq_poe[900:902] = shape_pred_poe
+        if len(shape_pred_poe) >= 2 and shape_pred_poe[0] > 0 and shape_pred_poe[1] > 0:
+            recon_seq_poe[:min(len(grid_pred_poe), 900)] = grid_pred_poe[:min(len(grid_pred_poe), 900)]
+        poe_recon_grid, poe_recon_shape = extract_grid_from_sequence(recon_seq_poe)
+        
+        sample_data.append({
+            'input_grid': input_grid,
+            'input_shape': input_shape,
+            'target_grid': target_grid,
+            'target_shape': target_shape,
+            'encoder_reconstructions': encoder_reconstructions,
+            'poe_reconstruction': (poe_recon_grid, poe_recon_shape),
+            'source_key': source_key,
+            'sample_num': sample_num
+        })
+    
+    # Create visualization (without bar graph)
+    fig = plt.figure(figsize=(4 * (num_encoders + 3), 8))
+    gs = fig.add_gridspec(2, num_encoders + 3, height_ratios=[1.5, 1.5], hspace=0.3, wspace=0.3)
+    
+    # Show first few samples
+    for row in range(min(2, len(sample_data))):
+        sample = sample_data[row]
+        
+        # Input and Target
+        ax_input = fig.add_subplot(gs[row, 0])
+        ax_input.imshow(sample['input_grid'], cmap='viridis', interpolation='nearest')
+        ax_input.set_title(f'Input {row+1}\n{sample["input_shape"][0]}×{sample["input_shape"][1]}\nKey: {sample["source_key"].split("_")[-1] if "_" in sample["source_key"] else sample["source_key"]}', fontsize=10)
+        ax_input.axis('off')
+        
+        ax_target = fig.add_subplot(gs[row, 1])
+        ax_target.imshow(sample['target_grid'], cmap='viridis', interpolation='nearest')
+        ax_target.set_title(f'Target {row+1}\n{sample["target_shape"][0]}×{sample["target_shape"][1]}', fontsize=10)
+        ax_target.axis('off')
+        
+        # Encoder reconstructions
+        for enc_idx in range(num_encoders):
+            ax_enc = fig.add_subplot(gs[row, 2 + enc_idx])
+            recon_grid, recon_shape = sample['encoder_reconstructions'][enc_idx]
+            ax_enc.imshow(recon_grid, cmap='viridis', interpolation='nearest')
+            ax_enc.set_title(f'Encoder {enc_idx}\n{recon_shape[0]}×{recon_shape[1]}', fontsize=10)
+            ax_enc.axis('off')
+        
+        # PoE reconstruction
+        ax_poe = fig.add_subplot(gs[row, 2 + num_encoders])
+        poe_recon_grid, poe_recon_shape = sample['poe_reconstruction']
+        ax_poe.imshow(poe_recon_grid, cmap='viridis', interpolation='nearest')
+        ax_poe.set_title(f'PoE\n{poe_recon_shape[0]}×{poe_recon_shape[1]}', fontsize=10, fontweight='bold')
+        ax_poe.axis('off')
+    
+    plt.suptitle(f'Comprehensive Encoder vs PoE Analysis\n{data_type.upper()} DATA', fontsize=16)
+    plt.tight_layout()
+    
+    # Save and log
+    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
+        plt.savefig(tmp_file.name, dpi=200, bbox_inches='tight')
+        temp_plot_path = tmp_file.name
+    plt.close()
+    
+    if wandb_logger:
         try:
-            # Try to get key information from splitting statistics if available
-            splitting_stats_file = os.path.join(run_dir, 'splitting_statistics.json')
-            if os.path.exists(splitting_stats_file):
-                import json
-                with open(splitting_stats_file, 'r') as f:
-                    splitting_stats = json.load(f)
-                    if 'keys_per_encoder' in splitting_stats:
-                        encoder_keys = splitting_stats['keys_per_encoder'].get(str(encoder_with_most_data), [])
-        except Exception:
-            pass
+            import wandb
+            wandb_logger._safe_log({
+                f"phase_b_final/comprehensive_analysis_{source_name}": wandb.Image(temp_plot_path),
+                f"phase_b_final/{source_name}_samples_analyzed": len(sample_data)
+            }, step_hint=global_step)
+            print(f"✓ Logged comprehensive analysis for {data_type} data")
+        except Exception as e:
+            print(f"⚠ Failed to log {data_type} analysis: {e}")
+        finally:
+            os.unlink(temp_plot_path)
+
+
+def _create_accuracy_matrix(model, eval_keys, num_encoders, device, wandb_logger, global_step):
+    """Create colored accuracy matrix: Keys (x-axis) vs Encoders+PoE (y-axis)."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from utils.evaluation_utils import run_quick_evaluation
+    import tempfile
+    import os
+    
+    print("Computing accuracy matrix...")
+    
+    # Initialize accuracy matrix
+    # Rows: Encoders (0 to num_encoders-1) + PoE (last row)
+    # Cols: eval_keys
+    accuracy_matrix = np.zeros((num_encoders + 1, len(eval_keys)))
+    
+    for key_idx, eval_key in enumerate(eval_keys):
+        print(f"  Evaluating key '{eval_key}'...")
         
-        if not encoder_keys and training_keys:
-            # Fallback: assign keys based on encoder index
-            encoder_keys = [training_keys[encoder_with_most_data % len(training_keys)]]
+        # Evaluate each individual encoder
+        for enc_idx in range(num_encoders):
+            try:
+                eval_results = run_quick_evaluation(
+                    model, "", epoch=f"matrix_eval", eval_keys=[eval_key],
+                    encoder_idx=enc_idx, use_independent_decoder=True
+                )
+                if eval_results and eval_key in eval_results:
+                    accuracy = eval_results[eval_key]['metrics'].get('grid_accuracy', 0.0)
+                    accuracy_matrix[enc_idx, key_idx] = accuracy
+                    print(f"    Encoder {enc_idx}: {accuracy:.3f}")
+            except Exception as e:
+                print(f"    Encoder {enc_idx}: Failed ({e})")
+                accuracy_matrix[enc_idx, key_idx] = 0.0
         
-        sample_info = {
-            'source_encoder': encoder_with_most_data,
-            'encoder_keys': encoder_keys,
-            'total_samples': len(inputs),
-            'sample_index': 0  # Always use first sample for consistency
-        }
-        
-        print(f"Phase B Final Plot - Using sample from Encoder {encoder_with_most_data}")
-        print(f"  Source encoder keys: {encoder_keys}")
-        print(f"  Total samples available: {len(inputs)}")
-        print(f"  Sample index: {sample_info['sample_index']}")
-        
-        from utils.model_utils import prepare_dataloader
-        dataloader = prepare_dataloader(inputs, outputs, batch_size=1)
-        
-        for input_seq, target_seq in dataloader:
-            input_seq = input_seq.to(device)
-            target_seq = target_seq.to(device)
-            
-            # Take only the first sample
-            input_sample = input_seq[0:1]
-            target_sample = target_seq[0:1]
-            
-            # Extract input and target grids for reference
-            input_grid, input_shape = extract_grid_from_sequence(input_sample[0].cpu().numpy())
-            target_grid, target_shape = extract_grid_from_sequence(target_sample[0].cpu().numpy())
-            
-            # Create figure with two rows: reconstructions on top, sigma bar graph below
-            fig_width = 4 * (2 + num_encoders + 1)  # Input, Target, N encoders, PoE
-            fig, axes = plt.subplots(2, 2 + num_encoders + 1, figsize=(fig_width, 12))
-            
-            # Top row for reconstructions
-            recon_axes = axes[0]
-            
-            # Input (with source information)
-            recon_axes[0].imshow(input_grid, cmap='viridis', interpolation='nearest')
-            input_title = f'Input\n{input_shape[0]}×{input_shape[1]}'
-            if encoder_keys:
-                input_title += f'\nFrom: {encoder_keys[0]}'
-            recon_axes[0].set_title(input_title)
-            recon_axes[0].axis('off')
-            
-            # Target
-            recon_axes[1].imshow(target_grid, cmap='viridis', interpolation='nearest')
-            recon_axes[1].set_title(f'Target\n{target_shape[0]}×{target_shape[1]}')
-            recon_axes[1].axis('off')
-            
-            encoder_stats = []
-            all_sigma_values = []  # Store sigma values for bar graph
-            encoder_colors = plt.cm.Set1(np.linspace(0, 1, num_encoders + 1))  # +1 for PoE
-            
-            # Each encoder with its independent decoder
-            for enc_idx in range(num_encoders):
-                # Generate reconstruction using encoder + independent decoder
-                mu, log_var = model.multi_encoder.encoders[enc_idx](input_sample, target_sample)
-                z = model.reparameterize(mu, log_var)
-                shape_logits, grid_logits = model.multi_encoder.independent_decoders[enc_idx](z, input_sample, target_seq=target_sample)
-                
-                # Compute latent statistics - keep full sigma vector for bar graph
-                mu_mean = mu.detach().cpu().mean().item()
-                sigma_values = torch.exp(0.5 * log_var).detach().cpu().flatten().numpy()  # All sigma values
-                sigma_mean = sigma_values.mean()
-                encoder_stats.append((mu_mean, sigma_mean))
-                all_sigma_values.append((f'Encoder {enc_idx}', sigma_values, encoder_colors[enc_idx]))
-                
-                # Create reconstruction grid
-                shape_pred = shape_logits[0].argmax(dim=-1).cpu().numpy()
-                grid_pred = grid_logits[0].argmax(dim=-1).cpu().numpy()
-                
-                recon_seq = target_sample[0].cpu().numpy().copy()
-                recon_seq[900:902] = shape_pred
-                if len(shape_pred) >= 2 and shape_pred[0] > 0 and shape_pred[1] > 0:
-                    recon_seq[:min(len(grid_pred), 900)] = grid_pred[:min(len(grid_pred), 900)]
-                
-                recon_grid, recon_shape = extract_grid_from_sequence(recon_seq)
-                
-                # Plot reconstruction with familiarity indicator
-                ax_idx = 2 + enc_idx
-                recon_axes[ax_idx].imshow(recon_grid, cmap='viridis', interpolation='nearest')
-                
-                # Determine if this encoder is familiar with this sample
-                is_familiar = (enc_idx == encoder_with_most_data)
-                familiarity_indicator = "👁️" if is_familiar else "❓"
-                
-                title = f'{familiarity_indicator} Encoder {enc_idx}\n+ Independent Decoder\nμ̄={mu_mean:.3f}, σ̄={sigma_mean:.3f}'
-                recon_axes[ax_idx].set_title(title, fontsize=10)
-                recon_axes[ax_idx].axis('off')
-            
-            # PoE + Shared Decoder
-            mu_poe, log_var_poe = model(input_sample, target_sample)[1:3]  # PoE inference
-            z_poe = model.reparameterize(mu_poe, log_var_poe)
-            shape_logits_poe, grid_logits_poe = model.multi_encoder.shared_decoder(z_poe, input_sample, target_seq=target_sample)
-            
-            # Compute PoE latent statistics
-            mu_poe_mean = mu_poe.detach().cpu().mean().item()
-            sigma_poe_values = torch.exp(0.5 * log_var_poe).detach().cpu().flatten().numpy()  # All sigma values
-            sigma_poe_mean = sigma_poe_values.mean()
-            all_sigma_values.append(('PoE', sigma_poe_values, encoder_colors[num_encoders]))
-            
-            # Create PoE reconstruction grid
-            shape_pred_poe = shape_logits_poe[0].argmax(dim=-1).cpu().numpy()
-            grid_pred_poe = grid_logits_poe[0].argmax(dim=-1).cpu().numpy()
-            
-            recon_seq_poe = target_sample[0].cpu().numpy().copy()
-            recon_seq_poe[900:902] = shape_pred_poe
-            if len(shape_pred_poe) >= 2 and shape_pred_poe[0] > 0 and shape_pred_poe[1] > 0:
-                recon_seq_poe[:min(len(grid_pred_poe), 900)] = grid_pred_poe[:min(len(grid_pred_poe), 900)]
-            
-            recon_grid_poe, recon_shape_poe = extract_grid_from_sequence(recon_seq_poe)
-            
-            # Plot PoE reconstruction
-            poe_ax_idx = 2 + num_encoders
-            recon_axes[poe_ax_idx].imshow(recon_grid_poe, cmap='viridis', interpolation='nearest')
-            recon_axes[poe_ax_idx].set_title(f'🔄 PoE + Shared Decoder\nμ̄={mu_poe_mean:.3f}, σ̄={sigma_poe_mean:.3f}')
-            recon_axes[poe_ax_idx].axis('off')
-            
-            # Create bar graph of sigma values in the bottom row
-            # Use the middle columns for the bar graph spanning across most of the width
-            hist_start_col = 1
-            hist_end_col = 2 + num_encoders
-            
-            # Remove individual subplot axes in the bar graph area and create a single spanning axis
-            for i in range(hist_start_col, hist_end_col + 1):
-                axes[1, i].remove()
-            
-            # Create a new subplot that spans the desired columns
-            bar_ax = plt.subplot2grid((2, 2 + num_encoders + 1), (1, hist_start_col), 
-                                     colspan=hist_end_col - hist_start_col + 1, fig=fig)
-            
-            # Create bar graph with latent position on x-axis and sigma values on y-axis
-            latent_dim = all_sigma_values[0][1].shape[0]  # Get latent dimension
-            x_positions = np.arange(latent_dim)
-            
-            # Set width for bars (make them narrower so multiple encoders can fit)
-            bar_width = 0.8 / len(all_sigma_values)
-            
-            for idx, (name, sigma_vals, color) in enumerate(all_sigma_values):
-                # Calculate offset for this encoder's bars
-                x_offset = (idx - len(all_sigma_values)/2 + 0.5) * bar_width
-                
-                # Plot bars for this encoder/PoE
-                bar_ax.bar(x_positions + x_offset, sigma_vals, width=bar_width, 
-                          alpha=0.7, color=color, label=name)
-            
-            bar_ax.set_xlabel('Latent Dimension Index')
-            bar_ax.set_ylabel('Sigma (Uncertainty) Values')
-            bar_ax.set_title('Latent Uncertainty per Dimension\n(Lower σ = more certain; PoE should combine most certain elements)')
-            bar_ax.legend()
-            bar_ax.grid(True, alpha=0.3, axis='y')
-            
-            # Set x-axis ticks to show latent dimension indices
-            bar_ax.set_xticks(x_positions[::max(1, latent_dim//20)])  # Show every nth tick to avoid crowding
-            bar_ax.set_xticklabels(x_positions[::max(1, latent_dim//20)])
-            
-            # Add mean lines as horizontal reference
-            for name, sigma_vals, color in all_sigma_values:
-                mean_val = sigma_vals.mean()
-                bar_ax.axhline(mean_val, color=color, linestyle='--', alpha=0.8, 
-                              label=f'{name} mean: {mean_val:.3f}')
-            
-            # Hide unused bar graph subplot areas
-            axes[1, 0].axis('off')  # Hide first column in bottom row
-            if poe_ax_idx + 1 < len(axes[1]):  # Hide any remaining columns
-                axes[1, -1].axis('off')
-            
-            # Set overall title with statistics summary and sample information
-            stats_text = " | ".join([f"Enc{i}: μ̄={stats[0]:.3f}, σ̄={stats[1]:.3f}" for i, stats in enumerate(encoder_stats)])
-            sample_source = f"Sample from Encoder {encoder_with_most_data}" + (f" ({encoder_keys[0]})" if encoder_keys else "")
-            fig.suptitle(f'Phase B Final: Encoder Reconstructions vs PoE + Uncertainty Analysis\n{sample_source} | {stats_text} | PoE: μ̄={mu_poe_mean:.3f}, σ̄={sigma_poe_mean:.3f}', fontsize=11)
-            
-            plt.tight_layout()
-            
-            # Save plot
-            comparison_plot_path = os.path.join(run_dir, 'phase_b_final_encoder_poe_comparison.png')
-            plt.savefig(comparison_plot_path, dpi=150, bbox_inches='tight')
-            
-            # Also save as temp file for WandB upload
-            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
-                plt.savefig(tmp_file.name, dpi=150, bbox_inches='tight')
-                temp_plot_path = tmp_file.name
-            
-            plt.close()
-            
-            # Log to WandB with detailed sample information
-            if wandb_logger:
-                try:
-                    import wandb
-                    wandb_logger._safe_log({
-                        "phase_b_final/encoder_poe_comparison": wandb.Image(temp_plot_path),
-                        "phase_b_final/sample_source_encoder": encoder_with_most_data,
-                        "phase_b_final/sample_keys": encoder_keys,
-                        "phase_b_final/sample_index": sample_info['sample_index']
-                    }, step_hint=global_step)
-                    
-                    print(f"✓ Logged Phase B final encoder vs PoE comparison plot")
-                    print(f"  Sample source: Encoder {encoder_with_most_data} ({encoder_keys})")
-                    print(f"  Familiarity indicators: 👁️=familiar, ❓=unfamiliar")
-                except Exception as wandb_error:
-                    print(f"⚠ Failed to log Phase B final comparison plot: {wandb_error}")
-                finally:
-                    # Clean up temp file
-                    os.unlink(temp_plot_path)
-            
-            break  # Only process first sample
+        # Evaluate PoE
+        try:
+            eval_results = run_quick_evaluation(
+                model, "", epoch=f"matrix_eval", eval_keys=[eval_key],
+                encoder_idx=None, use_independent_decoder=False  # PoE + shared decoder
+            )
+            if eval_results and eval_key in eval_results:
+                accuracy = eval_results[eval_key]['metrics'].get('grid_accuracy', 0.0)
+                accuracy_matrix[num_encoders, key_idx] = accuracy
+                print(f"    PoE: {accuracy:.3f}")
+        except Exception as e:
+            print(f"    PoE: Failed ({e})")
+            accuracy_matrix[num_encoders, key_idx] = 0.0
+    
+    # Create matrix visualization
+    fig, ax = plt.subplots(figsize=(max(8, len(eval_keys) * 1.2), max(6, (num_encoders + 1) * 0.8)))
+    
+    im = ax.imshow(accuracy_matrix, cmap='RdYlGn', vmin=0, vmax=1, aspect='auto', interpolation='nearest')
+    
+    # Set ticks and labels
+    ax.set_xticks(range(len(eval_keys)))
+    ax.set_xticklabels([key[:8] + "..." if len(key) > 8 else key for key in eval_keys], rotation=45, ha='right')
+    ax.set_yticks(range(num_encoders + 1))
+    ax.set_yticklabels([f'Encoder {i}' for i in range(num_encoders)] + ['PoE'])
+    
+    # Add text annotations
+    for i in range(num_encoders + 1):
+        for j in range(len(eval_keys)):
+            text = ax.text(j, i, f'{accuracy_matrix[i, j]:.3f}',
+                          ha="center", va="center", color="black", fontsize=10, fontweight='bold')
+    
+    ax.set_xlabel('Evaluation Keys')
+    ax.set_ylabel('Encoders + PoE')
+    ax.set_title('Accuracy Matrix: Keys vs Encoders/PoE')
+    
+    # Add colorbar
+    cbar = plt.colorbar(im, ax=ax, shrink=0.8)
+    cbar.set_label('Grid Accuracy', rotation=270, labelpad=20)
+    
+    plt.tight_layout()
+    
+    # Save and log
+    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
+        plt.savefig(tmp_file.name, dpi=200, bbox_inches='tight')
+        temp_plot_path = tmp_file.name
+    plt.close()
+    
+    if wandb_logger:
+        try:
+            import wandb
+            wandb_logger._safe_log({
+                "phase_b_final/accuracy_matrix": wandb.Image(temp_plot_path),
+                "phase_b_final/matrix_shape": f"{num_encoders + 1}x{len(eval_keys)}",
+                "phase_b_final/eval_keys": eval_keys
+            }, step_hint=global_step)
+            print("✓ Logged accuracy matrix")
+        except Exception as e:
+            print(f"⚠ Failed to log accuracy matrix: {e}")
+        finally:
+            os.unlink(temp_plot_path)
 
 
 def build_model(device):
@@ -605,12 +747,46 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                     'current_encoder': encoder_idx
                 })
                 
+                # Run periodic evaluation to track accuracy progression
+                from utils.evaluation_utils import should_run_evaluation, run_quick_evaluation, log_evaluation_to_wandb
+                wandb_settings = settings.get_wandb_settings()
+                eval_interval = wandb_settings.get('eval_log_interval', 10)  # Evaluate every 10 epochs by default
+                
+                if should_run_evaluation(epoch + 1, eval_interval, phase_epochs):
+                    print(f"Running evaluation for Encoder {encoder_idx} at epoch {epoch + 1}...")
+                    try:
+                        # Use ALL eval keys from settings for consistent evaluation
+                        eval_settings = settings.get_evaluation_settings()
+                        eval_keys = eval_settings.get('eval_keys', ['00d62c1b'])
+                        print(f"  Evaluating on ALL keys: {eval_keys}")
+                        
+                        # Evaluate this specific encoder with its independent decoder on ALL eval keys
+                        eval_results = run_quick_evaluation(
+                            model, run_dir, global_step, 
+                            eval_keys=eval_keys,  # Use ALL eval keys
+                            encoder_idx=encoder_idx, use_independent_decoder=True
+                        )
+                        if eval_results:
+                            # Log with encoder-specific prefix
+                            log_evaluation_to_wandb(
+                                eval_results, run_dir, global_step, wandb_logger, 
+                                current_model=model, phase=f"phase_a_enc{encoder_idx}"
+                            )
+                            print(f"✓ Evaluation logged for Encoder {encoder_idx} at epoch {epoch + 1} on ALL keys")
+                    except Exception as eval_error:
+                        logger.warning(f"Evaluation failed for Encoder {encoder_idx} at epoch {epoch + 1}: {eval_error}")
+                    
+                    # Generate latent distribution histograms (lean and efficient)
+                    try:
+                        generate_latent_histograms(model, dataloader, device, encoder_idx, epoch + 1, wandb_logger, global_step)
+                    except Exception as hist_error:
+                        logger.warning(f"Latent histogram generation failed for Encoder {encoder_idx} at epoch {epoch + 1}: {hist_error}")
+                
                 # Basic visualizations are handled by the reconstruction plots above
             
-            # Generate simple reconstruction plot for this encoder every epoch
-            if wandb_logger and (epoch + 1) % 1 == 0:  # Every epoch
+            # Generate reconstruction plot periodically (reduce frequency)
+            if wandb_logger and (epoch + 1) % 10 == 0:  # Every 10 epochs instead of every epoch
                 try:
-                    # Generate reconstruction plot
                     plot_path, wandb_key = generate_specialist_reconstruction_plot(
                         model, dataloader, device, epoch + 1, phase='A',
                         encoder_idx=encoder_idx, use_independent_decoder=True,
@@ -618,7 +794,6 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                     )
                     
                     if plot_path and wandb_key:
-                        # Log to wandb with proper step using WandbLogger's safe method
                         import wandb
                         import os
                         try:
@@ -629,13 +804,12 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                         except Exception as wandb_error:
                             logger.warning(f"Failed to log Phase A reconstruction to WandB: {wandb_error}")
                         
-                        # Clean up temp file
                         os.unlink(plot_path)
                         
                 except Exception as e:
                     logger.warning(f"Failed to generate reconstruction plot for Encoder {encoder_idx} at epoch {epoch+1}: {e}")
                 
-                model.train()  # Return to training mode
+                model.train()
         
         # Save encoder checkpoint
         encoder_checkpoint_path = save_encoder_checkpoint(model, encoder_idx, run_dir)
@@ -852,6 +1026,35 @@ def train_phase_b_decoder(model, encoder_datasets, device, logger, wandb_logger,
                 'phase': 'B'
             })
             
+            # Run periodic evaluation to track PoE accuracy progression
+            from utils.evaluation_utils import should_run_evaluation, run_quick_evaluation, log_evaluation_to_wandb
+            wandb_settings = settings.get_wandb_settings()
+            eval_interval = wandb_settings.get('eval_log_interval', 10)  # Evaluate every 10 epochs by default
+            
+            if should_run_evaluation(epoch + 1, eval_interval, phase_epochs):
+                print(f"Running PoE evaluation at Phase B epoch {epoch + 1}...")
+                try:
+                    # Use ALL eval keys from settings for consistent evaluation
+                    eval_settings = settings.get_evaluation_settings()
+                    eval_keys = eval_settings.get('eval_keys', ['00d62c1b'])
+                    print(f"  Evaluating PoE on ALL keys: {eval_keys}")
+                    
+                    # Evaluate PoE with shared decoder on ALL eval keys
+                    eval_results = run_quick_evaluation(
+                        model, run_dir, global_step, 
+                        eval_keys=eval_keys,  # Use ALL eval keys
+                        encoder_idx=None, use_independent_decoder=False  # PoE + shared decoder
+                    )
+                    if eval_results:
+                        # Log with phase B prefix
+                        log_evaluation_to_wandb(
+                            eval_results, run_dir, global_step, wandb_logger, 
+                            current_model=model, phase="phase_b_poe"
+                        )
+                        print(f"✓ PoE evaluation logged at Phase B epoch {epoch + 1} on ALL keys")
+                except Exception as eval_error:
+                    logger.warning(f"PoE evaluation failed at Phase B epoch {epoch + 1}: {eval_error}")
+            
             # Basic visualizations are handled by the reconstruction plots below
         
         # Save checkpoint periodically
@@ -861,122 +1064,7 @@ def train_phase_b_decoder(model, encoder_datasets, device, logger, wandb_logger,
             )
             logger.info(f"Phase B checkpoint saved: {checkpoint_path}")
     
-        # Generate PoE reconstruction plots for each training key every epoch  
-        if wandb_logger and (epoch + 1) % 1 == 0:  # Every epoch
-            try:
-                # Create dataloaders for each training key to generate reconstruction plots
-                for key_idx, training_key in enumerate(TRAINING_KEYS):
-                    # Find the encoder dataset that corresponds to this key
-                    # Use encoder_datasets[key_idx % len(encoder_datasets)] as a fallback
-                    if key_idx < len(encoder_datasets):
-                        key_inputs, key_outputs = encoder_datasets[key_idx]
-                    else:
-                        # Fallback: use the first dataset
-                        key_inputs, key_outputs = encoder_datasets[0]
-                    
-                    if key_inputs and key_outputs:
-                        # Create a small dataloader for this key
-                        key_dataloader = prepare_dataloader(key_inputs, key_outputs, batch_size=1)
-                        
-                        # Generate PoE reconstruction plot for this key
-                        plot_path, wandb_key = generate_specialist_reconstruction_plot(
-                            model, key_dataloader, device, epoch + 1, phase='B',
-                            encoder_idx=None, use_independent_decoder=False,  # PoE + shared decoder
-                            key=training_key
-                        )
-                        
-                        if plot_path and wandb_key:
-                            # Log to wandb with proper step using WandbLogger's safe method
-                            import wandb
-                            import os
-                            try:
-                                wandb_logger._safe_log({
-                                    f"phase_b_reconstruction/{wandb_key}": wandb.Image(plot_path)
-                                }, step_hint=global_step)
-                                logger.info(f"✓ Logged Phase B PoE reconstruction for key {training_key} at step {global_step}")
-                            except Exception as wandb_error:
-                                logger.warning(f"Failed to log Phase B PoE reconstruction to WandB: {wandb_error}")
-                            
-                            # Clean up temp file
-                            os.unlink(plot_path)
-                            
-            except Exception as e:
-                logger.warning(f"Failed to generate Phase B reconstruction plots at epoch {epoch+1}: {e}")
-            
-            # -----------------------------------------------------------------
-            # Extra visualisations for Phase B: show what each encoder's latent
-            # produces when decoded by (a) its own independent decoder and (b)
-            # the shared decoder. Also log PoE latent stats. This gives deeper
-            # insight into encoder/decoder alignment during Phase B training.
-            # -----------------------------------------------------------------
-            if wandb_logger:
-                try:
-                    import wandb, os
-
-                    for enc_idx, (enc_inputs, enc_outputs) in enumerate(encoder_datasets):
-                        if not enc_inputs or not enc_outputs:
-                            continue
-
-                        # Build a lightweight dataloader (single sample)
-                        enc_loader = prepare_dataloader(enc_inputs, enc_outputs, batch_size=1)
-
-                        # === Encoder latent + Independent Decoder ===
-                        plot_path, wandb_key, mu_mean, sigma_mean = generate_specialist_reconstruction_plot(
-                            model, enc_loader, device, epoch + 1, phase='B',
-                            encoder_idx=enc_idx, use_independent_decoder=True,
-                            key=TRAINING_KEYS[enc_idx % len(TRAINING_KEYS)],
-                            return_mu_sigma=True
-    )
-                        if plot_path and wandb_key:
-                            try:
-                                wandb_logger._safe_log({
-                                    f"phase_b_reconstruction/enc{enc_idx}_independent/{wandb_key}": wandb.Image(plot_path)
-                                }, step_hint=global_step)
-                                logger.debug(f"✓ Logged Phase B encoder {enc_idx} independent reconstruction at step {global_step}")
-                            except Exception as wandb_error:
-                                logger.warning(f"Failed to log Phase B encoder {enc_idx} independent reconstruction: {wandb_error}")
-                            os.unlink(plot_path)
-    
-                        # === Encoder latent + Shared Decoder ===
-                        plot_path, wandb_key, mu_mean, sigma_mean = generate_specialist_reconstruction_plot(
-                            model, enc_loader, device, epoch + 1, phase='B',
-                            encoder_idx=enc_idx, use_independent_decoder=False,
-                            key=TRAINING_KEYS[enc_idx % len(TRAINING_KEYS)],
-                            return_mu_sigma=True
-                        )
-                        if plot_path and wandb_key:
-                            try:
-                                wandb_logger._safe_log({
-                                    f"phase_b_reconstruction/enc{enc_idx}_shared/{wandb_key}": wandb.Image(plot_path)
-                                }, step_hint=global_step)
-                                logger.debug(f"✓ Logged Phase B encoder {enc_idx} shared reconstruction at step {global_step}")
-                            except Exception as wandb_error:
-                                logger.warning(f"Failed to log Phase B encoder {enc_idx} shared reconstruction: {wandb_error}")
-                            os.unlink(plot_path)
-
-                    # === PoE latent + Shared Decoder (overall) ===
-                    if encoder_datasets:
-                        poe_inputs, poe_outputs = encoder_datasets[0]
-                        poe_loader = prepare_dataloader(poe_inputs, poe_outputs, batch_size=1)
-                        plot_path, wandb_key, mu_mean, sigma_mean = generate_specialist_reconstruction_plot(
-                            model, poe_loader, device, epoch + 1, phase='B',
-                            encoder_idx=None, use_independent_decoder=False,
-                            key='poe', return_mu_sigma=True
-                        )
-                        if plot_path and wandb_key:
-                            try:
-                                wandb_logger._safe_log({
-                                    f"phase_b_reconstruction/{wandb_key}": wandb.Image(plot_path)
-                                }, step_hint=global_step)
-                                logger.debug(f"✓ Logged Phase B PoE overall reconstruction at step {global_step}")
-                            except Exception as wandb_error:
-                                logger.warning(f"Failed to log Phase B PoE overall reconstruction: {wandb_error}")
-                            os.unlink(plot_path)
-
-                except Exception as e:
-                    logger.warning(f"Failed to generate extended Phase B reconstructions at epoch {epoch+1}: {e}")
-            
-            model.train()  # Return to training mode
+        # Skip per-epoch reconstruction plots - rely on final comparison plot instead for efficiency
     
     # Save final shared decoder checkpoint
     decoder_checkpoint_path = save_decoder_checkpoint(model, run_dir)
@@ -1037,15 +1125,24 @@ def train_phase_b_decoder(model, encoder_datasets, device, logger, wandb_logger,
 
 
 def run_evaluation_between_phases(model, device, logger, wandb_logger, run_dir, phase_name):
-    """Run evaluation between training phases."""
+    """Run evaluation between training phases using ALL evaluation keys."""
     logger.info(f"\n--- Evaluation after {phase_name} ---")
     print(f"Running evaluation after {phase_name}...")
     
     try:
-        eval_results = run_quick_evaluation(model, run_dir, epoch=f"{phase_name}_final")
+        # Use ALL eval keys from settings for comprehensive evaluation
+        eval_settings = settings.get_evaluation_settings()
+        eval_keys = eval_settings.get('eval_keys', ['00d62c1b'])
+        print(f"  Evaluating after {phase_name} on ALL keys: {eval_keys}")
+        
+        eval_results = run_quick_evaluation(
+            model, run_dir, epoch=f"{phase_name}_final", eval_keys=eval_keys  # Use ALL eval keys
+        )
         if eval_results and wandb_logger:
-            log_evaluation_to_wandb(eval_results, run_dir, f"{phase_name}_final", wandb_logger)
-            logger.info(f"✓ Evaluation results logged to wandb for {phase_name}")
+            # Pass the current model to avoid loading from disk
+            log_evaluation_to_wandb(eval_results, run_dir, f"{phase_name}_final", wandb_logger, 
+                                  current_model=model, phase=phase_name.lower().replace(' ', '_'))
+            logger.info(f"✓ Evaluation results logged to wandb for {phase_name} on ALL keys")
         return eval_results
     except Exception as e:
         logger.warning(f"Evaluation failed after {phase_name}: {e}")
@@ -1191,8 +1288,13 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
                 if eval_results_a:
                     results['phase_a']['evaluation'] = eval_results_a
             
-            # Add PoE accuracy snapshot to results
-            poe_accuracy = run_quick_evaluation(model, run_dir, epoch=f"Phase A Epoch {phase_a_epochs}")
+            # Add PoE accuracy snapshot using ALL eval keys
+            eval_settings = settings.get_evaluation_settings()
+            eval_keys = eval_settings.get('eval_keys', ['00d62c1b'])
+            print(f"Recording Phase A PoE accuracy snapshot on ALL keys: {eval_keys}")
+            poe_accuracy = run_quick_evaluation(
+                model, run_dir, epoch=f"Phase A Epoch {phase_a_epochs}", eval_keys=eval_keys  # Use ALL eval keys
+            )
             results['phase_a']['poe_accuracies'] = [poe_accuracy]
             # Save results after each epoch
             save_results(results, run_dir)
@@ -1214,8 +1316,13 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
                 if eval_results_b:
                     results['phase_b']['evaluation'] = eval_results_b
             
-            # Add PoE accuracy snapshot to results
-            poe_accuracy = run_quick_evaluation(model, run_dir, epoch=f"Phase B Epoch {phase_b_epochs}")
+            # Add PoE accuracy snapshot using ALL eval keys
+            eval_settings = settings.get_evaluation_settings()
+            eval_keys = eval_settings.get('eval_keys', ['00d62c1b'])
+            print(f"Recording Phase B PoE accuracy snapshot on ALL keys: {eval_keys}")
+            poe_accuracy = run_quick_evaluation(
+                model, run_dir, epoch=f"Phase B Epoch {phase_b_epochs}", eval_keys=eval_keys  # Use ALL eval keys
+            )
             results['phase_b']['poe_accuracies'] = [poe_accuracy]
             
             # Save final complete model after Phase B

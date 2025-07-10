@@ -924,15 +924,19 @@ def main_training(file_store_name):
                 wandb_logger.log_accuracy_metrics(epoch + 1, single_accuracy)
 
         # Run evaluation and log visualizations every N epochs
-        if wandb_logger and should_run_evaluation(epoch + 1, wandb_settings.get('log_interval', 1), NUM_EPOCHS):
+        eval_interval = wandb_settings.get('eval_log_interval', 10)  # Use new eval_log_interval setting
+        if wandb_logger and should_run_evaluation(epoch + 1, eval_interval, NUM_EPOCHS):
             logger.info(f"Running evaluation and visualization logging for epoch {epoch+1}...")
+            print(f"Running evaluation at epoch {epoch+1} (interval: {eval_interval})...")
             eval_results = run_quick_evaluation(model, run_dir, epoch + 1)
             if eval_results:
                 # Pass the current in-memory model to avoid loading from disk
                 log_evaluation_to_wandb(eval_results, run_dir, epoch + 1, wandb_logger, current_model=model)
+                print(f"✓ Evaluation results logged for epoch {epoch+1}")
             else:
                 # Log visualizations without evaluation results (training-only visualizations)
                 wandb_logger.log_visualizations(run_dir, epoch + 1)
+                print(f"⚠ Evaluation failed for epoch {epoch+1}, logged visualizations only")
 
         # Save checkpoint and results at regular intervals or at the end
         save_interval = training_settings.get('save_checkpoint_interval', 50)

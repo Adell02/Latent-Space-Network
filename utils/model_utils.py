@@ -535,8 +535,11 @@ def load_model(run_dir, epoch=None, device='cuda', model_type='lpn'):
     model.load_state_dict(checkpoint['model_state_dict'])
     try:
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    except ValueError as e:
-        print(f"⚠ Warning: Could not load optimizer state dict (possibly different parameter groups): {e}")
+    except (KeyError, ValueError) as e:
+        if isinstance(e, KeyError):
+            print(f"⚠ Warning: Optimizer state dict not found in checkpoint: {e}")
+        else:
+            print(f"⚠ Warning: Could not load optimizer state dict (possibly different parameter groups): {e}")
         print("   Proceeding without loading optimizer state.")
     epoch = checkpoint['epoch']
     loss = checkpoint['loss']

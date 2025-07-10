@@ -49,18 +49,20 @@ def generate_trajectory_plots(eval_results: Dict[str, Any], run_dir: str, epoch:
             visualize_multi_encoder_comprehensive_trajectory
         )
         
-        # Get the model - use in-memory model if provided, otherwise try to load from disk
+        # Get the model - prioritize in-memory model to avoid disk loading issues
         model = current_model
         if model is None:
+            print(f"⚠ No current model provided, attempting to load from disk for epoch {epoch}")
             try:
                 from utils.model_utils import load_model
                 model, _, _, _ = load_model(run_dir, epoch=epoch, device='cuda')
-                print(f"Loaded model from disk for epoch {epoch}")
+                print(f"✓ Loaded model from disk for epoch {epoch}")
             except Exception as e:
                 print(f"⚠ Could not load model for epoch {epoch}, skipping trajectory plots: {e}")
+                print(f"   Error details: {str(e)}")
                 return trajectory_plots
         else:
-            print(f"Using provided in-memory model for trajectory plots")
+            print(f"✓ Using provided in-memory model for trajectory plots (epoch {epoch})")
         
         # Process each key's trajectory info
         for key, key_results in eval_results.get('key_results', {}).items():

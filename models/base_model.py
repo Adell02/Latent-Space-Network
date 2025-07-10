@@ -190,6 +190,43 @@ def gaussian_poe(mu: torch.Tensor, logvar: torch.Tensor, debug=False) -> Tuple[t
     
     return fused_mu, fused_logvar
 
+def compute_encoder_influence_metrics(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+    """
+    Compute mean-influence index for each encoder in PoE calculation.
+    
+    Args:
+        mu (torch.Tensor): Encoder means, shape (K, B, D)
+        logvar (torch.Tensor): Encoder log variances, shape (K, B, D)
+    
+    Returns:
+        torch.Tensor: Influence indices for each encoder, shape (K, B)
+    """
+    with torch.no_grad():
+        prec = torch.exp(-logvar)                    # σ^-2, shape (K, B, D)
+        Lsum = prec.sum(0)                          # Sum over encoders, shape (B, D)
+        Ck = prec / Lsum                            # Weights for each encoder, shape (K, B, D)
+        contrib = Ck * mu                           # Each encoder's contribution, shape (K, B, D)
+        mu_star = contrib.sum(0)                    # Final PoE mean, shape (B, D)
+        
+        # Compute influence index for each encoder and each sample
+        influence_indices = []
+        for k in range(mu.shape[0]):  # For each encoder
+            contrib_k = contrib[k]  # Shape (B, D)
+            # Compute norm along latent dimension for each sample
+            contrib_norm = contrib_k.norm(dim=1)  # Shape (B,)
+            mu_star_norm = mu_star.norm(dim=1)    # Shape (B,)
+            
+            # Avoid division by zero
+            influence = torch.where(
+                mu_star_norm > 1e-8,
+                contrib_norm / mu_star_norm,
+                torch.zeros_like(contrib_norm)
+            )
+            influence_indices.append(influence)
+        
+        # Stack to get shape (K, B)
+        return torch.stack(influence_indices)
+
 ##############################
 # Define Model Components
 ##############################
@@ -357,7 +394,8 @@ class TransformerDecoder(nn.Module):
         self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
         
         # Enable gradient checkpointing if specified in settings
-        if model_architecture.get('use_gradient_checkpointing', False):
+        current_model_arch = get_current_settings()['model_architecture']
+        if current_model_arch.get('use_gradient_checkpointing', False):
             for mod in self.transformer_decoder.layers:
                 mod.use_checkpoint = True
 

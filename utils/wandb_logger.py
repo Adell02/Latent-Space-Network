@@ -162,7 +162,10 @@ class WandbLogger:
             ('z_optimization_losses.png', 'z_optimization_losses'),
             ('multi_encoder_training_accuracies.png', 'multi_encoder_training_accuracies'),
             ('multi_encoder_accuracies.png', 'multi_encoder_accuracies'),
-            ('poe_reconstruction_analysis.png', 'poe_reconstruction_analysis'),
+            ('training_reconstruction_analysis.png', 'training_reconstruction_analysis'),
+            ('evaluation_reconstruction_analysis.png', 'evaluation_reconstruction_analysis'),
+            ('poe_reconstruction_analysis.png', 'poe_reconstruction_analysis'),  # Keep for backward compatibility
+            ('encoder_influence_analysis.png', 'encoder_influence_analysis'),
         ]
         
         # Also look for trajectory reconstruction plots (pattern-based)

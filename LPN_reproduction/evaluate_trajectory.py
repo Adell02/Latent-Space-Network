@@ -1,5 +1,32 @@
 #!/usr/bin/env python3
 
+"""
+Trajectory Evaluation and Visualization
+
+This module provides comprehensive trajectory visualization for latent space optimization.
+It supports both single-encoder and multi-encoder models with the following features:
+
+DECODER TYPE SELECTION:
+The 'trajectory_decoder_type' setting in evaluation_settings controls which decoder
+is used for trajectory reconstructions:
+  - "shared": Use the shared decoder (default for PoE models)
+  - "independent": Use individual encoder's independent decoders
+  
+This setting affects:
+  - Which reconstructions are stored during trajectory evaluation
+  - How reconstructions are displayed in trajectory plots
+  - The title information shown in visualizations
+
+VISUALIZATION FEATURES:
+  - Input/Target grids
+  - Latent space trajectories with consistent t-SNE coordinates
+  - Reconstruction quality at different optimization steps
+  - Error maps showing prediction vs target differences
+  - Loss progression during optimization
+  - Multi-encoder: Individual encoder vs PoE comparisons
+  - Single-encoder: Standard trajectory analysis
+"""
+
 import sys
 import os
 import pickle
@@ -12,12 +39,11 @@ from sklearn.manifold import TSNE
 from sklearn.preprocessing import StandardScaler
 from tabulate import tabulate
 from sklearn.neighbors import NearestNeighbors
-from scipy.stats import norm
 
 # Add the parent directory to the Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models.base_model import LatentProgramNetwork
+from models.base_model import LatentProgramNetwork, compute_encoder_influence_metrics
 from utils.settings_manager import settings
 from utils.model_utils import load_model, set_seed
 from utils.visualizers import load_evaluation_latent_data, get_comprehensive_latent_data_for_trajectory
@@ -191,6 +217,11 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
     # Check if this is a multi-encoder model
     is_multi_encoder = trajectory_info.get('is_multi_encoder', False)
     
+    # Get trajectory decoder type setting (using global settings import)
+    eval_settings = settings.get_evaluation_settings()
+    decoder_type = eval_settings.get('trajectory_decoder_type', 'shared')
+    print(f"Using trajectory decoder type: {decoder_type}")
+    
     if is_multi_encoder:
         print("Multi-encoder model detected - using enhanced visualization")
         return visualize_multi_encoder_comprehensive_trajectory(trajectory_info, model, save_path, run_dir, device)
@@ -349,7 +380,12 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
                       ha='center', va='center', transform=axs[1, 1].transAxes)
         axs[1, 1].set_title('Loss Progression')
     
-    plt.suptitle('Single-Encoder Trajectory Analysis', fontsize=16)
+    # Get decoder type for title (using global settings import)
+    eval_settings = settings.get_evaluation_settings()
+    decoder_type = eval_settings.get('trajectory_decoder_type', 'shared')
+    decoder_display = "Independent Decoders" if decoder_type == "independent" else "Shared Decoder"
+    
+    plt.suptitle(f'Single-Encoder Trajectory Analysis\nEVALUATION DATA - Trajectory Reconstructions: {decoder_display}', fontsize=16)
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
@@ -498,7 +534,12 @@ def visualize_all_samples_comprehensive(trajectory_info_list, model, save_path, 
                 ax_recon.set_title(f'Reconstruction {i}')
                 ax_recon.axis('off')
     
-    title = f'Single-Encoder Trajectory Analysis - All Samples'
+    # Get decoder type for title (using global settings import)
+    eval_settings = settings.get_evaluation_settings()
+    decoder_type = eval_settings.get('trajectory_decoder_type', 'shared')
+    decoder_display = "Independent Decoders" if decoder_type == "independent" else "Shared Decoder"
+    
+    title = f'Single-Encoder Trajectory Analysis - All Samples\nEVALUATION DATA - Trajectory Reconstructions: {decoder_display}'
     plt.suptitle(title, fontsize=16)
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
@@ -506,13 +547,7 @@ def visualize_all_samples_comprehensive(trajectory_info_list, model, save_path, 
     
     print(f"Comprehensive visualization saved to {save_path}")
 
-def _plot_gaussian(ax, mu, sigma, color, label):
-    """Quick helper – plot 1-D Gaussian PDF."""
-    xs = np.linspace(mu - 4*sigma, mu + 4*sigma, 200)
-    ax.plot(xs, norm.pdf(xs, mu, sigma), color=color, lw=2)
-    ax.set_title(label, fontsize=9)
-    ax.set_yticks([])
-    ax.grid(alpha=0.3)
+
 
 def visualize_multi_encoder_comprehensive_trajectory(trajectory_info, model, save_path, run_dir, device='cuda'):
     """
@@ -531,6 +566,12 @@ def visualize_multi_encoder_comprehensive_trajectory(trajectory_info, model, sav
     num_encoders = trajectory_info.get('num_encoders', 1)
     print(f"Creating multi-encoder visualization for {num_encoders} encoders...")
     
+    # Get trajectory decoder type setting (using global settings import)
+    eval_settings = settings.get_evaluation_settings()
+    decoder_type = eval_settings.get('trajectory_decoder_type', 'shared')
+    decoder_display = "Independent Decoders" if decoder_type == "independent" else "Shared Decoder"
+    print(f"Trajectory used: {decoder_display}")
+
     # Load training latent data for background with precomputed t-SNE
     print("Loading training latent data for background visualization...")
     training_latent_data, training_tsne_2d, training_labels, training_colors = load_training_latent_data(run_dir)
@@ -785,43 +826,74 @@ def visualize_multi_encoder_comprehensive_trajectory(trajectory_info, model, sav
             ax_poe_error.set_title(f'PoE Error {i}', fontsize=10)
             ax_poe_error.axis('off')
     
-    # NEW SECTION ➜ overlay all Gaussians on ONE axis
+    # Encoder Influence Analysis - showing how each encoder affects the PoE
     # ------------------------------------------------------------------
-    # Replace the previous per-column axes list with a single combined axis
-    ax_gauss = fig.add_subplot(gs[3, 1:7])          # span the central columns
-    ax_gauss.set_title('Latent 1-D PDFs (all encoders + PoE)', fontsize=11)
-    ax_gauss.set_yticks([])                         # pdf height is not important numerically
-    ax_gauss.grid(alpha=0.3)
+    ax_influence = fig.add_subplot(gs[3, 1:7])  # span the central columns
+    ax_influence.set_title('Encoder Influence on PoE Latent', fontsize=11)
+    ax_influence.grid(alpha=0.3)
 
+    # Collect encoder mu and log_var data
+    encoder_mus = []
+    encoder_log_vars = []
     enc_colors = plt.cm.Set1(np.linspace(0, 1, num_encoders))
-
-    # 1. Individual encoders
+    
     for enc_idx in range(num_encoders):
         enc_traj = individual_trajectories.get(f'encoder_{enc_idx}', {})
-        enc_mu, enc_log_var = enc_traj.get('mu'), enc_traj.get('log_var')
-        if enc_mu is None or enc_log_var is None:
-            continue
-        mu_val  = float(np.mean(enc_mu))
-        sigma_v = float(np.mean(np.exp(0.5 * enc_log_var)))
-        xs = np.linspace(mu_val - 4 * sigma_v, mu_val + 4 * sigma_v, 200)
-        ax_gauss.plot(xs, norm.pdf(xs, mu_val, sigma_v),
-                      color=enc_colors[enc_idx],
-                      lw=2,
-                      label=f'Enc {enc_idx}: μ={mu_val:.2f} σ={sigma_v:.2f}')
-
-    # 2. PoE
-    poe_mu_mean   = float(np.mean(trajectory_info['z_vectors'][0]))
-    poe_sigma_est = float(np.std(trajectory_info['z_vectors'][0]))
-    xs_poe = np.linspace(poe_mu_mean - 4 * poe_sigma_est,
-                         poe_mu_mean + 4 * poe_sigma_est, 200)
-    ax_gauss.plot(xs_poe, norm.pdf(xs_poe, poe_mu_mean, poe_sigma_est),
-                  color='k', lw=3, label=f'PoE: μ={poe_mu_mean:.2f} σ≈{poe_sigma_est:.2f}')
-
-    ax_gauss.legend(fontsize=8)
+        enc_mu = enc_traj.get('mu')
+        enc_log_var = enc_traj.get('log_var')
+        
+        if enc_mu is not None and enc_log_var is not None:
+            # Convert to tensors and add batch dimension if needed
+            if not isinstance(enc_mu, torch.Tensor):
+                enc_mu = torch.tensor(enc_mu, dtype=torch.float32)
+            if not isinstance(enc_log_var, torch.Tensor):
+                enc_log_var = torch.tensor(enc_log_var, dtype=torch.float32)
+            
+            # Ensure proper shape (batch_size, latent_dim)
+            if enc_mu.dim() == 1:
+                enc_mu = enc_mu.unsqueeze(0)
+            if enc_log_var.dim() == 1:
+                enc_log_var = enc_log_var.unsqueeze(0)
+            
+            encoder_mus.append(enc_mu)
+            encoder_log_vars.append(enc_log_var)
+    
+    if len(encoder_mus) >= 2:  # Need at least 2 encoders for influence analysis
+        # Stack tensors: (num_encoders, batch_size, latent_dim)
+        mu_stack = torch.stack(encoder_mus)
+        log_var_stack = torch.stack(encoder_log_vars)
+        
+        # Compute influence indices
+        influence_indices = compute_encoder_influence_metrics(mu_stack, log_var_stack)
+        mean_influences = influence_indices.mean(dim=1).cpu().numpy()  # Average over batch
+        
+        # Create bar plot
+        encoder_labels = [f'Enc {i}' for i in range(len(mean_influences))]
+        bars = ax_influence.bar(encoder_labels, mean_influences, 
+                               color=[enc_colors[i] for i in range(len(mean_influences))],
+                               alpha=0.7, edgecolor='black')
+        
+        # Add value labels on bars
+        for i, (bar, val) in enumerate(zip(bars, mean_influences)):
+            ax_influence.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
+                             f'{val:.3f}', ha='center', va='bottom', fontsize=9)
+        
+        # Add equal influence line
+        equal_influence = 1.0 / len(mean_influences)
+        ax_influence.axhline(equal_influence, color='red', linestyle='--', alpha=0.8,
+                            label=f'Equal Influence ({equal_influence:.3f})')
+        
+        ax_influence.set_ylabel('Influence Index')
+        ax_influence.set_xlabel('Encoder')
+        ax_influence.legend(fontsize=8)
+        ax_influence.set_ylim(0, max(mean_influences) * 1.2)
+    else:
+        ax_influence.text(0.5, 0.5, 'Insufficient encoder data\nfor influence analysis', 
+                         ha='center', va='center', transform=ax_influence.transAxes)
 
     # ------------------------------------------------------------------
     # tighten layout / save as before
-    plt.suptitle(f'Multi-Encoder Analysis: Individual vs PoE ({num_encoders} Encoders)', fontsize=16, y=0.98)
+    plt.suptitle(f'Multi-Encoder Analysis: Individual vs PoE ({num_encoders} Encoders)\nEVALUATION DATA - Trajectory Reconstructions: {decoder_display}', fontsize=16, y=0.98)
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.subplots_adjust(hspace=0.4, wspace=0.3)
     plt.savefig(save_path, dpi=200, bbox_inches='tight')
@@ -900,8 +972,7 @@ def main():
             print(f"Used latent optimization: {metrics.get('used_latent_optimization', 'Not specified')}")
             print(f"Available metrics keys: {list(metrics.keys())}")
         
-        # Check optimization settings
-        from utils.settings_manager import settings
+        # Check optimization settings (using global settings import)
         latent_opt = settings.get_latent_optimization()
         print(f"\nLatent optimization settings:")
         print(f"Inference enabled: {latent_opt['inference']['enabled']}")

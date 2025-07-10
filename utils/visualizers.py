@@ -477,8 +477,29 @@ def visualize_all_results(results, save_dir=None, eval_results=None, epoch=None)
             print("\nPlotting z optimization losses...")
             plot_z_optimization_losses(results, save_dir)
 
-    print("\nPlotting PoE reconstruction analysis...")
-    plot_poe_reconstruction_analysis(eval_results, save_dir, max_examples=2)
+    # Plot training reconstruction analysis if training results available
+    if results and save_dir:
+        try:
+            print("\nPlotting training reconstruction analysis...")
+            plot_training_reconstruction_analysis(results, save_dir, max_examples=2)
+        except Exception as e:
+            print(f"⚠ Could not create training reconstruction analysis: {e}")
+
+    # Plot evaluation reconstruction analysis if evaluation results available
+    if eval_results and save_dir:
+        try:
+            print("\nPlotting evaluation reconstruction analysis...")
+            plot_poe_reconstruction_analysis(eval_results, save_dir, max_examples=2)
+        except Exception as e:
+            print(f"⚠ Could not create evaluation reconstruction analysis: {e}")
+
+    # Plot encoder influence analysis if evaluation results available
+    if eval_results and save_dir:
+        try:
+            print("\nPlotting encoder influence analysis...")
+            plot_encoder_influence_analysis(eval_results, save_dir)
+        except Exception as e:
+            print(f"⚠ Could not create encoder influence analysis: {e}")
 
 def visualize_stored_results(run_dir, epoch=None):
     """Load and visualize results from a previous run with optional epoch specification."""
@@ -717,7 +738,7 @@ def plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir=None, e
     try:
         from LPN_reproduction.evaluate_trajectory import visualize_multi_encoder_comprehensive_trajectory
         from utils.model_utils import load_model
-        from utils.settings_manager import settings
+        # Note: settings is already imported globally at the top of the file
     except ImportError as e:
         print(f"Warning: Could not import trajectory visualization functions: {e}")
         return
@@ -1063,31 +1084,48 @@ def generate_experiment_summary_json(results, model_params, save_dir=None, eval_
 # POE RECONSTRUCTION ANALYSIS
 ##############################
 
-def plot_poe_reconstruction_analysis(eval_results, save_dir=None, max_examples=2):
+def plot_reconstruction_analysis(data_results, save_dir=None, max_examples=2, data_type="evaluation", dataset_name="Test Dataset"):
     """
-    Create comprehensive PoE reconstruction analysis showing:
-    1. Bar graph of pixel accuracy distribution (% correct pixels on test dataset)
-    2. Bar graph of grid size accuracy distribution (% correct grid sizes on test dataset)  
-    3. 2 representative test sample reconstructions with clear visual comparison
+    Create comprehensive reconstruction analysis showing:
+    1. Bar graph of pixel accuracy distribution (% correct pixels)
+    2. Bar graph of grid size accuracy distribution (% correct grid sizes)  
+    3. Representative sample reconstructions with clear visual comparison
     
-    This function provides a clear view of model performance on evaluation data.
+    Args:
+        data_results: Results dictionary containing reconstruction data
+        save_dir: Directory to save plots
+        max_examples: Number of example reconstructions to show
+        data_type: Type of data ("training" or "evaluation")
+        dataset_name: Display name for the dataset
     """
-    if not eval_results:
-        print("No evaluation results provided")
+    if not data_results:
+        print(f"No {data_type} results provided")
         return
     
-    # Handle different evaluation result structures
+    # Handle different result structures based on data type
     key_results_dict = {}
-    if 'key_results' in eval_results and isinstance(eval_results['key_results'], dict):
-        key_results_dict = eval_results['key_results']
-        print(f"Using key_results structure with keys: {list(key_results_dict.keys())}")
-    else:
-        metadata_keys = {'evaluation_metadata', 'aggregated_metrics', 'training_latent_data'}
-        key_results_dict = {k: v for k, v in eval_results.items() if k not in metadata_keys}
-        print(f"Using direct structure with keys: {list(key_results_dict.keys())}")
+    
+    if data_type == "evaluation":
+        if 'key_results' in data_results and isinstance(data_results['key_results'], dict):
+            key_results_dict = data_results['key_results']
+            print(f"Using key_results structure with keys: {list(key_results_dict.keys())}")
+        else:
+            metadata_keys = {'evaluation_metadata', 'aggregated_metrics', 'training_latent_data'}
+            key_results_dict = {k: v for k, v in data_results.items() if k not in metadata_keys}
+            print(f"Using direct structure with keys: {list(key_results_dict.keys())}")
+    
+    elif data_type == "training":
+        # For training data, look for reconstruction results in training results
+        if 'reconstruction_results' in data_results:
+            # Training results have reconstruction_results directly
+            key_results_dict = {'training_key': data_results}
+            print(f"Using training reconstruction results")
+        else:
+            print(f"No reconstruction results found in training data")
+            return
     
     if not key_results_dict:
-        print("No problem keys found in evaluation results")
+        print(f"No problem keys found in {data_type} results")
         return
     
     # Aggregate data from all available keys for comprehensive analysis
@@ -1097,31 +1135,54 @@ def plot_poe_reconstruction_analysis(eval_results, save_dir=None, max_examples=2
     total_samples = 0
     
     for key, key_data in key_results_dict.items():
-        if 'reconstruction_results' not in key_data:
+        # Try multiple possible locations for reconstruction results
+        reconstruction_results = None
+        if 'reconstruction_results' in key_data:
+            reconstruction_results = key_data['reconstruction_results']
+        elif 'metrics' in key_data and 'reconstruction_results' in key_data['metrics']:
+            reconstruction_results = key_data['metrics']['reconstruction_results']
+        elif isinstance(key_data, dict):
+            # Look for direct reconstruction data in specialist training results
+            potential_keys = ['poe_query_reconstructions', 'query_reconstructions', 'reconstructions']
+            for pot_key in potential_keys:
+                if pot_key in key_data:
+                    reconstruction_results = {pot_key: key_data[pot_key]}
+                    break
+        
+        if not reconstruction_results:
             print(f"No reconstruction results found for key {key}")
             continue
-            
-        reconstruction_results = key_data['reconstruction_results']
         
-        # Get query reconstructions (prefer PoE, fallback to general)
-        query_reconstructions = None
+        # Get reconstructions based on data type
+        reconstructions = None
         reconstruction_type = "Model"
         
-        if 'poe_query_reconstructions' in reconstruction_results:
-            query_reconstructions = reconstruction_results['poe_query_reconstructions']
-            reconstruction_type = "PoE"
-        elif 'query_reconstructions' in reconstruction_results:
-            query_reconstructions = reconstruction_results['query_reconstructions']
-            reconstruction_type = "Model"
+        if data_type == "evaluation":
+            # For evaluation data: prefer PoE, fallback to general
+            if 'poe_query_reconstructions' in reconstruction_results:
+                reconstructions = reconstruction_results['poe_query_reconstructions']
+                reconstruction_type = "PoE"
+            elif 'query_reconstructions' in reconstruction_results:
+                reconstructions = reconstruction_results['query_reconstructions']
+                reconstruction_type = "Model"
         
-        if not query_reconstructions:
-            print(f"No query reconstructions found for key {key}")
+        elif data_type == "training":
+            # For training data: look for training reconstructions
+            if 'training_reconstructions' in reconstruction_results:
+                reconstructions = reconstruction_results['training_reconstructions']
+                reconstruction_type = "Training Model"
+            elif 'reconstructions' in reconstruction_results:
+                reconstructions = reconstruction_results['reconstructions']
+                reconstruction_type = "Training Model"
+        
+        if not reconstructions:
+            print(f"No {data_type} reconstructions found for key {key}")
             continue
         
-        print(f"Processing {len(query_reconstructions)} {reconstruction_type} reconstructions from key {key}")
+        print(f"Processing {len(reconstructions)} {reconstruction_type} reconstructions from key {key}")
         
         # Process reconstructions for this key
-        for recon_data in query_reconstructions:
+        for recon_data in reconstructions:
             try:
                 target_seq = np.array(recon_data['target'])
                 shape_logits, grid_logits = recon_data['reconstruction']
@@ -1186,6 +1247,26 @@ def plot_poe_reconstruction_analysis(eval_results, save_dir=None, max_examples=2
     
     if not all_reconstructions:
         print("No valid reconstructions found for analysis")
+        
+        # Create a fallback informational plot
+        try:
+            import matplotlib.pyplot as plt
+            import os
+            
+            fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+            ax.text(0.5, 0.5, f'{dataset_name} Reconstruction Analysis\n\nNo valid reconstructions found.\n\nThis can happen if:\n• Evaluation reconstruction data is missing\n• Reconstruction format is incompatible\n• No evaluation keys have reconstruction results\n\nCheck evaluation logs for details.', 
+                   ha='center', va='center', transform=ax.transAxes, fontsize=12,
+                   bbox=dict(boxstyle='round,pad=1', facecolor='lightyellow', alpha=0.8))
+            ax.set_title(f'{dataset_name} Reconstruction Analysis - No Data', fontsize=14)
+            ax.axis('off')
+            plt.tight_layout()
+            if save_dir:
+                filename = f'{data_type}_reconstruction_analysis.png'
+                plt.savefig(os.path.join(save_dir, filename), dpi=150, bbox_inches='tight')
+                print(f"Saved fallback {data_type} reconstruction analysis plot")
+            plt.close()
+        except Exception as fallback_error:
+            print(f"Could not create fallback reconstruction analysis plot: {fallback_error}")
         return
     
     print(f"Analyzed {total_samples} total test samples from {len(key_results_dict)} problem keys")
@@ -1218,9 +1299,9 @@ def plot_poe_reconstruction_analysis(eval_results, save_dir=None, max_examples=2
     
     bars1 = ax_pixel.bar(pixel_bin_labels, pixel_counts, alpha=0.8, color='skyblue', 
                         edgecolor='navy', linewidth=1.5)
-    ax_pixel.set_title('Test Dataset: Pixel Accuracy Distribution', fontsize=14, fontweight='bold')
+    ax_pixel.set_title(f'{dataset_name}: Pixel Accuracy Distribution', fontsize=14, fontweight='bold')
     ax_pixel.set_xlabel('Pixel Accuracy Range')
-    ax_pixel.set_ylabel('Number of Test Samples')
+    ax_pixel.set_ylabel('Number of Samples')
     ax_pixel.grid(True, alpha=0.3, axis='y')
     
     # Add value labels on bars
@@ -1248,8 +1329,8 @@ def plot_poe_reconstruction_analysis(eval_results, save_dir=None, max_examples=2
     
     bars2 = ax_grid.bar(grid_labels, grid_counts, alpha=0.8, color=grid_colors, 
                        edgecolor='darkgreen', linewidth=1.5)
-    ax_grid.set_title('Test Dataset: Grid Size Accuracy', fontsize=14, fontweight='bold')
-    ax_grid.set_ylabel('Number of Test Samples')
+    ax_grid.set_title(f'{dataset_name}: Grid Size Accuracy', fontsize=14, fontweight='bold')
+    ax_grid.set_ylabel('Number of Samples')
     ax_grid.grid(True, alpha=0.3, axis='y')
     
     # Add value labels and percentages on bars
@@ -1275,9 +1356,9 @@ def plot_poe_reconstruction_analysis(eval_results, save_dir=None, max_examples=2
     poor_reconstructions = sum(1 for acc in all_pixel_accuracies if acc < 20.0)
     
     summary_text = f"""
-    📊 TEST DATASET PERFORMANCE SUMMARY ({reconstruction_type} Model)
+    📊 {dataset_name.upper()} PERFORMANCE SUMMARY ({reconstruction_type} Model)
     
-    🎯 Overall Performance:  •  Total Test Samples: {total_samples}  •  Problem Keys: {len(key_results_dict)}
+    🎯 Overall Performance:  •  Total Samples: {total_samples}  •  Problem Keys: {len(key_results_dict)}
     
     🔍 Pixel Accuracy:  •  Mean: {mean_pixel_acc:.1f}%  •  Perfect (100%): {perfect_reconstructions} samples  •  Good (≥80%): {good_reconstructions} samples  •  Poor (<20%): {poor_reconstructions} samples
     
@@ -1397,17 +1478,344 @@ Overall Quality:
             ax_error.set_title(f'Sample {i+1} - Error', fontsize=11, fontweight='bold', color='red')
             ax_error.axis('off')
     
-    plt.suptitle(f'{reconstruction_type} Model: Test Dataset Reconstruction Analysis', 
+    plt.suptitle(f'{reconstruction_type} Model: {dataset_name} Reconstruction Analysis', 
                  fontsize=16, fontweight='bold', y=0.98)
     plt.tight_layout()
     
     if save_dir:
-        save_path = os.path.join(save_dir, 'poe_reconstruction_analysis.png')
+        filename = f'{data_type}_reconstruction_analysis.png'
+        save_path = os.path.join(save_dir, filename)
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close()
-        print(f"✓ Enhanced PoE reconstruction analysis saved to: {save_path}")
-        print(f"  - Analyzed {total_samples} test samples from {len(key_results_dict)} problem keys")
+        print(f"✓ {dataset_name} reconstruction analysis saved to: {save_path}")
+        print(f"  - Analyzed {total_samples} {data_type} samples from {len(key_results_dict)} problem keys")
         print(f"  - Mean pixel accuracy: {mean_pixel_acc:.1f}%")
         print(f"  - Grid size accuracy: {grid_accuracy_pct:.1f}%")
     else:
-        plt.show() 
+        plt.show()
+
+def plot_poe_reconstruction_analysis(eval_results, save_dir=None, max_examples=2):
+    """
+    Backward compatibility wrapper for evaluation reconstruction analysis.
+    """
+    return plot_reconstruction_analysis(eval_results, save_dir, max_examples, 
+                                       data_type="evaluation", dataset_name="Test Dataset")
+
+def plot_training_reconstruction_analysis(training_results, save_dir=None, max_examples=2):
+    """
+    Create comprehensive training reconstruction analysis by generating reconstructions from training data.
+    """
+    if not training_results or not save_dir:
+        print("No training results or save directory provided")
+        return
+        
+    # Generate reconstruction results from training data and saved model
+    try:
+        import matplotlib.pyplot as plt
+        import os
+        from utils.model_utils import load_model
+        from utils.data_preparation import extract_grid_from_sequence
+        import torch
+        import numpy as np
+        
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Load the trained model
+        model, _, _, _ = load_model(save_dir, epoch=None, device=device)
+        model.eval()
+        
+        # Get training sequences from results
+        input_sequences = training_results.get('input_sequences', [])
+        output_sequences = training_results.get('output_sequences', [])
+        
+        if not input_sequences or not output_sequences:
+            print("No training sequences found in results")
+            return
+        
+        # Sample a subset for reconstruction analysis (limit to avoid memory issues)
+        num_samples = min(50, len(output_sequences))  # Use up to 50 samples
+        sample_indices = np.random.choice(len(output_sequences), num_samples, replace=False)
+        
+        # Generate reconstructions
+        training_reconstructions = []
+        with torch.no_grad():
+            for idx in sample_indices:
+                try:
+                    target_seq = np.array(output_sequences[idx])
+                    input_seq = np.array(input_sequences[idx])
+                    
+                    # Convert to tensors
+                    input_tensor = torch.tensor(input_seq, dtype=torch.float32).unsqueeze(0).to(device)
+                    target_tensor = torch.tensor(target_seq, dtype=torch.float32).unsqueeze(0).to(device)
+                    
+                    # Get model reconstruction
+                    if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
+                        # Multi-encoder: use PoE
+                        (shape_logits, grid_logits), mu, logvar = model(input_tensor, target_tensor)
+                    else:
+                        # Single encoder
+                        (shape_logits, grid_logits), mu, logvar = model(input_tensor, target_tensor)
+                    
+                    # Store reconstruction data
+                    training_reconstructions.append({
+                        'target': target_seq.tolist(),
+                        'reconstruction': (shape_logits[0].cpu().numpy(), grid_logits[0].cpu().numpy())
+                    })
+                except Exception as e:
+                    print(f"Error generating reconstruction for sample {idx}: {e}")
+                    continue
+        
+        if not training_reconstructions:
+            print("No training reconstructions could be generated")
+            # Create a fallback simple analysis message
+            try:
+                fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+                ax.text(0.5, 0.5, 'Training Reconstruction Analysis\n\nNo reconstructions could be generated.\nThis can happen if:\n• Model loading failed\n• No training sequences found\n• Reconstruction generation errors\n\nCheck logs for specific error details.', 
+                       ha='center', va='center', transform=ax.transAxes, fontsize=12,
+                       bbox=dict(boxstyle='round,pad=1', facecolor='lightgray', alpha=0.8))
+                ax.set_title('Training Reconstruction Analysis - No Data', fontsize=14)
+                ax.axis('off')
+                plt.tight_layout()
+                if save_dir:
+                    plt.savefig(os.path.join(save_dir, 'training_reconstruction_analysis.png'), dpi=150, bbox_inches='tight')
+                plt.close()
+                print("Saved fallback training reconstruction analysis plot")
+            except Exception as fallback_error:
+                print(f"Could not create fallback plot: {fallback_error}")
+            return
+        
+        # Create a mock training results structure with reconstruction results
+        mock_training_results = {
+            'reconstruction_results': {
+                'training_reconstructions': training_reconstructions
+            }
+        }
+        
+        print(f"Generated {len(training_reconstructions)} training reconstructions for analysis")
+        
+        # Call the generic reconstruction analysis function
+        return plot_reconstruction_analysis(mock_training_results, save_dir, max_examples, 
+                                           data_type="training", dataset_name="Training Dataset")
+        
+    except Exception as e:
+        print(f"Error creating training reconstruction analysis: {e}")
+        return 
+
+##############################
+# ENCODER INFLUENCE ANALYSIS
+##############################
+
+def plot_encoder_influence_analysis(eval_results, save_dir=None):
+    """
+    Plot encoder influence analysis showing distribution of mean-influence indices 
+    for each encoder across evaluation samples, grouped by evaluation keys.
+    
+    Args:
+        eval_results: Dictionary containing evaluation results for each key
+        save_dir: Directory to save plots (optional)
+    """
+    if not eval_results:
+        print("No evaluation results provided for influence analysis")
+        return
+    
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import os
+    
+    # Handle different result structures
+    key_results_dict = {}
+    if 'key_results' in eval_results and isinstance(eval_results['key_results'], dict):
+        key_results_dict = eval_results['key_results']
+        print(f"Using key_results structure with keys: {list(key_results_dict.keys())}")
+    else:
+        metadata_keys = {'evaluation_metadata', 'aggregated_metrics', 'training_latent_data'}
+        key_results_dict = {k: v for k, v in eval_results.items() if k not in metadata_keys}
+        print(f"Using direct structure with keys: {list(key_results_dict.keys())}")
+    
+    if not key_results_dict:
+        print("No problem keys found in evaluation results")
+        return
+    
+    # Check if we have influence metrics in any key - try multiple locations
+    influence_data_found = False
+    num_encoders = 0
+    
+    for key, key_data in key_results_dict.items():
+        influence_metrics = None
+        
+        # Try multiple possible locations for influence metrics
+        if 'metrics' in key_data and 'encoder_influence_metrics' in key_data['metrics']:
+            influence_metrics = key_data['metrics']['encoder_influence_metrics']
+        elif 'encoder_influence_metrics' in key_data:
+            influence_metrics = key_data['encoder_influence_metrics']
+        elif 'metrics' in key_data and 'influence_metrics' in key_data['metrics']:
+            influence_metrics = key_data['metrics']['influence_metrics']
+        
+        if influence_metrics and len(influence_metrics) > 0:
+            influence_data_found = True
+            # Determine number of encoders from first sample
+            sample_influences = influence_metrics[0]
+            if isinstance(sample_influences, dict):
+                num_encoders = len([k for k in sample_influences.keys() if k.startswith('encoder_')])
+                if num_encoders > 0:
+                    break
+    
+    if not influence_data_found:
+        print("No encoder influence metrics found in evaluation results")
+        print("Influence metrics are only available for multi-encoder models with PoE evaluation")
+        print("This is expected for single-encoder models or when PoE evaluation is not enabled")
+        
+        # Create a fallback informational plot
+        try:
+            fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+            ax.text(0.5, 0.5, 'Encoder Influence Analysis\n\nNo influence metrics found.\n\nThis is expected for:\n• Single-encoder models\n• When PoE evaluation is not enabled\n• When encoder influence calculation fails\n\nInfluence metrics are only available for\nmulti-encoder models with PoE evaluation.', 
+                   ha='center', va='center', transform=ax.transAxes, fontsize=12,
+                   bbox=dict(boxstyle='round,pad=1', facecolor='lightblue', alpha=0.8))
+            ax.set_title('Encoder Influence Analysis - No Data', fontsize=14)
+            ax.axis('off')
+            plt.tight_layout()
+            if save_dir:
+                plt.savefig(os.path.join(save_dir, 'encoder_influence_analysis.png'), dpi=150, bbox_inches='tight')
+            plt.close()
+            print("Saved fallback encoder influence analysis plot")
+        except Exception as fallback_error:
+            print(f"Could not create fallback influence plot: {fallback_error}")
+        return
+    
+    print(f"Found encoder influence metrics for {num_encoders} encoders")
+    
+    # Collect influence data for each key
+    keys_with_data = []
+    for key, key_data in key_results_dict.items():
+        influence_metrics = None
+        
+        # Try multiple possible locations for influence metrics (same as above)
+        if 'metrics' in key_data and 'encoder_influence_metrics' in key_data['metrics']:
+            influence_metrics = key_data['metrics']['encoder_influence_metrics']
+        elif 'encoder_influence_metrics' in key_data:
+            influence_metrics = key_data['encoder_influence_metrics']
+        elif 'metrics' in key_data and 'influence_metrics' in key_data['metrics']:
+            influence_metrics = key_data['metrics']['influence_metrics']
+        
+        if influence_metrics and len(influence_metrics) > 0:
+            keys_with_data.append((key, influence_metrics))
+    
+    if not keys_with_data:
+        print("No keys with valid influence metrics found")
+        return
+    
+    print(f"Creating influence analysis plots for {len(keys_with_data)} evaluation keys")
+    
+    # Create figure with subplots for each key
+    num_keys = len(keys_with_data)
+    fig, axes = plt.subplots(num_keys, 1, figsize=(12, 4 * num_keys))
+    
+    # Handle single key case
+    if num_keys == 1:
+        axes = [axes]
+    
+    # Color palette for encoders
+    colors = plt.cm.Set1(np.linspace(0, 1, num_encoders))
+    
+    for plot_idx, (key, influence_metrics) in enumerate(keys_with_data):
+        ax = axes[plot_idx]
+        
+        # Organize influence data by encoder
+        encoder_influences = {f'encoder_{i}': [] for i in range(num_encoders)}
+        
+        for sample_influences in influence_metrics:
+            for enc_name, influence_value in sample_influences.items():
+                if enc_name in encoder_influences:
+                    encoder_influences[enc_name].append(influence_value)
+        
+        # Create histograms for each encoder
+        bin_edges = np.linspace(0, 1, 21)  # 20 bins from 0 to 1
+        alpha = 0.7
+        
+        for enc_idx in range(num_encoders):
+            enc_name = f'encoder_{enc_idx}'
+            influences = encoder_influences[enc_name]
+            
+            if influences:
+                ax.hist(influences, bins=bin_edges, alpha=alpha, 
+                       color=colors[enc_idx], label=f'Encoder {enc_idx}', 
+                       edgecolor='black', linewidth=0.5)
+        
+        # Customize plot
+        ax.set_title(f'Encoder Influence Distribution - Key: {key}', fontsize=14, fontweight='bold')
+        ax.set_xlabel('Mean Influence Index', fontsize=12)
+        ax.set_ylabel('Number of Samples', fontsize=12)
+        ax.legend(fontsize=10)
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim(0, 1)
+        
+        # Add statistics text
+        stats_text = []
+        total_samples = len(influence_metrics)
+        stats_text.append(f'Total Samples: {total_samples}')
+        
+        # Calculate mean influence for each encoder
+        for enc_idx in range(num_encoders):
+            enc_name = f'encoder_{enc_idx}'
+            influences = encoder_influences[enc_name]
+            if influences:
+                mean_influence = np.mean(influences)
+                std_influence = np.std(influences)
+                stats_text.append(f'Enc {enc_idx}: μ={mean_influence:.3f}, σ={std_influence:.3f}')
+        
+        # Add stats box
+        stats_str = '\n'.join(stats_text)
+        ax.text(0.98, 0.98, stats_str, transform=ax.transAxes, 
+               verticalalignment='top', horizontalalignment='right',
+               bbox=dict(boxstyle='round,pad=0.5', facecolor='white', alpha=0.8),
+               fontsize=9)
+    
+    plt.tight_layout()
+    
+    if save_dir:
+        filename = 'encoder_influence_analysis.png'
+        save_path = os.path.join(save_dir, filename)
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"✓ Encoder influence analysis saved to: {save_path}")
+        print(f"  - Analyzed {num_encoders} encoders across {len(keys_with_data)} evaluation keys")
+        
+        # Print summary statistics
+        print(f"\n📊 ENCODER INFLUENCE SUMMARY:")
+        for key, influence_metrics in keys_with_data:
+            print(f"\nKey: {key}")
+            encoder_influences = {f'encoder_{i}': [] for i in range(num_encoders)}
+            
+            for sample_influences in influence_metrics:
+                for enc_name, influence_value in sample_influences.items():
+                    if enc_name in encoder_influences:
+                        encoder_influences[enc_name].append(influence_value)
+            
+            for enc_idx in range(num_encoders):
+                enc_name = f'encoder_{enc_idx}'
+                influences = encoder_influences[enc_name]
+                if influences:
+                    mean_inf = np.mean(influences)
+                    std_inf = np.std(influences)
+                    min_inf = np.min(influences)
+                    max_inf = np.max(influences)
+                    print(f"  Encoder {enc_idx}: μ={mean_inf:.4f}, σ={std_inf:.4f}, range=[{min_inf:.4f}, {max_inf:.4f}]")
+            
+            # Calculate encoder dominance statistics
+            dominant_encoder_counts = {f'encoder_{i}': 0 for i in range(num_encoders)}
+            for sample_influences in influence_metrics:
+                # Find most influential encoder for this sample
+                max_influence = max(sample_influences.values())
+                for enc_name, influence_value in sample_influences.items():
+                    if influence_value == max_influence:
+                        dominant_encoder_counts[enc_name] += 1
+                        break  # In case of ties, count the first one
+            
+            print(f"  Dominance (most influential per sample):")
+            for enc_idx in range(num_encoders):
+                enc_name = f'encoder_{enc_idx}'
+                count = dominant_encoder_counts[enc_name]
+                percentage = (count / len(influence_metrics)) * 100
+                print(f"    Encoder {enc_idx}: {count}/{len(influence_metrics)} samples ({percentage:.1f}%)")
+    else:
+        plt.show()

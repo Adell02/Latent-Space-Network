@@ -769,6 +769,8 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda',
             'grid_correct': 0, 'grid_tokens': 0,
             'sample_exact_correct': 0, 'total_samples': 0
         }
+        # Encoder influence metrics storage
+        encoder_influence_metrics = []
     else:
         # For single encoder: use existing structure
         single_metrics = {
@@ -835,11 +837,9 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda',
                         'target_sample': batch_target_s[i].detach().cpu().numpy(),
                         'z_vectors': [],
                         'losses': [],
-                        'is_multi_encoder': True,  # Always True for unified processing
+                        'is_multi_encoder': is_multi_encoder,
                         'num_encoders': num_encoders if is_multi_encoder else 1,
-                        'is_actually_single_encoder': not is_multi_encoder,
-                        'batch_idx': batch_idx,
-                        'sample_idx_in_batch': i
+                        'individual_encoder_trajectories': {}
                     }
                     
                     # Always create individual encoder trajectories for unified processing
@@ -862,23 +862,43 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda',
                         
                         # Store individual encoder reconstructions for comparison
                         sample_trajectory['individual_encoder_reconstructions'] = {}
+                        
+                        # Get trajectory decoder type setting (using global settings import)
+                        eval_settings = settings.get_evaluation_settings()
+                        decoder_type = eval_settings.get('trajectory_decoder_type', 'shared')
+                        use_independent_decoder = (decoder_type == 'independent')
+                        
+                        # Add decoder type metadata to trajectory
+                        sample_trajectory['trajectory_decoder_type'] = decoder_type
+                        sample_trajectory['used_independent_decoder'] = use_independent_decoder
+                        
+                        print(f"  Using decoder type for trajectory: {decoder_type}")
+                        
                         with torch.no_grad():
                             for enc_idx in range(num_encoders):
                                 enc_data = sample_trajectory['individual_encoder_trajectories'][f'encoder_{enc_idx}']
                                 enc_z_tensor = torch.tensor(enc_data['z']).to(device)
                                 
                                 try:
-                                    # Generate reconstruction using individual encoder z
-                                    enc_shape_logits, enc_grid_logits = model.multi_encoder.decoder(
-                                        enc_z_tensor, batch_input_s[i:i+1], target_seq=batch_target_s[i:i+1]
-                                    )
+                                    # Generate reconstruction using appropriate decoder based on setting
+                                    if use_independent_decoder:
+                                        # Use individual encoder's independent decoder
+                                        enc_shape_logits, enc_grid_logits = model.multi_encoder.independent_decoders[enc_idx](
+                                            enc_z_tensor, batch_input_s[i:i+1], target_seq=batch_target_s[i:i+1]
+                                        )
+                                    else:
+                                        # Use shared decoder (default behavior)
+                                        enc_shape_logits, enc_grid_logits = model.multi_encoder.shared_decoder(
+                                            enc_z_tensor, batch_input_s[i:i+1], target_seq=batch_target_s[i:i+1]
+                                        )
                                     
                                     sample_trajectory['individual_encoder_reconstructions'][f'encoder_{enc_idx}'] = {
                                         'shape_logits': enc_shape_logits.cpu().numpy(),
                                         'grid_logits': enc_grid_logits.cpu().numpy()
                                     }
                                 except Exception as e:
-                                    print(f"    Warning: Could not generate reconstruction for encoder {enc_idx}: {e}")
+                                    decoder_name = f"independent decoder {enc_idx}" if use_independent_decoder else "shared decoder"
+                                    print(f"    Warning: Could not generate reconstruction for encoder {enc_idx} with {decoder_name}: {e}")
                                     sample_trajectory['individual_encoder_reconstructions'][f'encoder_{enc_idx}'] = None
                     else:
                         # Single encoder: create encoder_0 entry for unified processing
@@ -927,10 +947,19 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda',
                                             traj_z = torch.tensor(sample_trajectory['z_vectors'][idx]).unsqueeze(0).to(device)
                                             
                                             if is_multi_encoder:
-                                                # Multi-encoder: use PoE decoder
-                                                traj_shape_logits, traj_grid_logits = model.multi_encoder.decoder(
-                                                    traj_z, batch_input_s[i:i+1], target_seq=batch_target_s[i:i+1]
-                                                )
+                                                # Multi-encoder: use decoder based on setting
+                                                if use_independent_decoder:
+                                                    # Note: For PoE trajectory, we use the shared decoder even with independent setting
+                                                    # since PoE latent is a fusion that doesn't belong to any specific encoder
+                                                    print(f"    Note: Using shared decoder for PoE trajectory (PoE latent is encoder-agnostic)")
+                                                    traj_shape_logits, traj_grid_logits = model.multi_encoder.shared_decoder(
+                                                        traj_z, batch_input_s[i:i+1], target_seq=batch_target_s[i:i+1]
+                                                    )
+                                                else:
+                                                    # Use shared decoder (default)
+                                                    traj_shape_logits, traj_grid_logits = model.multi_encoder.shared_decoder(
+                                                        traj_z, batch_input_s[i:i+1], target_seq=batch_target_s[i:i+1]
+                                                    )
                                             else:
                                                 # Single encoder: use regular decoder
                                                 traj_shape_logits, traj_grid_logits = model.decoder(
@@ -944,7 +973,8 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda',
                                             }
                                         except Exception as e:
                                             reconstruction_type = "PoE" if is_multi_encoder else "trajectory"
-                                            print(f"    Warning: Could not generate {reconstruction_type} reconstruction at step {idx}: {e}")
+                                            decoder_info = f" (decoder: {decoder_type})" if is_multi_encoder else ""
+                                            print(f"    Warning: Could not generate {reconstruction_type} reconstruction at step {idx}{decoder_info}: {e}")
                                             sample_trajectory['poe_trajectory_reconstructions'][label] = None
                     
                     # Use individual trajectory losses if available, otherwise fall back to batch average
@@ -1155,12 +1185,19 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda',
                                          poe_grid_logits[i].cpu().numpy().tolist())
                     })
 
-                # 2. Individual encoder evaluations 
+                # 2. Individual encoder evaluations + Influence Metrics
                 individual_batch_accuracies = {}  # Track batch performance for comparison
+                
+                # Collect all encoder outputs for influence calculation
+                all_enc_mus = []
+                all_enc_logvars = []
                 
                 for enc_idx in range(num_encoders):
                     # Get individual encoder output
                     enc_mu, enc_log_var = model.multi_encoder.encoders[enc_idx](batch_input_q, batch_target_q)
+                    all_enc_mus.append(enc_mu)
+                    all_enc_logvars.append(enc_log_var)
+                    
                     enc_z = model.reparameterize(enc_mu, enc_log_var)
                     enc_shape_logits, enc_grid_logits = model.multi_encoder.decoder(
                         enc_z, batch_input_q, target_seq=batch_target_q
@@ -1209,12 +1246,32 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda',
                     
                     # Store individual encoder query reconstructions
                     for i in range(query_batch_size):
-                        individual_query_reconstructions[f'encoder_{enc_idx}'].append({
-                            'input': batch_input_q[i].cpu().numpy().tolist(),
-                            'target': batch_target_q[i].cpu().numpy().tolist(),
-                            'reconstruction': (enc_shape_logits[i].cpu().numpy().tolist(),
-                                             enc_grid_logits[i].cpu().numpy().tolist())
-                        })
+                                                    individual_query_reconstructions[f'encoder_{enc_idx}'].append({
+                                'input': batch_input_q[i].cpu().numpy().tolist(),
+                                'target': batch_target_q[i].cpu().numpy().tolist(),
+                                'reconstruction': (enc_shape_logits[i].cpu().numpy().tolist(),
+                                                 enc_grid_logits[i].cpu().numpy().tolist())
+                            })
+                
+                # 3. Calculate Encoder Influence Metrics for PoE
+                if len(all_enc_mus) > 1:  # Only calculate for true multi-encoder models
+                    from models.base_model import compute_encoder_influence_metrics
+                    
+                    # Stack encoder outputs: shape (K, B, D)
+                    mu_stack = torch.stack(all_enc_mus, dim=0)  # (num_encoders, batch_size, latent_dim)
+                    logvar_stack = torch.stack(all_enc_logvars, dim=0)  # (num_encoders, batch_size, latent_dim)
+                    
+                    # Compute influence metrics: shape (K, B)
+                    influence_indices = compute_encoder_influence_metrics(mu_stack, logvar_stack)
+                    
+                    # Store influence metrics for each sample in this batch
+                    for i in range(query_batch_size):
+                        sample_influences = {}
+                        for enc_idx in range(num_encoders):
+                            sample_influences[f'encoder_{enc_idx}'] = influence_indices[enc_idx, i].item()
+                        
+                        # Add to global influence metrics storage
+                        encoder_influence_metrics.append(sample_influences)
                 
                 # Log comparative performance every 10 batches for detailed analysis
                 if (batch_idx + 1) % 10 == 0:
@@ -1454,7 +1511,9 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda',
                     'poe_vs_avg_advantage': poe_vs_avg,
                     'encoder_performance_variance': sum((acc - avg_individual_acc)**2 for acc in encoder_exact_accs) / len(encoder_exact_accs),
                     'specialization_range': max(encoder_exact_accs) - min(encoder_exact_accs) if len(encoder_exact_accs) > 1 else 0.0
-                }
+                },
+                # Encoder influence metrics for PoE analysis
+                'encoder_influence_metrics': encoder_influence_metrics
             },
             'reconstruction_results': {
                 'support_reconstructions': poe_support_reconstructions,
