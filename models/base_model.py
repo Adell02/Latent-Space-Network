@@ -190,42 +190,25 @@ def gaussian_poe(mu: torch.Tensor, logvar: torch.Tensor, debug=False) -> Tuple[t
     
     return fused_mu, fused_logvar
 
-def compute_encoder_influence_metrics(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+def compute_encoder_covariance_traces(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
     """
-    Compute mean-influence index for each encoder in PoE calculation.
+    Compute trace of covariance matrix (sum of variances) for each encoder.
     
     Args:
-        mu (torch.Tensor): Encoder means, shape (K, B, D)
+        mu (torch.Tensor): Encoder means, shape (K, B, D) [unused but kept for compatibility]
         logvar (torch.Tensor): Encoder log variances, shape (K, B, D)
     
     Returns:
-        torch.Tensor: Influence indices for each encoder, shape (K, B)
+        torch.Tensor: Covariance traces for each encoder, shape (K, B)
     """
     with torch.no_grad():
-        prec = torch.exp(-logvar)                    # σ^-2, shape (K, B, D)
-        Lsum = prec.sum(0)                          # Sum over encoders, shape (B, D)
-        Ck = prec / Lsum                            # Weights for each encoder, shape (K, B, D)
-        contrib = Ck * mu                           # Each encoder's contribution, shape (K, B, D)
-        mu_star = contrib.sum(0)                    # Final PoE mean, shape (B, D)
-        
-        # Compute influence index for each encoder and each sample
-        influence_indices = []
-        for k in range(mu.shape[0]):  # For each encoder
-            contrib_k = contrib[k]  # Shape (B, D)
-            # Compute norm along latent dimension for each sample
-            contrib_norm = contrib_k.norm(dim=1)  # Shape (B,)
-            mu_star_norm = mu_star.norm(dim=1)    # Shape (B,)
-            
-            # Avoid division by zero
-            influence = torch.where(
-                mu_star_norm > 1e-8,
-                contrib_norm / mu_star_norm,
-                torch.zeros_like(contrib_norm)
-            )
-            influence_indices.append(influence)
-        
-        # Stack to get shape (K, B)
-        return torch.stack(influence_indices)
+        # Trace of diagonal covariance = sum of variances = sum of exp(log_var)
+        variances = torch.exp(logvar)  # Shape (K, B, D)
+        traces = variances.sum(dim=2)  # Sum over latent dimensions, shape (K, B)
+        return traces
+
+# Backward compatibility alias
+compute_encoder_influence_metrics = compute_encoder_covariance_traces
 
 ##############################
 # Define Model Components
@@ -701,6 +684,138 @@ class LatentProgramNetwork(nn.Module):
         return self._reparam(mu, logvar, sample=True)
 
 # -------------------------------------------------
+#  Cross-pair reconstruction loss for generalization
+# -------------------------------------------------
+
+def compute_bonnet_cross_pair_loss(
+    model, encoder_idx: int, input_seq: torch.Tensor, target_seq: torch.Tensor, 
+    use_independent_decoder: bool = True, latent_opt_steps: int = 0, latent_opt_lr: float = 0.1
+) -> torch.Tensor:
+    """
+    Compute Bonnet's cross-pair reconstruction loss exactly as in the LPN paper.
+    
+    For each target pair (x_i, y_i):
+    1. z_i' = mean{z_j : j≠i} (mean of OTHER latents)
+    2. Optionally: K gradient ascent steps on z_i'
+    3. L_rec^i = -log p_θ(y_i | x_i, z_i')
+    
+    Total: L_rec = sum_i L_rec^i
+    
+    Args:
+        model: The multi-encoder model
+        encoder_idx: Which encoder to use
+        input_seq: Input sequences [B, seq_len]
+        target_seq: Target sequences [B, seq_len]
+        use_independent_decoder: Whether to use independent or shared decoder
+        latent_opt_steps: Number of gradient ascent steps (K in paper)
+        latent_opt_lr: Learning rate for gradient ascent
+    
+    Returns:
+        torch.Tensor: Cross-pair reconstruction loss
+    """
+    batch_size = input_seq.size(0)
+    device = input_seq.device
+    
+    # Need at least 2 samples for cross-pairs
+    if batch_size < 2:
+        return torch.tensor(0.0, device=device)
+    
+    # Encode all samples to get latent codes z_i
+    mu_all, logvar_all = model.multi_encoder.encoders[encoder_idx](input_seq, target_seq)
+    z_all = model.multi_encoder._reparam(mu_all, logvar_all, sample=True)  # [B, latent_dim]
+    
+    total_cross_pair_loss = 0.0
+    
+    for i in range(batch_size):
+        # For target (x_i, y_i), compute z_i' = mean{z_j : j≠i}
+        other_indices = [j for j in range(batch_size) if j != i]
+        if not other_indices:
+            continue
+            
+        z_other = z_all[other_indices]  # [B-1, latent_dim]
+        z_i_prime = z_other.mean(dim=0, keepdim=True)  # [1, latent_dim]
+        
+        # Optional: Gradient ascent optimization of z_i'
+        if latent_opt_steps > 0:
+            z_i_prime = z_i_prime.clone().detach().requires_grad_(True)
+            
+            for step in range(latent_opt_steps):
+                # Compute log likelihood for OTHER targets using current z_i'
+                step_loss = 0.0
+                for j in other_indices:
+                    x_j = input_seq[j:j+1]
+                    y_j = target_seq[j:j+1]
+                    
+                    if use_independent_decoder:
+                        shape_logits, grid_logits = model.multi_encoder.independent_decoders[encoder_idx](z_i_prime, x_j, target_seq=y_j)
+                    else:
+                        shape_logits, grid_logits = model.multi_encoder.shared_decoder(z_i_prime, x_j, target_seq=y_j)
+                    
+                    # Compute negative log likelihood (we want to maximize likelihood)
+                    shape_targets = y_j[:, 900:902].long()
+                    shape_nll = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1), reduction='sum')
+                    
+                    r, c = int(y_j[0, 900].item()), int(y_j[0, 901].item())
+                    n_pix = r * c
+                    if n_pix > 0:
+                        grid_nll = F.cross_entropy(grid_logits[0, :n_pix], y_j[0, :n_pix].long(), reduction='sum')
+                    else:
+                        grid_nll = torch.tensor(0.0, device=device)
+                    
+                    step_loss += shape_nll + grid_nll
+                
+                # Gradient ascent step
+                if step_loss.requires_grad:
+                    grad = torch.autograd.grad(step_loss, z_i_prime, retain_graph=(step < latent_opt_steps - 1))[0]
+                    z_i_prime = z_i_prime - latent_opt_lr * grad  # Negative gradient for ascent
+        
+        # Now compute reconstruction loss for target i using optimized z_i'
+        x_i = input_seq[i:i+1]
+        y_i = target_seq[i:i+1]
+        
+        if use_independent_decoder:
+            shape_logits, grid_logits = model.multi_encoder.independent_decoders[encoder_idx](z_i_prime, x_i, target_seq=y_i)
+        else:
+            shape_logits, grid_logits = model.multi_encoder.shared_decoder(z_i_prime, x_i, target_seq=y_i)
+        
+        # Compute -log p_θ(y_i | x_i, z_i') as in Bonnet's formulation
+        shape_targets = y_i[:, 900:902].long()
+        shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1), reduction='mean')
+        
+        r, c = int(y_i[0, 900].item()), int(y_i[0, 901].item())
+        n_pix = r * c
+        if n_pix > 0:
+            grid_loss = F.cross_entropy(grid_logits[0, :n_pix], y_i[0, :n_pix].long(), reduction='mean')
+        else:
+            grid_loss = torch.tensor(0.0, device=device)
+        
+        sample_loss = shape_loss + grid_loss
+        total_cross_pair_loss += sample_loss
+    
+    # Average over batch size to get proper scaling
+    return total_cross_pair_loss / batch_size
+
+
+def get_beta_warmup(current_epoch: int, warmup_epochs: int, beta_max: float) -> float:
+    """
+    Compute beta warmup schedule: β(t) = β_max * min(t/T_warm, 1)
+    
+    Args:
+        current_epoch: Current training epoch (1-indexed)
+        warmup_epochs: Number of epochs for warmup
+        beta_max: Maximum beta value
+    
+    Returns:
+        float: Current beta value
+    """
+    if warmup_epochs <= 0:
+        return beta_max
+    
+    warmup_factor = min(current_epoch / warmup_epochs, 1.0)
+    return beta_max * warmup_factor
+
+
+# -------------------------------------------------
 #  Convenience loss wrapper (matches existing API)
 # -------------------------------------------------
 
@@ -712,39 +827,60 @@ def multinomial_loss(
     mu: torch.Tensor,
     logvar: torch.Tensor,
 ) -> torch.Tensor:
+    """Bonnet-style multinomial loss computation."""
     shape_logits, grid_logits = logits
     shape_targets = target_seq[:, 900:902].long()
     shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
 
     batch_size = target_seq.size(0)
-    grid_loss_sum, active = 0.0, 0
+    grid_loss_sum = 0.0
+    active_samples = 0
     for i in range(batch_size):
         r, c = map(int, target_seq[i, 900:902])
         n_pix = r * c
-        if n_pix:
-            grid_loss_sum += F.cross_entropy(grid_logits[i, :n_pix], target_seq[i, :n_pix].long(), reduction='sum')
-            active += n_pix
-    grid_loss = grid_loss_sum / active if active else torch.tensor(0.0, device=target_seq.device)
+        if n_pix > 0:
+            grid_loss_sum += F.cross_entropy(grid_logits[i, :n_pix], target_seq[i, :n_pix].long())
+            active_samples += 1
+    grid_loss = grid_loss_sum / active_samples if active_samples > 0 else torch.tensor(0.0, device=target_seq.device)
     recon = shape_loss + grid_loss
     kl = 0.5 * torch.sum(mu.pow(2) + logvar.exp() - 1 - logvar) / mu.size(0)
     return recon + beta * kl
 
-def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Tensor, beta: float = BETA, return_components: bool = False, encoder_idx: int = None, use_independent_decoder: bool = False) -> torch.Tensor:
+
+def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Tensor, 
+                beta: float = BETA, return_components: bool = False, encoder_idx: int = None, 
+                use_independent_decoder: bool = False, 
+                # New parameters for specialist training
+                current_epoch: int = None, anti_mask: torch.Tensor = None, 
+                anti_batch_lambda: float = None, cross_pair_enabled: bool = False,
+                cross_pair_num_pairs: int = None) -> torch.Tensor:
     """
-    Compute loss for both single and multi-encoder models.
+    Compute loss following Bonnet's LPN approach exactly:
+    
+    L_total = L_rec + β * L_KL
+    
+    Where:
+    - L_rec: Cross-pair reconstruction loss (sum over samples)
+    - L_KL: KL divergence to N(0,I) (sum over samples)
+    - β: Small weight (~1e-3) so KL contributes ~1% early in training
     
     Args:
         model: The model (single or multi-encoder)
         input_seq: Input sequence
         target_seq: Target sequence  
-        beta: KL divergence weight
+        beta: KL divergence weight (should be ~1e-3 as in Bonnet)
         return_components: Whether to return loss components
         encoder_idx: Which encoder to use (None for PoE inference)
         use_independent_decoder: Whether to use independent decoder (Phase A) or shared decoder (Phase B)
+        current_epoch: Current training epoch for beta warmup (1-indexed)
+        anti_mask: Boolean mask indicating anti-samples [B] (True = anti-sample, False = in-slice)
+        anti_batch_lambda: Lambda weight for anti-batch KL regularization
+        cross_pair_enabled: Whether to use cross-pair reconstruction loss
+        cross_pair_num_pairs: Number of cross-pairs to sample (None = all pairs)
     """
     if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
         # ----------------------------------------------------------
-        # Multi-encoder path
+        # Multi-encoder specialist training path
         # ----------------------------------------------------------
         if encoder_idx is None:
             # PoE training with shared decoder (Phase B)
@@ -754,83 +890,145 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
             )
             shape_logits, grid_logits = reconstruction
             
-            # Use PoE latent for KL loss
-            mu, logvar = mu_star, logvar_star
-            
-            # Compute reconstruction loss for PoE
+            # Bonnet's reconstruction loss computation
             shape_targets = target_seq[:, 900:902].long()
             shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
             
             batch_size = target_seq.size(0)
-            grid_loss_sum, active = 0.0, 0
+            grid_loss_sum = 0.0
+            active_pixels_total = 0
+            
             for i in range(batch_size):
-                r, c = map(int, target_seq[i, 900:902])
-                n_pix = r * c
-                if n_pix > 0:
-                    grid_loss_sum += F.cross_entropy(grid_logits[i, :n_pix], target_seq[i, :n_pix].long(), reduction='sum')
-                    active += n_pix
-            grid_loss = grid_loss_sum / active if active > 0 else torch.tensor(0.0, device=target_seq.device)
-            rec_loss = shape_loss + grid_loss
+                tgt_rows = int(target_seq[i, 900].item())
+                tgt_cols = int(target_seq[i, 901].item())
+                active_pixels = tgt_rows * tgt_cols
+                
+                if active_pixels > 0:
+                    # Cross-entropy loss over active region only
+                    loss_i = F.cross_entropy(grid_logits[i, :active_pixels], target_seq[i, :active_pixels].long())
+                    grid_loss_sum += loss_i
+                    active_pixels_total += 1  # Count samples, not pixels for averaging
+                    
+            grid_loss = grid_loss_sum / active_pixels_total if active_pixels_total > 0 else torch.tensor(0.0, device=target_seq.device)
+            reconstruction_loss = shape_loss + grid_loss
             
-            # KL divergence loss
-            kl_loss = 0.5 * torch.sum(mu.pow(2) + logvar.exp() - 1 - logvar) / mu.size(0)
+            # Bonnet's KL divergence computation (sum over samples, divide by batch size)
+            kl_loss = 0.5 * torch.mean(torch.sum(mu_star.pow(2) + logvar_star.exp() - 1 - logvar_star, dim=1))
             
-            total_loss = rec_loss + beta * kl_loss
+            total_loss = reconstruction_loss + beta * kl_loss
             
             if return_components:
-                return total_loss, shape_loss, grid_loss, kl_loss
+                return {
+                    'total_loss': total_loss,
+                    'reconstruction_loss': reconstruction_loss,
+                    'shape_loss': shape_loss,
+                    'grid_loss': grid_loss,
+                    'kl_loss': kl_loss,
+                    'effective_beta': beta
+                }
             return total_loss
             
         else:
-            # Individual encoder training (Phase A)
-            if use_independent_decoder:
-                # Phase A: Use encoder with its independent decoder
-                reconstruction, mu, logvar = model.multi_encoder.forward_single_encoder_with_independent_decoder(
-                    encoder_idx, input_seq, target_seq, sample_latent=True
-                )
+            # Individual encoder training (Phase A) - Use Bonnet's approach
+            device = input_seq.device
+            batch_size = input_seq.size(0)
+            
+            # Get latent distributions for KL computation
+            mu, logvar = model.multi_encoder.encoders[encoder_idx](input_seq, target_seq)
+            
+            # Separate in-slice and anti-samples if anti-batch is used
+            if anti_mask is not None:
+                in_slice_mask = ~anti_mask  # True for in-slice samples
+                has_in_slice = in_slice_mask.any()
+                has_anti = anti_mask.any()
             else:
-                # Legacy: Use encoder with shared decoder
-                reconstruction, mu, logvar = model.multi_encoder.forward_single_encoder(
-                    encoder_idx, input_seq, target_seq, sample_latent=True
-                )
+                # No anti-batch, all samples are in-slice
+                in_slice_mask = torch.ones(batch_size, dtype=torch.bool, device=device)
+                has_in_slice = True
+                has_anti = False
             
-            shape_logits, grid_logits = reconstruction
+            # Initialize loss components
+            reconstruction_loss = torch.tensor(0.0, device=device)
+            kl_loss = torch.tensor(0.0, device=device)
+            anti_kl_loss = torch.tensor(0.0, device=device)
             
-            # Compute reconstruction loss
-            shape_targets = target_seq[:, 900:902].long()
-            shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
+            # 1. CROSS-PAIR RECONSTRUCTION LOSS (Bonnet's approach on in-slice samples)
+            if cross_pair_enabled and has_in_slice:
+                in_slice_indices = torch.where(in_slice_mask)[0]
+                if len(in_slice_indices) >= 2:  # Need at least 2 in-slice samples
+                    in_slice_input = input_seq[in_slice_indices]
+                    in_slice_target = target_seq[in_slice_indices]
+                    
+                    # Get latent optimization settings
+                    latent_settings = get_current_settings().get('latent_optimization', {})
+                    training_settings = latent_settings.get('training', {})
+                    opt_steps = training_settings.get('num_steps', 0) if training_settings.get('enabled', False) else 0
+                    opt_lr = training_settings.get('learning_rate', 0.1)
+                    
+                    reconstruction_loss = compute_bonnet_cross_pair_loss(
+                        model, encoder_idx, in_slice_input, in_slice_target,
+                        use_independent_decoder, opt_steps, opt_lr
+                    )
             
-            batch_size = target_seq.size(0)
-            grid_loss_sum, active = 0.0, 0
-            for i in range(batch_size):
-                r, c = map(int, target_seq[i, 900:902])
-                n_pix = r * c
-                if n_pix > 0:
-                    grid_loss_sum += F.cross_entropy(grid_logits[i, :n_pix], target_seq[i, :n_pix].long(), reduction='sum')
-                    active += n_pix
-            grid_loss = grid_loss_sum / active if active > 0 else torch.tensor(0.0, device=target_seq.device)
-            rec_loss = shape_loss + grid_loss
+            # 2. KL DIVERGENCE LOSS (Bonnet's approach)
+            if has_in_slice:
+                in_slice_mu = mu[in_slice_mask]
+                in_slice_logvar = logvar[in_slice_mask]
+                if in_slice_mu.size(0) > 0:
+                    # Bonnet's KL: sum over samples, divide by batch size
+                    kl_loss = 0.5 * torch.mean(torch.sum(
+                        in_slice_mu.pow(2) + in_slice_logvar.exp() - 1 - in_slice_logvar, dim=1
+                    ))
             
-            # KL divergence loss
-            kl_loss = 0.5 * torch.sum(mu.pow(2) + logvar.exp() - 1 - logvar) / mu.size(0)
+            # 3. ANTI-BATCH KL REGULARIZATION (if enabled)
+            if has_anti and anti_batch_lambda is not None:
+                anti_mu = mu[anti_mask]
+                anti_logvar = logvar[anti_mask]
+                if anti_mu.size(0) > 0:
+                    anti_kl_loss = 0.5 * torch.mean(torch.sum(
+                        anti_mu.pow(2) + anti_logvar.exp() - 1 - anti_logvar, dim=1
+                    ))
             
-            total_loss = rec_loss + beta * kl_loss
+            # Apply beta warmup if specified
+            if current_epoch is not None:
+                specialist_settings = get_current_settings().get('specialist_training', {})
+                phase_a_settings = specialist_settings.get('phase_a', {})
+                warmup_epochs = phase_a_settings.get('beta_warmup_epochs', 5)
+                effective_beta = get_beta_warmup(current_epoch, warmup_epochs, beta)
+            else:
+                effective_beta = beta
+            
+            # BONNET'S TOTAL LOSS: L_total = L_rec + β * L_KL (+ optional anti-batch term)
+            total_loss = reconstruction_loss + effective_beta * kl_loss
+            if has_anti and anti_batch_lambda is not None:
+                total_loss += anti_batch_lambda * anti_kl_loss
             
             if return_components:
-                return total_loss, shape_loss, grid_loss, kl_loss
+                return {
+                    'total_loss': total_loss,
+                    'cross_pair_loss': reconstruction_loss,  # For backward compatibility
+                    'reconstruction_loss': reconstruction_loss,
+                    'in_slice_kl_loss': kl_loss,
+                    'kl_loss': kl_loss,  # For backward compatibility  
+                    'anti_kl_loss': anti_kl_loss,
+                    'effective_beta': effective_beta,
+                    'anti_lambda': anti_batch_lambda if anti_batch_lambda is not None else 0.0
+                }
             return total_loss
             
     else:
-        # Single encoder model (original implementation)
+        # Single encoder model - use Bonnet's standard approach
         reconstruction, mu, log_var = model(input_seq, target_seq)
         shape_logits, grid_logits = reconstruction
 
+        # Bonnet's reconstruction loss computation
         shape_targets = target_seq[:, 900:902].long()
         shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
         
         batch_size = target_seq.size(0)
         grid_loss_sum = 0.0
-        active_elements_count = 0 # Keep track of total active pixels across batch for correct averaging
+        active_samples_count = 0
+        
         for i in range(batch_size):
             # Retrieve the target dimensions (active region) from the last two tokens.
             tgt_rows = int(target_seq[i, 900].item())
@@ -838,23 +1036,29 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
             active_pixels = tgt_rows * tgt_cols
 
             if active_pixels > 0:
-                # Compute cross-entropy only over the active region. Sum losses for each sample.
-                loss_i = F.cross_entropy(grid_logits[i, :active_pixels], target_seq[i, :active_pixels].long(), reduction='sum')
+                # Compute cross-entropy only over the active region.
+                loss_i = F.cross_entropy(grid_logits[i, :active_pixels], target_seq[i, :active_pixels].long())
                 grid_loss_sum += loss_i
-                active_elements_count += active_pixels
+                active_samples_count += 1  # Count samples for averaging
 
-        # Average grid loss over all active pixels in the batch
-        grid_loss = grid_loss_sum / active_elements_count if active_elements_count > 0 else torch.tensor(0.0, device=input_seq.device)
-
+        # Average grid loss over samples (not pixels)
+        grid_loss = grid_loss_sum / active_samples_count if active_samples_count > 0 else torch.tensor(0.0, device=input_seq.device)
         reconstruction_loss = shape_loss + grid_loss
 
-        # KL divergence loss, normalized by batch size for consistency
-        kl_loss = 0.5 * torch.sum(mu.pow(2) + log_var.exp() - 1 - log_var) / mu.size(0) 
+        # Bonnet's KL divergence loss computation
+        kl_loss = 0.5 * torch.mean(torch.sum(mu.pow(2) + log_var.exp() - 1 - log_var, dim=1)) 
 
         total_loss = reconstruction_loss + beta * kl_loss
         
         if return_components:
-            return total_loss, shape_loss, grid_loss, kl_loss
+            return {
+                'total_loss': total_loss,
+                'reconstruction_loss': reconstruction_loss,
+                'shape_loss': shape_loss,
+                'grid_loss': grid_loss,
+                'kl_loss': kl_loss,
+                'effective_beta': beta
+            }
         return total_loss
 
 

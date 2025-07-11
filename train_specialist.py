@@ -636,9 +636,29 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
     LEARNING_RATE = training_settings['learning_rate']
     BETA = training_settings['beta']
     
+    # Get specialist Phase A settings for enhanced loss
+    phase_a_settings = specialist_settings['phase_a']
+    anti_batch_size = phase_a_settings.get('anti_batch_size', 0.0)
+    anti_batch_lambda = phase_a_settings.get('anti_batch_lambda', BETA)
+    cross_pair_settings = phase_a_settings.get('cross_pair_loss', {})
+    cross_pair_enabled = cross_pair_settings.get('enabled', False)
+    cross_pair_num_pairs = cross_pair_settings.get('num_pairs', 4)
+    
     # Use settings for phase epochs if not provided
     if phase_epochs is None:
         phase_epochs = specialist_settings['phase_a']['epochs']
+    
+    # Log specialist training configuration
+    logger.info(f"Specialist Phase A configuration:")
+    logger.info(f"  Cross-pair reconstruction: {'ENABLED' if cross_pair_enabled else 'DISABLED'}")
+    if cross_pair_enabled:
+        logger.info(f"    - Cross-pair sampling: {cross_pair_num_pairs if cross_pair_num_pairs else 'ALL'} pairs")
+    logger.info(f"  Anti-batch training: {'ENABLED' if anti_batch_size > 0 else 'DISABLED'}")
+    if anti_batch_size > 0:
+        logger.info(f"    - Anti-batch proportion: {anti_batch_size:.1%}")
+        logger.info(f"    - Anti-batch λ: {anti_batch_lambda:.3f}")
+    logger.info(f"  Beta warmup epochs: {phase_a_settings.get('beta_warmup_epochs', 5)}")
+    print(f"Phase A Enhanced Training: cross-pair={'ON' if cross_pair_enabled else 'OFF'}, anti-batch={'ON' if anti_batch_size > 0 else 'OFF'}")
     
     # Phase A setup - all parameters unfrozen but we'll train one encoder+decoder at a time
     setup_phase_training(model, 'pretrain')
@@ -704,6 +724,9 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
             epoch_loss = 0.0
             num_batches = len(dataloader)
             
+            # Calculate consistent global step for this epoch (used for ALL logging)
+            global_step = encoder_idx * phase_epochs + epoch + 1
+            
             # Progress bar for this encoder's training
             pbar = tqdm(dataloader, desc=f"Encoder {encoder_idx} Epoch {epoch+1}/{phase_epochs}")
             
@@ -714,11 +737,33 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                 target_seq = target_seq.to(device)
                 
                 with torch.amp.autocast(device_type=device.type, enabled=use_mixed_precision):
-                    # Train encoder with its independent decoder
-                    loss = compute_loss(
+                    # SPECIALIST LOSS: Cross-pair reconstruction + beta warmup + anti-batch KL
+                    loss_result = compute_loss(
                         model, input_seq, target_seq, 
-                        beta=BETA, encoder_idx=encoder_idx, use_independent_decoder=True
+                        beta=BETA, encoder_idx=encoder_idx, use_independent_decoder=True,
+                        # Specialist training parameters
+                        current_epoch=epoch + 1,  # 1-indexed for beta warmup
+                        anti_mask=None,  # No anti-batch in basic training (can be added later)
+                        anti_batch_lambda=anti_batch_lambda,
+                        cross_pair_enabled=cross_pair_enabled,
+                        cross_pair_num_pairs=cross_pair_num_pairs,
+                        return_components=True  # Get detailed loss breakdown
                     )
+                    
+                    # Extract total loss and components
+                    if isinstance(loss_result, dict):
+                        loss = loss_result['total_loss']
+                        # Log detailed components for monitoring (use consistent global_step)
+                        if batch_idx == 0 and wandb_logger:  # Log once per epoch for efficiency
+                            wandb_logger.log_training_metrics(global_step, {
+                                f'phase_a/encoder_{encoder_idx}_cross_pair_loss': loss_result['cross_pair_loss'].item(),
+                                f'phase_a/encoder_{encoder_idx}_in_slice_kl_loss': loss_result['in_slice_kl_loss'].item(),
+                                f'phase_a/encoder_{encoder_idx}_effective_beta': loss_result['effective_beta'],
+                                f'phase_a/encoder_{encoder_idx}_epoch': epoch + 1
+                            })
+                    else:
+                        loss = loss_result  # Fallback for backward compatibility
+                    
                     loss = loss / gradient_accumulation_steps
                 
                 scaler.scale(loss).backward()
@@ -736,10 +781,7 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
             
             logger.info(f"Encoder {encoder_idx} Epoch {epoch+1}: Loss = {avg_epoch_loss:.4f}")
             
-            # Compute a unique global step for wandb (ensures continuous timeline across encoders)
-            global_step = encoder_idx * phase_epochs + epoch + 1  # 1-indexed
-            
-            # Log to wandb - every epoch, not just evaluation epochs
+            # Log to wandb - every epoch, not just evaluation epochs (using global_step calculated above)
             if wandb_logger:
                 wandb_logger.log_training_metrics(global_step, {
                     f'phase_a/encoder_{encoder_idx}_loss': avg_epoch_loss,
@@ -775,17 +817,19 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                             print(f"✓ Evaluation logged for Encoder {encoder_idx} at epoch {epoch + 1} on ALL keys")
                     except Exception as eval_error:
                         logger.warning(f"Evaluation failed for Encoder {encoder_idx} at epoch {epoch + 1}: {eval_error}")
-                    
-                    # Generate latent distribution histograms (lean and efficient)
+                
+                # Generate latent distribution histograms at evaluation intervals for ALL encoders
+                if should_run_evaluation(epoch + 1, eval_interval, phase_epochs):
                     try:
                         generate_latent_histograms(model, dataloader, device, encoder_idx, epoch + 1, wandb_logger, global_step)
+                        print(f"✓ Latent histograms logged for Encoder {encoder_idx} at epoch {epoch + 1}")
                     except Exception as hist_error:
                         logger.warning(f"Latent histogram generation failed for Encoder {encoder_idx} at epoch {epoch + 1}: {hist_error}")
                 
                 # Basic visualizations are handled by the reconstruction plots above
             
-            # Generate reconstruction plot periodically (reduce frequency)
-            if wandb_logger and (epoch + 1) % 10 == 0:  # Every 10 epochs instead of every epoch
+            # Generate reconstruction plot at evaluation intervals            
+            if wandb_logger and should_run_evaluation(epoch + 1, eval_interval, phase_epochs):
                 try:
                     plot_path, wandb_key = generate_specialist_reconstruction_plot(
                         model, dataloader, device, epoch + 1, phase='A',
@@ -834,48 +878,56 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
     if wandb_logger:
         logger.info("Creating Phase A summary visualization...")
         
-        import matplotlib.pyplot as plt
-        import numpy as np
-        
-        # Plot all encoder losses on one graph
-        plt.figure(figsize=(12, 8))
-        colors = plt.cm.Set1(np.linspace(0, 1, num_encoders))
-        
-        for encoder_idx in range(num_encoders):
-            if encoder_idx in phase_a_results['encoder_losses'] and phase_a_results['encoder_losses'][encoder_idx]:
-                losses = phase_a_results['encoder_losses'][encoder_idx]
-                epochs = range(1, len(losses) + 1)
-                encoder_keys = splitting_statistics['keys_per_encoder'][encoder_idx] if 'splitting_statistics' in locals() else [f'key_{encoder_idx}']
-                label = f'Encoder {encoder_idx} ({", ".join(encoder_keys)})'
-                plt.plot(epochs, losses, 'o-', color=colors[encoder_idx], 
-                        linewidth=2, markersize=4, label=label)
-        
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.title('Phase A: Individual Encoder Training Losses')
-        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        
-        # Save and log to wandb
-        phase_a_plot_path = os.path.join(run_dir, 'phase_a_encoder_losses.png')
-        plt.savefig(phase_a_plot_path, dpi=150, bbox_inches='tight')
-        plt.close()
-        
         try:
-            import wandb
+            import matplotlib.pyplot as plt
+            import numpy as np
+            # Note: os is already imported at module level
+            
+            # Plot all encoder losses on one graph
+            plt.figure(figsize=(12, 8))
+            colors = plt.cm.Set1(np.linspace(0, 1, num_encoders))
+            
+            for encoder_idx in range(num_encoders):
+                if encoder_idx in phase_a_results['encoder_losses'] and phase_a_results['encoder_losses'][encoder_idx]:
+                    losses = phase_a_results['encoder_losses'][encoder_idx]
+                    epochs = range(1, len(losses) + 1)
+                    encoder_keys = splitting_statistics['keys_per_encoder'][encoder_idx] if 'splitting_statistics' in locals() else [f'key_{encoder_idx}']
+                    label = f'Encoder {encoder_idx} ({", ".join(encoder_keys)})'
+                    plt.plot(epochs, losses, 'o-', color=colors[encoder_idx], 
+                            linewidth=2, markersize=4, label=label)
+            
+            plt.xlabel('Epoch')
+            plt.ylabel('Loss')
+            plt.title('Phase A: Individual Encoder Training Losses')
+            plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+            
+            # Save and log to wandb
+            phase_a_plot_path = os.path.join(run_dir, 'phase_a_encoder_losses.png')
+            plt.savefig(phase_a_plot_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            
             try:
-                wandb_logger._safe_log({
-                    "phase_a/encoder_losses_summary": wandb.Image(phase_a_plot_path),
-                    "phase_a/completed": True
-                })
-                logger.info("✓ Phase A summary plot logged to WandB")
-            except Exception as wandb_error:
-                logger.warning(f"Failed to upload Phase A summary plot to WandB: {wandb_error}")
-        except Exception as e:
-            logger.warning(f"Failed to log Phase A summary to WandB: {e}")
-        
-        logger.info("✓ Phase A summary visualization completed")
+                import wandb
+                try:
+                    # Use the final global step from the last encoder/epoch for Phase A summary
+                    final_phase_a_step = (num_encoders - 1) * phase_epochs + phase_epochs
+                    wandb_logger._safe_log({
+                        "phase_a/encoder_losses_summary": wandb.Image(phase_a_plot_path),
+                        "phase_a/completed": True
+                    }, step_hint=final_phase_a_step)
+                    logger.info("✓ Phase A summary plot logged to WandB")
+                except Exception as wandb_error:
+                    logger.warning(f"Failed to upload Phase A summary plot to WandB: {wandb_error}")
+            except Exception as e:
+                logger.warning(f"Failed to log Phase A summary to WandB: {e}")
+            
+            logger.info("✓ Phase A summary visualization completed")
+            
+        except Exception as plot_error:
+            logger.warning(f"Failed to create Phase A summary plot: {plot_error}")
+            logger.info("Phase A training completed successfully despite visualization error")
     
     return phase_a_results
 
@@ -1109,10 +1161,12 @@ def train_phase_b_decoder(model, encoder_datasets, device, logger, wandb_logger,
         try:
             import wandb
             try:
+                # Use the final global step from Phase B for summary
+                final_phase_b_step = base_global_step + phase_epochs
                 wandb_logger._safe_log({
                     "phase_b/decoder_loss_summary": wandb.Image(phase_b_plot_path),
                     "phase_b/completed": True
-                })
+                }, step_hint=final_phase_b_step)
                 logger.info("✓ Phase B summary plot logged to WandB")
             except Exception as wandb_error:
                 logger.warning(f"Failed to upload Phase B summary plot to WandB: {wandb_error}")
@@ -1160,6 +1214,17 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
     """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
+    
+    # Load specialist settings explicitly
+    import os
+    from utils.settings_manager import init_settings
+    global settings
+    specialist_settings_file = "model_specialist_settings.json"
+    if os.path.exists(specialist_settings_file):
+        settings = init_settings(specialist_settings_file)
+        print(f"✓ Loaded specialist settings from {specialist_settings_file}")
+    else:
+        print(f"⚠ Warning: {specialist_settings_file} not found, using default settings")
     
     # Get current settings
     data_settings = settings.get_data_settings()
@@ -1219,9 +1284,17 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
         wandb_logger = init_wandb_for_mode('specialist_train', run_dir)
         if wandb_logger:
             logger.info(f"✓ Wandb logging enabled: {wandb_logger.run.name}")
-            # Ensure trajectory plots are enabled for specialist training
-            if not wandb_settings.get('log_trajectory_plots', False):
-                wandb_settings['log_trajectory_plots'] = True  # Enable by default for specialist mode
+            # Verify trajectory plot settings
+            trajectory_plots_enabled = wandb_settings.get('log_trajectory_plots', False)
+            trajectory_max_samples = wandb_settings.get('trajectory_max_samples', 3)
+            eval_interval = wandb_settings.get('eval_log_interval', 10)
+            logger.info(f"✓ Trajectory plots: {'ENABLED' if trajectory_plots_enabled else 'DISABLED'}")
+            logger.info(f"✓ Trajectory max samples: {trajectory_max_samples}")
+            logger.info(f"✓ Evaluation/plot interval: every {eval_interval} epochs")
+            if trajectory_plots_enabled:
+                print(f"Trajectory plots enabled: {trajectory_max_samples} samples every {eval_interval} epochs")
+            else:
+                print("⚠ Warning: Trajectory plots are disabled in WandB settings")
         else:
             logger.info("⚠ Wandb initialization failed, continuing without wandb")
     

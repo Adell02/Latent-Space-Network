@@ -61,11 +61,13 @@ class WandbLogger:
             return
  
         try:
-            # Only use step if it is numeric (int or float). Otherwise, let wandb assign the next step.
-            if isinstance(step_hint, (int, float)):
+            # Only use step if it is numeric (int or float) AND greater than 0
+            # This prevents step=0 warnings when the current step is higher
+            if isinstance(step_hint, (int, float)) and step_hint > 0:
                 self.run.log(data, step=int(step_hint))
             else:
                 # Fallback: no explicit step → wandb will auto-increment
+                # This avoids the monotonic step error
                 self.run.log(data)
         except Exception as e:
             print(f"⚠ Wandb logging failed: {e}")
@@ -74,22 +76,27 @@ class WandbLogger:
         """Log training metrics (epoch may be int or str)."""
         if not self.is_initialized:
             return
-        self._safe_log({**metrics, 'epoch': epoch}, step_hint=epoch)
+        # Only use epoch as step if it's a positive number to avoid step=0 warnings
+        step_hint = epoch if isinstance(epoch, (int, float)) and epoch > 0 else None
+        self._safe_log({**metrics, 'epoch': epoch}, step_hint=step_hint)
         
     def log_accuracy_metrics(self, epoch: int, accuracy_data: Dict[str, Any]):
         """Log accuracy metrics."""
         if not self.is_initialized:
             return
+        
+        # Only use epoch as step if it's a positive number to avoid step=0 warnings    
+        step_hint = epoch if isinstance(epoch, (int, float)) and epoch > 0 else None
             
         if 'individual_encoders' in accuracy_data:
             # Multi-encoder case
             for encoder_idx, metrics in accuracy_data['individual_encoders'].items():
                 log_data = {f'encoder_{encoder_idx}_{k}': v for k, v in metrics.items() if k != 'evaluation_name'}
-                self._safe_log({**log_data, 'epoch': epoch}, step_hint=epoch)
+                self._safe_log({**log_data, 'epoch': epoch}, step_hint=step_hint)
         else:
             # Single encoder case
             log_data = {k: v for k, v in accuracy_data.items() if k not in ['epoch', 'evaluation_name']}
-            self._safe_log({**log_data, 'epoch': epoch}, step_hint=epoch)
+            self._safe_log({**log_data, 'epoch': epoch}, step_hint=step_hint)
     
     def log_visualizations(self, run_dir: str, epoch: int, eval_results: Dict[str, Any] = None, trajectory_plots: Dict[str, str] = None):
         """Log visualizations including trajectory plots to wandb."""
@@ -97,6 +104,9 @@ class WandbLogger:
             return
             
         print(f"Logging visualizations for epoch {epoch}...")
+        
+        # Only use epoch as step if it's a positive number to avoid step=0 warnings
+        step_hint = epoch if isinstance(epoch, (int, float)) and epoch > 0 else None
         
         try:
             # Import visualization function
@@ -108,8 +118,8 @@ class WandbLogger:
                     plot_comprehensive_latent_space(None, eval_results, run_dir)
                     latent_plot = os.path.join(run_dir, 'latent_space_visualization.png')
                     if os.path.exists(latent_plot):
-                        # Use consistent step parameter for slider visualization
-                        self._safe_log({'latent_space': wandb.Image(latent_plot)}, step_hint=epoch)
+                        # Use safe step parameter for slider visualization
+                        self._safe_log({'latent_space': wandb.Image(latent_plot)}, step_hint=step_hint)
                         print("  ✓ Logged latent space visualization")
                     else:
                         print("  ⚠ Latent space plot not found")
@@ -129,10 +139,10 @@ class WandbLogger:
                             # Format: trajectory_{key}_sample{idx} 
                             wandb_key = f'trajectory_{plot_key}'
                             
-                            # Log with proper epoch step for slider visualization
-                            self._safe_log({wandb_key: wandb.Image(plot_path)}, step_hint=epoch)
+                            # Log with safe step parameter for slider visualization
+                            self._safe_log({wandb_key: wandb.Image(plot_path)}, step_hint=step_hint)
                             trajectory_logged += 1
-                            print(f"    ✓ Logged {wandb_key} at step {epoch}")
+                            print(f"    ✓ Logged {wandb_key} at step {step_hint if step_hint else 'auto'}")
                         except Exception as e:
                             print(f"    ⚠ Failed to log {plot_key}: {e}")
                     else:
@@ -175,7 +185,8 @@ class WandbLogger:
         epoch_trajectory_plots = glob.glob(os.path.join(run_dir, 'trajectory_epoch*_*.png'))
         
         uploaded_count = 0
-        step = epoch if epoch else 0
+        # Use a valid step or let WandB auto-increment to avoid step=0 warnings
+        step = epoch if epoch and epoch > 0 else None
         
         # Upload standard plots
         for filename, wandb_key in plot_files:

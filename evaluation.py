@@ -769,8 +769,8 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda',
             'grid_correct': 0, 'grid_tokens': 0,
             'sample_exact_correct': 0, 'total_samples': 0
         }
-        # Encoder influence metrics storage
-        encoder_influence_metrics = []
+        # Encoder covariance traces storage
+        encoder_covariance_traces = []
     else:
         # For single encoder: use existing structure
         single_metrics = {
@@ -1253,25 +1253,25 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda',
                                                  enc_grid_logits[i].cpu().numpy().tolist())
                             })
                 
-                # 3. Calculate Encoder Influence Metrics for PoE
+                # 3. Calculate Encoder Covariance Traces
                 if len(all_enc_mus) > 1:  # Only calculate for true multi-encoder models
-                    from models.base_model import compute_encoder_influence_metrics
+                    from models.base_model import compute_encoder_covariance_traces
                     
                     # Stack encoder outputs: shape (K, B, D)
                     mu_stack = torch.stack(all_enc_mus, dim=0)  # (num_encoders, batch_size, latent_dim)
                     logvar_stack = torch.stack(all_enc_logvars, dim=0)  # (num_encoders, batch_size, latent_dim)
                     
-                    # Compute influence metrics: shape (K, B)
-                    influence_indices = compute_encoder_influence_metrics(mu_stack, logvar_stack)
+                    # Compute covariance traces (sum of variances): shape (K, B)
+                    covariance_traces = compute_encoder_covariance_traces(mu_stack, logvar_stack)
                     
-                    # Store influence metrics for each sample in this batch
+                    # Store covariance traces for each sample in this batch
                     for i in range(query_batch_size):
-                        sample_influences = {}
+                        sample_traces = {}
                         for enc_idx in range(num_encoders):
-                            sample_influences[f'encoder_{enc_idx}'] = influence_indices[enc_idx, i].item()
+                            sample_traces[f'encoder_{enc_idx}'] = covariance_traces[enc_idx, i].item()
                         
-                        # Add to global influence metrics storage
-                        encoder_influence_metrics.append(sample_influences)
+                        # Add to global covariance traces storage
+                        encoder_covariance_traces.append(sample_traces)
                 
                 # Log comparative performance every 10 batches for detailed analysis
                 if (batch_idx + 1) % 10 == 0:
@@ -1512,8 +1512,8 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda',
                     'encoder_performance_variance': sum((acc - avg_individual_acc)**2 for acc in encoder_exact_accs) / len(encoder_exact_accs),
                     'specialization_range': max(encoder_exact_accs) - min(encoder_exact_accs) if len(encoder_exact_accs) > 1 else 0.0
                 },
-                # Encoder influence metrics for PoE analysis
-                'encoder_influence_metrics': encoder_influence_metrics
+                # Encoder covariance traces for PoE analysis
+                'encoder_covariance_traces': encoder_covariance_traces
             },
             'reconstruction_results': {
                 'support_reconstructions': poe_support_reconstructions,

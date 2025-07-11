@@ -43,7 +43,7 @@ from sklearn.neighbors import NearestNeighbors
 # Add the parent directory to the Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models.base_model import LatentProgramNetwork, compute_encoder_influence_metrics
+from models.base_model import LatentProgramNetwork, compute_encoder_covariance_traces
 from utils.settings_manager import settings
 from utils.model_utils import load_model, set_seed
 from utils.visualizers import load_evaluation_latent_data, get_comprehensive_latent_data_for_trajectory
@@ -826,10 +826,10 @@ def visualize_multi_encoder_comprehensive_trajectory(trajectory_info, model, sav
             ax_poe_error.set_title(f'PoE Error {i}', fontsize=10)
             ax_poe_error.axis('off')
     
-    # Encoder Influence Analysis - showing how each encoder affects the PoE
+    # Encoder Covariance Trace Analysis - showing uncertainty of each encoder
     # ------------------------------------------------------------------
     ax_influence = fig.add_subplot(gs[3, 1:7])  # span the central columns
-    ax_influence.set_title('Encoder Influence on PoE Latent', fontsize=11)
+    ax_influence.set_title('Encoder Latent Uncertainty (Covariance Trace)', fontsize=11)
     ax_influence.grid(alpha=0.3)
 
     # Collect encoder mu and log_var data
@@ -863,32 +863,32 @@ def visualize_multi_encoder_comprehensive_trajectory(trajectory_info, model, sav
         mu_stack = torch.stack(encoder_mus)
         log_var_stack = torch.stack(encoder_log_vars)
         
-        # Compute influence indices
-        influence_indices = compute_encoder_influence_metrics(mu_stack, log_var_stack)
-        mean_influences = influence_indices.mean(dim=1).cpu().numpy()  # Average over batch
+        # Compute covariance traces (sum of variances)
+        covariance_traces = compute_encoder_covariance_traces(mu_stack, log_var_stack)
+        mean_traces = covariance_traces.mean(dim=1).cpu().numpy()  # Average over batch
         
         # Create bar plot
-        encoder_labels = [f'Enc {i}' for i in range(len(mean_influences))]
-        bars = ax_influence.bar(encoder_labels, mean_influences, 
-                               color=[enc_colors[i] for i in range(len(mean_influences))],
+        encoder_labels = [f'Enc {i}' for i in range(len(mean_traces))]
+        bars = ax_influence.bar(encoder_labels, mean_traces, 
+                               color=[enc_colors[i] for i in range(len(mean_traces))],
                                alpha=0.7, edgecolor='black')
         
         # Add value labels on bars
-        for i, (bar, val) in enumerate(zip(bars, mean_influences)):
+        for i, (bar, val) in enumerate(zip(bars, mean_traces)):
             ax_influence.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
-                             f'{val:.3f}', ha='center', va='bottom', fontsize=9)
+                             f'{val:.2f}', ha='center', va='bottom', fontsize=9)
         
-        # Add equal influence line
-        equal_influence = 1.0 / len(mean_influences)
-        ax_influence.axhline(equal_influence, color='red', linestyle='--', alpha=0.8,
-                            label=f'Equal Influence ({equal_influence:.3f})')
+        # Add average trace line
+        avg_trace = mean_traces.mean()
+        ax_influence.axhline(avg_trace, color='red', linestyle='--', alpha=0.8,
+                            label=f'Average Trace ({avg_trace:.2f})')
         
-        ax_influence.set_ylabel('Influence Index')
+        ax_influence.set_ylabel('Covariance Trace (Σσᵢ²)')
         ax_influence.set_xlabel('Encoder')
         ax_influence.legend(fontsize=8)
-        ax_influence.set_ylim(0, max(mean_influences) * 1.2)
+        ax_influence.set_ylim(0, max(mean_traces) * 1.1)
     else:
-        ax_influence.text(0.5, 0.5, 'Insufficient encoder data\nfor influence analysis', 
+        ax_influence.text(0.5, 0.5, 'Insufficient encoder data\nfor covariance analysis', 
                          ha='center', va='center', transform=ax_influence.transAxes)
 
     # ------------------------------------------------------------------

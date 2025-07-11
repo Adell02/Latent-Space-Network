@@ -158,34 +158,31 @@ def get_comprehensive_latent_data(run_dir):
                 all_labels.extend([label] * len(latents))
         
         # Handle different evaluation result structures
-        key_data = None
+        key_results_dict = {}
         
         # Check if we have the new key_results structure
         if 'key_results' in eval_results and isinstance(eval_results['key_results'], dict):
-            key_results = eval_results['key_results']
-            print(f"Using key_results structure with keys: {list(key_results.keys())}")
-            # Process the first available key
-            sample_key = next(iter(key_results.keys()))
-            key_data = key_results[sample_key]
+            key_results_dict = eval_results['key_results']
+            print(f"Using key_results structure with keys: {list(key_results_dict.keys())}")
         else:
-            # Handle legacy structure - find first non-metadata key
+            # Handle legacy structure - find all non-metadata keys
             metadata_keys = {'evaluation_metadata', 'key_results', 'aggregated_metrics', 'training_latent_data'}
-            problem_keys = {k: v for k, v in eval_results.items() if k not in metadata_keys}
-            
-            if problem_keys:
-                sample_key = next(iter(problem_keys.keys()))
-                key_data = problem_keys[sample_key]
-            else:
-                print("No valid problem keys found in evaluation results")
-                return None, None, None, None
+            key_results_dict = {k: v for k, v in eval_results.items() if k not in metadata_keys}
+            print(f"Using direct structure with keys: {list(key_results_dict.keys())}")
         
-        print(f"Processing latent data from key: {sample_key}")
-        print(f"Available data in key_data: {list(key_data.keys())}")
+        if not key_results_dict:
+            print("No valid problem keys found in evaluation results")
+            return None, None, None, None
         
-        # Check for training latent data in multiple possible locations
+        print(f"Processing latent data from ALL {len(key_results_dict)} keys: {list(key_results_dict.keys())}")
+        
+        # Check for training latent data (should be consistent across keys)
         training_data = None
-        if 'training_latent_data' in key_data:
-            training_data = key_data['training_latent_data']
+        sample_key = next(iter(key_results_dict.keys()))
+        sample_key_data = key_results_dict[sample_key]
+        
+        if 'training_latent_data' in sample_key_data:
+            training_data = sample_key_data['training_latent_data']
             print(f"Found training_latent_data in key_data with keys: {list(training_data.keys()) if training_data else 'None'}")
         elif 'training_latent_data' in eval_results:
             training_data = eval_results['training_latent_data'] 
@@ -195,8 +192,8 @@ def get_comprehensive_latent_data(run_dir):
             print("This likely means the evaluation was run without training data collection")
         
         # Add training latent data - split by encoders for multi-encoder models
+        # (Training data is the same across all keys, so we only add it once)
         if training_data:
-            
             # Check if multi-encoder by presence of multiple encoders
             is_multi = len([k for k in training_data.keys() if k.startswith('encoder_')]) > 1
             
@@ -215,33 +212,58 @@ def get_comprehensive_latent_data(run_dir):
                 if 'encoder_0' in training_data and 'latent_zs' in training_data['encoder_0']:
                     add_data(training_data['encoder_0']['latent_zs'], 'training', COLOR_PALETTE['training_encoded'])
         
-        # Add evaluation latent data (support/query) - only PoE results, not individual encoder samples
-        if 'evaluation_latent_data' in key_data:
-            eval_data = key_data['evaluation_latent_data']
+        # Add evaluation latent data from ALL keys (support/query) - only PoE results
+        total_support_samples = 0
+        total_query_samples = 0
+        
+        for eval_key, key_data in key_results_dict.items():
+            print(f"Processing evaluation data from key: {eval_key}")
             
-            # Process support and query data - only add PoE latent vectors, not the original samples
-            for data_type in ['support', 'query']:
-                if data_type in eval_data:
-                    type_data = eval_data[data_type]
-                    
-                    # Check if multi-encoder
-                    is_multi = 'poe' in type_data or len([k for k in type_data.keys() if k.startswith('encoder_')]) > 1
-                    
-                    if is_multi:
-                        # Multi-encoder: ONLY use PoE latent vectors (not the input samples)
-                        if 'poe' in type_data and 'latent_zs' in type_data['poe']:
-                            color_key = f'{data_type}_poe'
-                            color = COLOR_PALETTE.get(color_key, COLOR_PALETTE.get(data_type, '#888888'))
-                            add_data(type_data['poe']['latent_zs'], f'{data_type}', color)
-                    else:
-                        # Single encoder: use encoder_0 latent vectors only
-                        if 'encoder_0' in type_data and 'latent_zs' in type_data['encoder_0']:
-                            color = COLOR_PALETTE.get(data_type, '#888888')
-                            add_data(type_data['encoder_0']['latent_zs'], data_type, color)
-                        elif 'latent_zs' in type_data:
-                            # Fallback: direct access to latent vectors
-                            color = COLOR_PALETTE.get(data_type, '#888888')
-                            add_data(type_data['latent_zs'], data_type, color)
+            if 'evaluation_latent_data' in key_data:
+                eval_data = key_data['evaluation_latent_data']
+                
+                # Process support and query data - only add PoE latent vectors, not the original samples
+                for data_type in ['support', 'query']:
+                    if data_type in eval_data:
+                        type_data = eval_data[data_type]
+                        
+                        # Check if multi-encoder
+                        is_multi = 'poe' in type_data or len([k for k in type_data.keys() if k.startswith('encoder_')]) > 1
+                        
+                        if is_multi:
+                            # Multi-encoder: ONLY use PoE latent vectors (not the input samples)
+                            if 'poe' in type_data and 'latent_zs' in type_data['poe']:
+                                color_key = f'{data_type}_poe'
+                                color = COLOR_PALETTE.get(color_key, COLOR_PALETTE.get(data_type, '#888888'))
+                                # Add key suffix to label for clarity
+                                label = f'{data_type}_{eval_key[:8]}'  # Truncate key for readability
+                                add_data(type_data['poe']['latent_zs'], label, color)
+                                
+                                if data_type == 'support':
+                                    total_support_samples += len(type_data['poe']['latent_zs'])
+                                else:
+                                    total_query_samples += len(type_data['poe']['latent_zs'])
+                        else:
+                            # Single encoder: use encoder_0 latent vectors only
+                            if 'encoder_0' in type_data and 'latent_zs' in type_data['encoder_0']:
+                                color = COLOR_PALETTE.get(data_type, '#888888')
+                                label = f'{data_type}_{eval_key[:8]}'  # Truncate key for readability
+                                add_data(type_data['encoder_0']['latent_zs'], label, color)
+                                
+                                if data_type == 'support':
+                                    total_support_samples += len(type_data['encoder_0']['latent_zs'])
+                                else:
+                                    total_query_samples += len(type_data['encoder_0']['latent_zs'])
+                            elif 'latent_zs' in type_data:
+                                # Fallback: direct access to latent vectors
+                                color = COLOR_PALETTE.get(data_type, '#888888')
+                                label = f'{data_type}_{eval_key[:8]}'  # Truncate key for readability
+                                add_data(type_data['latent_zs'], label, color)
+                                
+                                if data_type == 'support':
+                                    total_support_samples += len(type_data['latent_zs'])
+                                else:
+                                    total_query_samples += len(type_data['latent_zs'])
         
         if not all_latent_data:
             print("No latent data found for visualization")
@@ -251,9 +273,11 @@ def get_comprehensive_latent_data(run_dir):
         combined_latents = np.vstack(all_latent_data)
         unique_data_types = len(set(all_labels))
         print(f"✓ Combined {combined_latents.shape[0]} latent vectors from {len(all_latent_data)} sources")
+        print(f"✓ Processed ALL {len(key_results_dict)} evaluation keys")
+        print(f"✓ Support samples: {total_support_samples}, Query samples: {total_query_samples}")
         print(f"✓ Data types: {unique_data_types}")
         print(f"✓ Labels distribution: {dict(zip(*np.unique(all_labels, return_counts=True)))}")
-        print(f"✓ Note: Showing individual encoder training data + PoE support/query latents")
+        print(f"✓ Note: Showing individual encoder training data + PoE support/query latents from ALL keys")
         
         # Create t-SNE projection
         perplexity = min(30, len(combined_latents) // 4)
@@ -379,34 +403,39 @@ def plot_comprehensive_latent_space(results, eval_results=None, save_dir=None):
         return
     
     # Create the plot
-    plt.figure(figsize=(12, 8))
+    plt.figure(figsize=(14, 10))
     
-    # Define desired legend order: encoders first (0, 1, 2...), then support/query
+    # Define desired legend order: encoders first (0, 1, 2...), then support/query grouped by type
     unique_labels = list(set(labels))
     
-    # Sort labels to show encoders first, then support/query
+    # Sort labels to show encoders first, then support/query grouped
     def label_sort_key(label):
         if label.startswith('training_enc_'):
             # Extract encoder number for sorting
             try:
-                enc_num = int(label.split('_')[-1])
+                enc_num = int(label.split('_')[2])  # training_enc_X
                 return (0, enc_num)  # Group 0, sort by encoder number
             except:
                 return (0, 999)  # Fallback for malformed encoder labels
         elif label == 'training' or label == 'training_encoded':
             return (1, 0)  # Group 1, general training
-        elif label == 'support':
-            return (2, 0)  # Group 2, support
-        elif label == 'query':
-            return (2, 1)  # Group 2, query
+        elif label.startswith('support_'):
+            return (2, 0, label)  # Group 2, support (sort by key name)
+        elif label.startswith('query_'):
+            return (2, 1, label)  # Group 2, query (sort by key name)
         else:
-            return (3, 0)  # Group 3, other labels
+            return (3, 0, label)  # Group 3, other labels
     
     sorted_labels = sorted(unique_labels, key=label_sort_key)
     legend_elements = []
     
+    # Group support/query data by type for cleaner legend
+    support_labels = [l for l in sorted_labels if l.startswith('support_')]
+    query_labels = [l for l in sorted_labels if l.startswith('query_')]
+    other_labels = [l for l in sorted_labels if not l.startswith(('support_', 'query_'))]
+    
     # Plot in the desired order
-    for label in sorted_labels:
+    for label in other_labels + support_labels + query_labels:
         # Get indices for this label
         indices = [i for i, l in enumerate(labels) if l == label]
         x_coords = [latents_2d[i][0] for i in indices]
@@ -420,26 +449,41 @@ def plot_comprehensive_latent_space(results, eval_results=None, save_dir=None):
             display_label = f'Encoder {enc_num}'
         elif label == 'training' or label == 'training_encoded':
             display_label = 'Training'
-        elif label == 'support':
-            display_label = 'Support'
-        elif label == 'query':
-            display_label = 'Query'
+        elif label.startswith('support_'):
+            key_suffix = label.split('_', 1)[1] if '_' in label else 'unknown'
+            display_label = f'Support ({key_suffix})'
+        elif label.startswith('query_'):
+            key_suffix = label.split('_', 1)[1] if '_' in label else 'unknown'
+            display_label = f'Query ({key_suffix})'
         
         plt.scatter(x_coords, y_coords, c=color, s=30, alpha=0.6, 
                    edgecolors='black', linewidth=0.3, label=f'{display_label} ({len(indices)})')
         legend_elements.append(mpatches.Patch(color=color, label=f'{display_label} (n={len(indices)})'))
     
-    plt.title('Latent Space Visualization (t-SNE)', fontsize=16)
+    # Add summary counts for support/query if we have multiple keys
+    total_support = sum(len([i for i, l in enumerate(labels) if l == label]) for label in support_labels)
+    total_query = sum(len([i for i, l in enumerate(labels) if l == label]) for label in query_labels)
+    
+    title = 'Latent Space Visualization (t-SNE)'
+    if total_support > 0 and total_query > 0:
+        num_support_keys = len(support_labels)
+        num_query_keys = len(query_labels)
+        title += f'\nSupport: {total_support} samples from {num_support_keys} keys, Query: {total_query} samples from {num_query_keys} keys'
+    
+    plt.title(title, fontsize=16)
     plt.xlabel('t-SNE Dimension 1', fontsize=12)
     plt.ylabel('t-SNE Dimension 2', fontsize=12)
-    plt.legend(handles=legend_elements, loc='best', fontsize=10)
+    plt.legend(handles=legend_elements, loc='center left', bbox_to_anchor=(1, 0.5), fontsize=10)
     plt.grid(True, alpha=0.3)
     
     if save_dir:
         plt.savefig(os.path.join(save_dir, 'latent_space_visualization.png'), 
                    dpi=150, bbox_inches='tight')
         plt.close()
-        print("✓ Clean latent space visualization saved (individual encoders + PoE latents)")
+        print("✓ Comprehensive latent space visualization saved (ALL keys aggregated)")
+        print(f"  - Training encoders: {len([l for l in unique_labels if l.startswith('training_enc_')])} encoders")
+        print(f"  - Support samples: {total_support} from {len(support_labels)} keys")
+        print(f"  - Query samples: {total_query} from {len(query_labels)} keys")
     else:
         plt.show()
 
@@ -1643,13 +1687,17 @@ def plot_encoder_influence_analysis(eval_results, save_dir=None):
     for key, key_data in key_results_dict.items():
         influence_metrics = None
         
-        # Try multiple possible locations for influence metrics
-        if 'metrics' in key_data and 'encoder_influence_metrics' in key_data['metrics']:
+        # Try multiple possible locations for covariance traces
+        if 'metrics' in key_data and 'encoder_covariance_traces' in key_data['metrics']:
+            influence_metrics = key_data['metrics']['encoder_covariance_traces']
+        elif 'encoder_covariance_traces' in key_data:
+            influence_metrics = key_data['encoder_covariance_traces']
+        elif 'metrics' in key_data and 'encoder_influence_metrics' in key_data['metrics']:
+            # Backward compatibility
             influence_metrics = key_data['metrics']['encoder_influence_metrics']
         elif 'encoder_influence_metrics' in key_data:
+            # Backward compatibility
             influence_metrics = key_data['encoder_influence_metrics']
-        elif 'metrics' in key_data and 'influence_metrics' in key_data['metrics']:
-            influence_metrics = key_data['metrics']['influence_metrics']
         
         if influence_metrics and len(influence_metrics) > 0:
             influence_data_found = True
@@ -1661,50 +1709,54 @@ def plot_encoder_influence_analysis(eval_results, save_dir=None):
                     break
     
     if not influence_data_found:
-        print("No encoder influence metrics found in evaluation results")
-        print("Influence metrics are only available for multi-encoder models with PoE evaluation")
+        print("No encoder covariance traces found in evaluation results")
+        print("Covariance traces are only available for multi-encoder models with PoE evaluation")
         print("This is expected for single-encoder models or when PoE evaluation is not enabled")
         
         # Create a fallback informational plot
         try:
             fig, ax = plt.subplots(1, 1, figsize=(10, 6))
-            ax.text(0.5, 0.5, 'Encoder Influence Analysis\n\nNo influence metrics found.\n\nThis is expected for:\n• Single-encoder models\n• When PoE evaluation is not enabled\n• When encoder influence calculation fails\n\nInfluence metrics are only available for\nmulti-encoder models with PoE evaluation.', 
+            ax.text(0.5, 0.5, 'Encoder Covariance Analysis\n\nNo covariance traces found.\n\nThis is expected for:\n• Single-encoder models\n• When PoE evaluation is not enabled\n• When encoder covariance calculation fails\n\nCovariance traces are only available for\nmulti-encoder models with PoE evaluation.', 
                    ha='center', va='center', transform=ax.transAxes, fontsize=12,
                    bbox=dict(boxstyle='round,pad=1', facecolor='lightblue', alpha=0.8))
-            ax.set_title('Encoder Influence Analysis - No Data', fontsize=14)
+            ax.set_title('Encoder Covariance Analysis - No Data', fontsize=14)
             ax.axis('off')
             plt.tight_layout()
             if save_dir:
-                plt.savefig(os.path.join(save_dir, 'encoder_influence_analysis.png'), dpi=150, bbox_inches='tight')
+                plt.savefig(os.path.join(save_dir, 'encoder_covariance_analysis.png'), dpi=150, bbox_inches='tight')
             plt.close()
-            print("Saved fallback encoder influence analysis plot")
+            print("Saved fallback encoder covariance analysis plot")
         except Exception as fallback_error:
             print(f"Could not create fallback influence plot: {fallback_error}")
         return
     
-    print(f"Found encoder influence metrics for {num_encoders} encoders")
+    print(f"Found encoder covariance traces for {num_encoders} encoders")
     
     # Collect influence data for each key
     keys_with_data = []
     for key, key_data in key_results_dict.items():
         influence_metrics = None
         
-        # Try multiple possible locations for influence metrics (same as above)
-        if 'metrics' in key_data and 'encoder_influence_metrics' in key_data['metrics']:
+        # Try multiple possible locations for covariance traces (same as above)
+        if 'metrics' in key_data and 'encoder_covariance_traces' in key_data['metrics']:
+            influence_metrics = key_data['metrics']['encoder_covariance_traces']
+        elif 'encoder_covariance_traces' in key_data:
+            influence_metrics = key_data['encoder_covariance_traces']
+        elif 'metrics' in key_data and 'encoder_influence_metrics' in key_data['metrics']:
+            # Backward compatibility
             influence_metrics = key_data['metrics']['encoder_influence_metrics']
         elif 'encoder_influence_metrics' in key_data:
+            # Backward compatibility
             influence_metrics = key_data['encoder_influence_metrics']
-        elif 'metrics' in key_data and 'influence_metrics' in key_data['metrics']:
-            influence_metrics = key_data['metrics']['influence_metrics']
         
         if influence_metrics and len(influence_metrics) > 0:
             keys_with_data.append((key, influence_metrics))
     
     if not keys_with_data:
-        print("No keys with valid influence metrics found")
+        print("No keys with valid covariance traces found")
         return
     
-    print(f"Creating influence analysis plots for {len(keys_with_data)} evaluation keys")
+    print(f"Creating covariance analysis plots for {len(keys_with_data)} evaluation keys")
     
     # Create figure with subplots for each key
     num_keys = len(keys_with_data)
@@ -1742,8 +1794,8 @@ def plot_encoder_influence_analysis(eval_results, save_dir=None):
                        edgecolor='black', linewidth=0.5)
         
         # Customize plot
-        ax.set_title(f'Encoder Influence Distribution - Key: {key}', fontsize=14, fontweight='bold')
-        ax.set_xlabel('Mean Influence Index', fontsize=12)
+        ax.set_title(f'Encoder Covariance Trace Distribution - Key: {key}', fontsize=14, fontweight='bold')
+        ax.set_xlabel('Covariance Trace (Σσᵢ²)', fontsize=12)
         ax.set_ylabel('Number of Samples', fontsize=12)
         ax.legend(fontsize=10)
         ax.grid(True, alpha=0.3)
@@ -1754,14 +1806,14 @@ def plot_encoder_influence_analysis(eval_results, save_dir=None):
         total_samples = len(influence_metrics)
         stats_text.append(f'Total Samples: {total_samples}')
         
-        # Calculate mean influence for each encoder
+        # Calculate mean covariance trace for each encoder
         for enc_idx in range(num_encoders):
             enc_name = f'encoder_{enc_idx}'
             influences = encoder_influences[enc_name]
             if influences:
-                mean_influence = np.mean(influences)
-                std_influence = np.std(influences)
-                stats_text.append(f'Enc {enc_idx}: μ={mean_influence:.3f}, σ={std_influence:.3f}')
+                mean_trace = np.mean(influences)
+                std_trace = np.std(influences)
+                stats_text.append(f'Enc {enc_idx}: μ={mean_trace:.2f}, σ={std_trace:.2f}')
         
         # Add stats box
         stats_str = '\n'.join(stats_text)
@@ -1773,15 +1825,15 @@ def plot_encoder_influence_analysis(eval_results, save_dir=None):
     plt.tight_layout()
     
     if save_dir:
-        filename = 'encoder_influence_analysis.png'
+        filename = 'encoder_covariance_analysis.png'
         save_path = os.path.join(save_dir, filename)
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close()
-        print(f"✓ Encoder influence analysis saved to: {save_path}")
+        print(f"✓ Encoder covariance analysis saved to: {save_path}")
         print(f"  - Analyzed {num_encoders} encoders across {len(keys_with_data)} evaluation keys")
         
         # Print summary statistics
-        print(f"\n📊 ENCODER INFLUENCE SUMMARY:")
+        print(f"\n📊 ENCODER COVARIANCE SUMMARY:")
         for key, influence_metrics in keys_with_data:
             print(f"\nKey: {key}")
             encoder_influences = {f'encoder_{i}': [] for i in range(num_encoders)}

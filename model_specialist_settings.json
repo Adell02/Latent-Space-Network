@@ -7,8 +7,8 @@
       "0a938d79"
     ],
     "training_seed": 42,
-    "eval_seed": 42,
-    "n": 50,
+    "eval_seed": 1,
+    "n": 100,
     "run_base_dir": "runs_specialist"
   },
   "evaluation_settings": {
@@ -51,11 +51,11 @@
   },
   "model_architecture": {
     "num_encoders": 4,
-    "encoder_layers": 2,
+    "encoder_layers": 6,
     "decoder_layers": 1,
     "encoder_heads": 6,
     "decoder_heads": 6,
-    "encoder_hidden_dim": 96,
+    "encoder_hidden_dim": 48,
     "decoder_hidden_dim": 24,
     "latent_dim": 256,
     "dropout": 1e-06,
@@ -69,8 +69,8 @@
     "batch_size": 8,
     "gradient_accumulation_steps": 2,
     "learning_rate": 0.0004,
-    "optimizer_weight_decay": 1e-05,
-    "beta": 1e-4,
+    "optimizer_weight_decay": 5e-03,
+    "beta": 1e-1,
     "use_mixed_precision": true,
     "save_checkpoint_interval": 1,
     "learning_rate_scheduler": {
@@ -100,7 +100,17 @@
   "specialist_training": {
     "phase_a": {
       "epochs": 150,
-      "description": "Encoder pre-training phase"
+      "description": "Encoder pre-training phase",
+      "anti_batch_size": 0.05,
+      "anti_batch_description": "Proportion (0-1) of anti-samples (from other encoders) mixed into each encoder's training batch to encourage specialization",
+      "anti_batch_lambda": 1e-1,
+      "anti_batch_lambda_description": "Weight for KL regularization on anti-samples (should be ≈ β)",
+      "beta_warmup_epochs": 30,
+      "beta_warmup_description": "Epochs to warm up β from 0 to target value to prevent posterior collapse",
+      "cross_pair_loss": {
+        "enabled": true,
+        "description": "Cross-pair reconstruction loss: L_cross = (1/|P|) * sum_{i≠j} ||g_θ(x_j, z_i) - y_j||_1. Forces latent codes to be reusable across different inputs."
+      }
     },
     "phase_b": {
       "epochs": 100,
