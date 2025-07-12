@@ -737,13 +737,62 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                 target_seq = target_seq.to(device)
                 
                 with torch.amp.autocast(device_type=device.type, enabled=use_mixed_precision):
+                    # Generate anti-batch samples for domain specialization
+                    batch_size = input_seq.size(0)
+                    anti_samples_count = int(batch_size * anti_batch_size) if anti_batch_size > 0 else 0
+                    
+                    if anti_samples_count > 0:
+                        # Create anti-batch: samples from OTHER encoders' domains
+                        other_encoder_indices = [i for i in range(num_encoders) if i != encoder_idx]
+                        if other_encoder_indices:
+                            # Sample from other encoders' datasets
+                            other_datasets = [dataset_splits[i] for i in other_encoder_indices if dataset_splits[i][0]]
+                            if other_datasets:
+                                # Combine other encoders' data
+                                all_other_inputs = []
+                                all_other_outputs = []
+                                for other_inputs, other_outputs in other_datasets:
+                                    all_other_inputs.extend(other_inputs[:anti_samples_count//len(other_datasets)+1])
+                                    all_other_outputs.extend(other_outputs[:anti_samples_count//len(other_datasets)+1])
+                                
+                                if len(all_other_inputs) >= anti_samples_count:
+                                    # Sample anti-batch
+                                    anti_indices = torch.randperm(len(all_other_inputs))[:anti_samples_count]
+                                    anti_inputs = [all_other_inputs[i] for i in anti_indices]
+                                    anti_outputs = [all_other_outputs[i] for i in anti_indices]
+                                    
+                                    # Convert to tensors
+                                    anti_input_seq = torch.stack([torch.tensor(seq, dtype=torch.float32) for seq in anti_inputs]).to(device)
+                                    anti_target_seq = torch.stack([torch.tensor(seq, dtype=torch.float32) for seq in anti_outputs]).to(device)
+                                    
+                                    # Combine in-slice and anti-batch samples
+                                    combined_input = torch.cat([input_seq, anti_input_seq], dim=0)
+                                    combined_target = torch.cat([target_seq, anti_target_seq], dim=0)
+                                    
+                                    # Create anti-mask: False for in-slice, True for anti-batch
+                                    anti_mask = torch.cat([
+                                        torch.zeros(batch_size, dtype=torch.bool, device=device),  # in-slice
+                                        torch.ones(anti_samples_count, dtype=torch.bool, device=device)  # anti-batch
+                                    ])
+                                    
+                                    # Use combined batch for training
+                                    input_seq, target_seq = combined_input, combined_target
+                                else:
+                                    anti_mask = None
+                            else:
+                                anti_mask = None
+                        else:
+                            anti_mask = None
+                    else:
+                        anti_mask = None
+                    
                     # SPECIALIST LOSS: Cross-pair reconstruction + beta warmup + anti-batch KL
                     loss_result = compute_loss(
                         model, input_seq, target_seq, 
                         beta=BETA, encoder_idx=encoder_idx, use_independent_decoder=True,
                         # Specialist training parameters
                         current_epoch=epoch + 1,  # 1-indexed for beta warmup
-                        anti_mask=None,  # No anti-batch in basic training (can be added later)
+                        anti_mask=anti_mask,  # Enable anti-batch training
                         anti_batch_lambda=anti_batch_lambda,
                         cross_pair_enabled=cross_pair_enabled,
                         cross_pair_num_pairs=cross_pair_num_pairs,

@@ -387,7 +387,7 @@ class TransformerDecoder(nn.Module):
         self.grid_output = nn.Linear(hidden_dim, 10)   # For grid values (indices 0-9)
         self.layer_norm = nn.LayerNorm(hidden_dim)
 
-    def prepare_input_memory(self, z: torch.Tensor, input_seq: torch.Tensor) -> torch.Tensor:
+    def prepare_input_memory(self, z: torch.Tensor, input_seq: torch.Tensor, training: bool = True) -> torch.Tensor:
         """Prepare memory from input sequence and latent vector."""
         batch_size = input_seq.size(0)
         device = input_seq.device
@@ -395,6 +395,19 @@ class TransformerDecoder(nn.Module):
         # Updated indexing: grid tokens first, then shape tokens
         input_grid = input_seq[:, :900]
         input_shapes = input_seq[:, 900:902]
+
+        # Add noise to input during training to force latent dependency
+        if training and torch.rand(1).item() < 0.3:  # 30% chance during training
+            # Add noise to grid tokens to prevent decoder from just copying
+            noise_scale = 0.1
+            grid_noise = torch.randint_like(input_grid.long(), 0, 2) * noise_scale  # Binary noise
+            input_grid = input_grid + grid_noise
+            input_grid = torch.clamp(input_grid, 0, 9)  # Keep in valid range [0,9]
+            
+            # Occasionally mask some input tokens entirely
+            if torch.rand(1).item() < 0.2:  # 20% of the 30% noise cases
+                mask_tokens = torch.rand(input_grid.shape, device=device) < 0.1  # Mask 10% of tokens
+                input_grid = input_grid.masked_fill(mask_tokens, 0)  # Replace with 0 (background)
 
         # For memory we use the same embeddings as in the encoder
         grid_emb = self.output_grid_embedding(input_grid.long())
@@ -411,11 +424,34 @@ class TransformerDecoder(nn.Module):
 
         latent_emb = self.latent_projection(z)
         
+        # Apply latent dropout during training to force using both input and latent
+        if training and torch.rand(1).item() < 0.2:  # 20% chance to dropout latent
+            latent_emb = latent_emb * 0.1  # Severely attenuate latent signal
+        
         # Ensure latent_emb has the correct batch size
         if latent_emb.size(0) != batch_size:
             latent_emb = latent_emb.expand(batch_size, -1)
         
-        memory = torch.cat([memory_input, latent_emb.unsqueeze(1).expand(-1, memory_input.size(1), -1)], dim=-1)
+        # Enhanced latent integration with gating mechanism
+        # This forces the model to learn when to use latent vs input information
+        latent_expanded = latent_emb.unsqueeze(1).expand(-1, memory_input.size(1), -1)
+        
+        # Learnable gating between input and latent information
+        if not hasattr(self, 'input_latent_gate'):
+            self.input_latent_gate = nn.Sequential(
+                nn.Linear(memory_input.size(-1) + latent_emb.size(-1), memory_input.size(-1)),
+                nn.Sigmoid()
+            ).to(device)
+        
+        # Compute gating weights
+        combined_for_gate = torch.cat([memory_input, latent_expanded], dim=-1)
+        gate_weights = self.input_latent_gate(combined_for_gate)
+        
+        # Apply gating: balance between input context and latent information
+        memory_input_gated = memory_input * gate_weights
+        latent_contribution = latent_expanded * (1 - gate_weights)
+        
+        memory = torch.cat([memory_input_gated, latent_contribution], dim=-1)
         memory = self.memory_projection(memory)
         return memory
 
@@ -434,7 +470,7 @@ class TransformerDecoder(nn.Module):
         """
         batch_size = input_seq.size(0)
         device = input_seq.device
-        memory = self.prepare_input_memory(z, input_seq)
+        memory = self.prepare_input_memory(z, input_seq, training=self.training)
 
         # ----- Teacher Forcing Mode -----
         tgt_grid = target_seq[:, :900].long()
