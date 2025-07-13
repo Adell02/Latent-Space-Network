@@ -898,21 +898,38 @@ def get_dynamic_anti_lambda(current_beta: float, beta_max: float,
         return low_phase_base
 
 
-def apply_free_bits(kl_loss: torch.Tensor, latent_dim: int, 
-                   delta_per_dim: float = 0.07) -> torch.Tensor:
+def apply_free_bits_per_dimension(mu: torch.Tensor, logvar: torch.Tensor, 
+                                  delta_per_dim: float = 0.07) -> tuple:
     """
-    Free-bits / Minimum-rate mechanism: kl_loss = torch.clamp(kl_loss, min=δ)
+    FIXED Free-bits mechanism: Apply per-dimension clamping to force every latent dimension active.
+    
+    KL per dimension: kl_dim = 0.5*(μ² + σ² - 1 - log σ²)
+    Clamp each dimension: kl_dim = torch.clamp(kl_dim, min=δ)
     
     Args:
-        kl_loss: KL divergence loss tensor
-        latent_dim: Latent space dimensionality
-        delta_per_dim: Minimum rate per dimension (δ ≈ 0.05 – 0.1 × latent_dim)
+        mu: Mean tensor [batch_size, latent_dim]
+        logvar: Log variance tensor [batch_size, latent_dim] 
+        delta_per_dim: Minimum rate per dimension (δ ≈ 0.07)
     
     Returns:
-        torch.Tensor: Clamped KL loss
+        tuple: (raw_kl_loss, clamped_kl_loss, kl_per_dim_mean)
     """
-    min_kl = delta_per_dim * latent_dim
-    return torch.clamp(kl_loss, min=min_kl)
+    # Calculate per-dimension KL: 0.5*(μ² + σ² - 1 - log σ²)
+    kl_per_dim = 0.5 * (mu.pow(2) + logvar.exp() - 1 - logvar)  # [batch_size, latent_dim]
+    
+    # Raw KL loss (before clamping) for monitoring
+    raw_kl_loss = torch.mean(torch.sum(kl_per_dim, dim=1))  # Sum over dims, mean over batch
+    
+    # Apply per-dimension free-bits clamping
+    kl_per_dim_clamped = torch.clamp(kl_per_dim, min=delta_per_dim)  # [batch_size, latent_dim]
+    
+    # Clamped KL loss 
+    clamped_kl_loss = torch.mean(torch.sum(kl_per_dim_clamped, dim=1))  # Sum over dims, mean over batch
+    
+    # Mean KL per dimension (for monitoring)
+    kl_per_dim_mean = torch.mean(kl_per_dim)  # Average over batch and dimensions
+    
+    return raw_kl_loss, clamped_kl_loss, kl_per_dim_mean
 
 
 def compute_contrastive_kl_margin(in_slice_kl: torch.Tensor, anti_kl: torch.Tensor, 
@@ -1055,12 +1072,13 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
             grid_loss = grid_loss_sum / active_pixels_total if active_pixels_total > 0 else torch.tensor(0.0, device=device)
             reconstruction_loss = shape_loss + grid_loss
             
-            # Bonnet's KL divergence computation (sum over samples, divide by batch size)
-            kl_loss = 0.5 * torch.mean(torch.sum(mu_star.pow(2) + logvar_star.exp() - 1 - logvar_star, dim=1))
-            
-            # Apply free-bits mechanism to keep latents active
+            # Bonnet's KL divergence computation with FIXED per-dimension free-bits
             if use_free_bits:
-                kl_loss = apply_free_bits(kl_loss, latent_dim, free_bits_delta)
+                raw_kl_loss, kl_loss, kl_per_dim_mean = apply_free_bits_per_dimension(mu_star, logvar_star, free_bits_delta)
+            else:
+                kl_loss = 0.5 * torch.mean(torch.sum(mu_star.pow(2) + logvar_star.exp() - 1 - logvar_star, dim=1))
+                raw_kl_loss = kl_loss
+                kl_per_dim_mean = kl_loss / latent_dim
             
             # Compute effective beta (cyclical annealing if enabled)
             if use_cyclical_beta and current_epoch is not None:
@@ -1070,9 +1088,6 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
             
             total_loss = reconstruction_loss + effective_beta * kl_loss
             
-            # Debug metrics
-            kl_per_dim = kl_loss / latent_dim if debug_kl_metrics else None
-            
             if return_components:
                 return {
                     'total_loss': total_loss,
@@ -1081,7 +1096,10 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
                     'grid_loss': grid_loss,
                     'kl_loss': kl_loss,
                     'effective_beta': effective_beta,
-                    'kl_per_dim': kl_per_dim
+                    # CRITICAL debug metrics to detect collapse (PoE)
+                    'raw_kl_loss': raw_kl_loss if 'raw_kl_loss' in locals() else kl_loss,
+                    'clamped_kl_loss': kl_loss,
+                    'kl_per_dim': kl_per_dim_mean if 'kl_per_dim_mean' in locals() else (kl_loss / latent_dim)
                 }
             return total_loss
             
@@ -1127,28 +1145,36 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
                         use_independent_decoder, opt_steps, opt_lr
                     )
             
-            # 2. KL DIVERGENCE LOSS (Bonnet's approach with enhancements)
+            # 2. KL DIVERGENCE LOSS (Bonnet's approach with FIXED per-dimension free-bits)
+            raw_kl_loss = torch.tensor(0.0, device=device)
+            kl_per_dim_mean = torch.tensor(0.0, device=device)
             if has_in_slice:
                 in_slice_mu = mu[in_slice_mask]
                 in_slice_logvar = logvar[in_slice_mask]
                 if in_slice_mu.size(0) > 0:
-                    # Bonnet's KL: sum over samples, divide by batch size
-                    kl_loss = 0.5 * torch.mean(torch.sum(
-                        in_slice_mu.pow(2) + in_slice_logvar.exp() - 1 - in_slice_logvar, dim=1
-                    ))
-                    
-                    # Apply free-bits mechanism to guarantee minimum KL (keep latents active)
+                    # Apply FIXED per-dimension free-bits to guarantee every latent dimension is active
                     if use_free_bits:
-                        kl_loss = apply_free_bits(kl_loss, latent_dim, free_bits_delta)
+                        raw_kl_loss, kl_loss, kl_per_dim_mean = apply_free_bits_per_dimension(in_slice_mu, in_slice_logvar, free_bits_delta)
+                    else:
+                        kl_loss = 0.5 * torch.mean(torch.sum(
+                            in_slice_mu.pow(2) + in_slice_logvar.exp() - 1 - in_slice_logvar, dim=1
+                        ))
+                        raw_kl_loss = kl_loss
+                        kl_per_dim_mean = kl_loss / latent_dim
             
             # 3. ANTI-BATCH KL REGULARIZATION (enhanced with dynamic scheduling)
+            raw_anti_kl_loss = torch.tensor(0.0, device=device)
+            anti_kl_per_dim_mean = torch.tensor(0.0, device=device)
             if has_anti:
                 anti_mu = mu[anti_mask]
                 anti_logvar = logvar[anti_mask]
                 if anti_mu.size(0) > 0:
+                    # Calculate raw anti-KL (no free-bits clamping for anti-batch)
                     anti_kl_loss = 0.5 * torch.mean(torch.sum(
                         anti_mu.pow(2) + anti_logvar.exp() - 1 - anti_logvar, dim=1
                     ))
+                    raw_anti_kl_loss = anti_kl_loss
+                    anti_kl_per_dim_mean = anti_kl_loss / latent_dim
             
             # 4. BETA AND LAMBDA SCHEDULING
             # Compute effective beta (cyclical annealing if enabled)
@@ -1187,10 +1213,9 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
             if use_contrastive_margin:
                 total_loss += contrastive_margin_loss
             
-            # Debug metrics
-            kl_per_dim = kl_loss / latent_dim if debug_kl_metrics else None
-            anti_kl_per_dim = anti_kl_loss / latent_dim if debug_kl_metrics and has_anti else None
-            kl_gap = (kl_loss - anti_kl_loss) if debug_kl_metrics and has_anti else None
+            # Debug metrics: CRITICAL - Use RAW KL values to see actual collapse
+            kl_gap_raw = (raw_kl_loss - raw_anti_kl_loss) if debug_kl_metrics and has_anti else None
+            kl_gap_clamped = (kl_loss - anti_kl_loss) if debug_kl_metrics and has_anti else None
             
             if return_components:
                 return {
@@ -1204,10 +1229,16 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
                     'effective_beta': effective_beta,
                     'effective_lambda': effective_lambda,
                     'anti_lambda': effective_lambda,  # For backward compatibility
-                    # Debug metrics
-                    'kl_per_dim': kl_per_dim,
-                    'anti_kl_per_dim': anti_kl_per_dim,
-                    'kl_gap': kl_gap
+                    # CRITICAL debug metrics to detect collapse
+                    'raw_kl_loss': raw_kl_loss,  # KL before free-bits clamping
+                    'clamped_kl_loss': kl_loss,  # KL after free-bits clamping
+                    'raw_anti_kl_loss': raw_anti_kl_loss,  # Anti-KL (always raw)
+                    'kl_per_dim': kl_per_dim_mean,  # Average KL per dimension
+                    'anti_kl_per_dim': anti_kl_per_dim_mean,  # Average anti-KL per dimension
+                    'kl_gap_raw': kl_gap_raw,  # Raw KL gap (seen - unseen)
+                    'kl_gap_clamped': kl_gap_clamped,  # Clamped KL gap
+                    # Legacy aliases
+                    'kl_gap': kl_gap_raw  # For backward compatibility
                 }
             return total_loss
             
@@ -1240,12 +1271,13 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
         grid_loss = grid_loss_sum / active_samples_count if active_samples_count > 0 else torch.tensor(0.0, device=input_seq.device)
         reconstruction_loss = shape_loss + grid_loss
 
-        # Bonnet's KL divergence loss computation
-        kl_loss = 0.5 * torch.mean(torch.sum(mu.pow(2) + log_var.exp() - 1 - log_var, dim=1))
-        
-        # Apply free-bits mechanism to keep latents active
+        # Bonnet's KL divergence loss computation with FIXED per-dimension free-bits
         if use_free_bits:
-            kl_loss = apply_free_bits(kl_loss, latent_dim, free_bits_delta)
+            raw_kl_loss, kl_loss, kl_per_dim_mean = apply_free_bits_per_dimension(mu, log_var, free_bits_delta)
+        else:
+            kl_loss = 0.5 * torch.mean(torch.sum(mu.pow(2) + log_var.exp() - 1 - log_var, dim=1))
+            raw_kl_loss = kl_loss
+            kl_per_dim_mean = kl_loss / latent_dim
         
         # Compute effective beta (cyclical annealing if enabled)
         if use_cyclical_beta and current_epoch is not None:

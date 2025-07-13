@@ -26,6 +26,21 @@ from utils.model_utils import (
 from utils.wandb_logger import init_wandb_for_mode, get_wandb_logger
 from utils.evaluation_utils import run_quick_evaluation, should_run_evaluation, log_evaluation_to_wandb
 
+
+def build_model(device, wandb_logger=None, global_step=None):
+    """Build and return LatentProgramNetwork with architecture visualization."""
+    from utils.model_architecture_viz import generate_architecture_visualizations, log_model_summary
+    
+    model = LatentProgramNetwork().to(device)
+    
+    # Generate architecture visualizations and upload to wandb
+    if wandb_logger:
+        print("🏗️ Generating model architecture visualizations...")
+        generate_architecture_visualizations(model, wandb_logger, device, global_step)
+        log_model_summary(model, wandb_logger, global_step)
+    
+    return model
+
 ##############################
 # Latent Data Collection Functions
 ##############################
@@ -637,7 +652,7 @@ def main_training(file_store_name):
 
     logger.info("Initializing model...")
     print("Initializing model...")
-    model = LatentProgramNetwork().to(device)
+    model = build_model(device, wandb_logger, global_step=0)
     logger.info(f"Model initialized: {type(model)}")
 
     optimizer_weight_decay = training_settings.get('optimizer_weight_decay', 0.0)

@@ -275,7 +275,7 @@ def save_encoder_checkpoint(model: nn.Module, encoder_idx: int, run_dir: str) ->
 
 
 def load_encoder_checkpoint(model: nn.Module, encoder_idx: int, run_dir: str, device: str = 'cuda') -> None:
-    """Load individual encoder checkpoint."""
+    """Load individual encoder checkpoint with architecture mismatch handling."""
     checkpoint_path = os.path.join(run_dir, f'encoder_{encoder_idx}.ckpt')
     
     if not os.path.exists(checkpoint_path):
@@ -284,13 +284,23 @@ def load_encoder_checkpoint(model: nn.Module, encoder_idx: int, run_dir: str, de
     encoder_state = torch.load(checkpoint_path, map_location=device)
     
     if hasattr(model, 'multi_encoder') and hasattr(model.multi_encoder, 'encoders'):
-        model.multi_encoder.encoders[encoder_idx].load_state_dict(encoder_state)
+        try:
+            model.multi_encoder.encoders[encoder_idx].load_state_dict(encoder_state, strict=True)
+        except RuntimeError as e:
+            if "size mismatch" in str(e) or "Missing key(s)" in str(e):
+                print(f"⚠ Architecture mismatch for encoder {encoder_idx}: {str(e)[:100]}...")
+                print(f"⚠ This indicates config was changed between Phase A and Phase B")
+                raise RuntimeError(f"Architecture mismatch when loading encoder {encoder_idx}. "
+                                 f"This suggests the model configuration changed between phases. "
+                                 f"Ensure the same frozen config is used for all phases.")
+            else:
+                raise e
     else:
         raise ValueError("Model does not have multi-encoder structure")
 
 
 def load_all_encoder_checkpoints(model: nn.Module, run_dir: str, device: str = 'cuda') -> None:
-    """Load all encoder checkpoints for Phase B and C."""
+    """Load all encoder checkpoints for Phase B and C with architecture mismatch handling."""
     if not hasattr(model, 'multi_encoder') or not hasattr(model.multi_encoder, 'encoders'):
         raise ValueError("Model does not have multi-encoder structure")
     
@@ -302,6 +312,16 @@ def load_all_encoder_checkpoints(model: nn.Module, run_dir: str, device: str = '
             print(f"✓ Loaded encoder {encoder_idx} checkpoint")
         except FileNotFoundError:
             print(f"⚠ Encoder {encoder_idx} checkpoint not found - will start from random initialization")
+        except RuntimeError as e:
+            if "Architecture mismatch" in str(e):
+                # This is our custom architecture mismatch error
+                print(f"✗ Failed to load encoder {encoder_idx}: Architecture mismatch detected")
+                print(f"✗ This indicates the model configuration changed between phases")
+                raise e  # Re-raise to stop execution and force user to fix config
+            else:
+                # Other runtime errors
+                print(f"⚠ Failed to load encoder {encoder_idx}: {e}")
+                raise e
 
 
 def save_decoder_checkpoint(model: nn.Module, run_dir: str) -> str:
@@ -352,7 +372,7 @@ def save_independent_decoder_checkpoint(model: nn.Module, encoder_idx: int, run_
 
 
 def load_independent_decoder_checkpoint(model: nn.Module, encoder_idx: int, run_dir: str, device: str = 'cuda') -> None:
-    """Load individual independent decoder checkpoint."""
+    """Load individual independent decoder checkpoint with architecture mismatch handling."""
     checkpoint_path = os.path.join(run_dir, f'independent_decoder_{encoder_idx}.ckpt')
     
     if not os.path.exists(checkpoint_path):
@@ -361,7 +381,20 @@ def load_independent_decoder_checkpoint(model: nn.Module, encoder_idx: int, run_
     decoder_state = torch.load(checkpoint_path, map_location=device)
     
     if hasattr(model, 'multi_encoder') and hasattr(model.multi_encoder, 'independent_decoders'):
-        model.multi_encoder.independent_decoders[encoder_idx].load_state_dict(decoder_state)
+        try:
+            model.multi_encoder.independent_decoders[encoder_idx].load_state_dict(decoder_state, strict=True)
+        except RuntimeError as e:
+            if "size mismatch" in str(e) or "Missing key(s)" in str(e):
+                # Architecture mismatch - this happens when config changes between phases
+                print(f"⚠ Architecture mismatch for independent decoder {encoder_idx}: {str(e)[:100]}...")
+                print(f"⚠ This indicates config was changed between Phase A and Phase B")
+                print(f"⚠ Skipping checkpoint loading - decoder will use random initialization")
+                raise RuntimeError(f"Architecture mismatch when loading independent decoder {encoder_idx}. "
+                                 f"This suggests the model configuration changed between phases. "
+                                 f"Ensure the same frozen config is used for all phases.")
+            else:
+                # Re-raise other RuntimeErrors
+                raise e
     else:
         raise ValueError("Model does not have independent decoders")
 
@@ -382,7 +415,7 @@ def save_all_independent_decoder_checkpoints(model: nn.Module, run_dir: str) -> 
 
 
 def load_all_independent_decoder_checkpoints(model: nn.Module, run_dir: str, device: str = 'cuda') -> None:
-    """Load all independent decoder checkpoints."""
+    """Load all independent decoder checkpoints with architecture mismatch handling."""
     if not hasattr(model, 'multi_encoder') or not hasattr(model.multi_encoder, 'independent_decoders'):
         raise ValueError("Model does not have independent decoders")
     
@@ -394,6 +427,16 @@ def load_all_independent_decoder_checkpoints(model: nn.Module, run_dir: str, dev
             print(f"✓ Loaded independent decoder {encoder_idx} checkpoint")
         except FileNotFoundError:
             print(f"⚠ Independent decoder {encoder_idx} checkpoint not found - will start from random initialization")
+        except RuntimeError as e:
+            if "Architecture mismatch" in str(e):
+                # This is our custom architecture mismatch error
+                print(f"✗ Failed to load independent decoder {encoder_idx}: Architecture mismatch detected")
+                print(f"✗ This indicates the model configuration changed between phases")
+                raise e  # Re-raise to stop execution and force user to fix config
+            else:
+                # Other runtime errors
+                print(f"⚠ Failed to load independent decoder {encoder_idx}: {e}")
+                raise e
 
 
 def initialize_shared_decoder_from_independent_decoders(model: nn.Module, run_dir: str, device: str = 'cuda') -> None:

@@ -4,18 +4,22 @@
       "00d62c1b",
       "1cf80156",
       "25d8a9c8",
-      "0a938d79"
+      "0a938d79",
+      "0b148d64",
+      "ff805c23",
+      "ff28f65a",
+      "fcc82909"
     ],
     "training_seed": 42,
     "eval_seed": 1,
-    "n": 10,
+    "n": 200,
     "run_base_dir": "runs_specialist"
   },
   "evaluation_settings": {
-    "eval_keys": ["00d62c1b","1cf80156"],
-    "other_keys":["25d8a9c8", "0a938d79"],
+    "eval_keys": ["00d62c1b","1cf80156","25d8a9c8", "0a938d79"],
+    "other_keys":[],
     "eval_n_samples": 2,
-    "eval_n_queries": 10,
+    "eval_n_queries": 100,
     "eval_epoch": "phase_b_final",
     "visualize_n_values": 4,
     "_comment_trajectory_decoder": "trajectory_decoder_type: 'shared' uses shared decoder for all reconstructions (good for PoE analysis), 'independent' uses each encoder's independent decoder (good for specialization analysis)",
@@ -46,15 +50,15 @@
     }
   },
   "model_architecture": {
-    "num_encoders": 4,
-    "encoder_layers": 6,
-    "decoder_layers": 1,
+    "num_encoders": 2,
+    "encoder_layers": 24,
+    "decoder_layers": 2,
     "encoder_heads": 6,
     "decoder_heads": 6,
     "encoder_hidden_dim": 48,
     "decoder_hidden_dim": 24,
-    "latent_dim": 16,
-    "dropout": 1e-06,
+    "latent_dim": 256,
+    "dropout": 0.2,
     "max_length": 902,
     "encoder_max_length": 1805,
     "decoder_max_length": 902,
@@ -66,7 +70,7 @@
     "gradient_accumulation_steps": 2,
     "learning_rate": 0.0004,
     "optimizer_weight_decay": 5e-03,
-    "beta": 0.01,
+    "beta": 0.1,
     "use_mixed_precision": true,
     "save_checkpoint_interval": 1,
     "learning_rate_scheduler": {
@@ -95,13 +99,13 @@
   },
   "specialist_training": {
     "phase_a": {
-      "epochs": 80,
+      "epochs": 60,
       "description": "Encoder pre-training phase",
-      "anti_batch_size": 0.5,
+      "anti_batch_size": 1,
       "anti_batch_description": "Proportion (0-1) of anti-samples (from other encoders) mixed into each encoder's training batch to encourage specialization",
       "anti_batch_lambda": 0.01,
       "anti_batch_lambda_description": "Weight for KL regularization on anti-samples (should be ≈ β)",
-      "beta_warmup_epochs": 5,
+      "beta_warmup_epochs": 10,
       "beta_warmup_description": "Epochs to warm up β from 0 to target value to prevent posterior collapse",
       "cross_pair_loss": {
         "enabled": true,
@@ -109,13 +113,13 @@
       },
       "enhanced_training": {
         "use_cyclical_beta": true,
-        "beta_cycle_length": 4,
+        "beta_cycle_length": 6,
         "use_free_bits": true,
         "free_bits_delta": 0.07,
         "use_dynamic_lambda": true,
-        "lambda_high_multiplier": 3.0,
+        "lambda_high_multiplier": 6.0,
         "use_contrastive_margin": true,
-        "margin_tau": 1.5,
+        "margin_tau": 2.0,
         "debug_kl_metrics": true
         }
     },

@@ -16,6 +16,7 @@ from sklearn.manifold import TSNE
 import pickle
 from utils.settings_manager import settings
 import matplotlib.patches as mpatches
+import tempfile
 
 # Unified color palette for latent space visualizations
 COLOR_PALETTE = {
@@ -1871,3 +1872,229 @@ def plot_encoder_influence_analysis(eval_results, save_dir=None):
                 print(f"    Encoder {enc_idx}: {count}/{len(influence_metrics)} samples ({percentage:.1f}%)")
     else:
         plt.show()
+
+##############################
+# PER-DIMENSION KL DIVERGENCE ANALYSIS
+##############################
+
+def generate_per_dimension_kl_plot(model, dataloader, device, epoch, encoder_idx=None, wandb_logger=None, global_step=None):
+    """
+    Generate per-dimension KL divergence bar plot showing KL divergence for each latent dimension.
+    
+    KL divergence per dimension: 0.5·(μ² + σ² – 1 – log σ²)
+    where σ² = exp(log_var), so log σ² = log_var
+    
+    Args:
+        model: Current model state
+        dataloader: Data loader with samples
+        device: Device to run on
+        epoch: Current epoch
+        encoder_idx: Encoder index (None for PoE)
+        wandb_logger: WandB logger instance
+        global_step: Global training step
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import tempfile
+    import os
+    import torch
+    
+    model.eval()
+    
+    # Collect latent statistics from multiple batches
+    all_mus = []
+    all_log_vars = []
+    
+    with torch.no_grad():
+        # Collect latent statistics from batches (limit to avoid memory issues)
+        for batch_idx, batch_data in enumerate(dataloader):
+            if batch_idx >= 10:  # Limit to 10 batches for efficiency
+                break
+                
+            # Handle different dataloader formats
+            if len(batch_data) == 2:
+                input_seq, target_seq = batch_data
+                input_seq = input_seq.to(device)
+                target_seq = target_seq.to(device)
+            elif len(batch_data) == 3:
+                # Mixed domains dataloader format
+                input_seq, target_seq, _ = batch_data
+                input_seq = input_seq.to(device)
+                target_seq = target_seq.to(device)
+            else:
+                continue
+            
+            # Get latent distributions
+            if encoder_idx is not None:
+                # Specific encoder
+                if hasattr(model, 'multi_encoder') and hasattr(model.multi_encoder, 'encoders'):
+                    mu, log_var = model.multi_encoder.encoders[encoder_idx](input_seq, target_seq)
+                else:
+                    # Single encoder model
+                    mu, log_var = model.encoder(input_seq, target_seq)
+            else:
+                # PoE or single encoder
+                if hasattr(model, 'multi_encoder') and model.multi_encoder and hasattr(model.multi_encoder, 'encoders'):
+                    # Multi-encoder: use PoE
+                    _, mu, log_var = model(input_seq, target_seq)
+                else:
+                    # Single encoder
+                    mu, log_var = model.encoder(input_seq, target_seq)
+            
+            all_mus.append(mu.cpu().numpy())
+            all_log_vars.append(log_var.cpu().numpy())
+    
+    if not all_mus:
+        print("No latent data collected for KL divergence plot")
+        return
+    
+    # Concatenate all samples: shape (total_samples, latent_dim)
+    all_mus = np.concatenate(all_mus, axis=0)
+    all_log_vars = np.concatenate(all_log_vars, axis=0)
+    
+    # Calculate per-dimension KL divergence (SAME as apply_free_bits_per_dimension)
+    # KL = 0.5·(μ² + σ² – 1 – log σ²)
+    # where σ² = exp(log_var), so log σ² = log_var
+    mu_squared = all_mus ** 2
+    sigma_squared = np.exp(all_log_vars)
+    log_sigma_squared = all_log_vars
+    
+    # Per-dimension KL for each sample [samples, latent_dim]
+    kl_per_sample_per_dim = 0.5 * (mu_squared + sigma_squared - 1 - log_sigma_squared)
+    
+    # Average over samples to get per-dimension KL [latent_dim]
+    kl_per_dim_raw = np.mean(kl_per_sample_per_dim, axis=0)
+    
+    # Also show what free-bits clamping would do (δ = 0.07 typically)
+    delta_per_dim = 0.07
+    kl_per_dim_clamped = np.maximum(kl_per_dim_raw, delta_per_dim)
+    
+    # Use raw values for the main plot, but show both in statistics
+    kl_per_dim = kl_per_dim_raw
+    
+    latent_dim = len(kl_per_dim)
+    
+    # Create the bar plot
+    fig, ax = plt.subplots(figsize=(max(8, latent_dim * 0.3), 6))
+    
+    # Create bars
+    dimensions = np.arange(latent_dim)
+    bars = ax.bar(dimensions, kl_per_dim, alpha=0.7, color='steelblue', edgecolor='navy', linewidth=1)
+    
+    # Customize the plot
+    ax.set_xlabel('Latent Dimension', fontsize=12)
+    ax.set_ylabel('KL Divergence per Dimension', fontsize=12)
+    
+    # Set title based on encoder
+    if encoder_idx is not None:
+        title = f'Per-Dimension KL Divergence - Encoder {encoder_idx}\nEpoch {epoch}'
+    else:
+        title = f'Per-Dimension KL Divergence - PoE\nEpoch {epoch}'
+    
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    
+    # Add value labels on bars (for reasonable number of dimensions)
+    if latent_dim <= 20:
+        for i, bar in enumerate(bars):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height + 0.001,
+                   f'{height:.3f}', ha='center', va='bottom', fontsize=9)
+    
+    # Add statistics (RAW vs CLAMPED to detect collapse)
+    mean_kl_raw = np.mean(kl_per_dim_raw)
+    mean_kl_clamped = np.mean(kl_per_dim_clamped)
+    std_kl = np.std(kl_per_dim_raw)
+    total_kl_raw = np.sum(kl_per_dim_raw)
+    total_kl_clamped = np.sum(kl_per_dim_clamped)
+    max_kl = np.max(kl_per_dim_raw)
+    min_kl = np.min(kl_per_dim_raw)
+    dims_collapsed = np.sum(kl_per_dim_raw < delta_per_dim)
+    
+    stats_text = f'RAW Statistics:\nMean: {mean_kl_raw:.3f}\nStd: {std_kl:.3f}\nTotal: {total_kl_raw:.3f}\nMax: {max_kl:.3f}\nMin: {min_kl:.3f}\n\nFree-bits (δ={delta_per_dim}):\nClamped Total: {total_kl_clamped:.3f}\nCollapsed Dims: {dims_collapsed}/{latent_dim}\nSamples: {all_mus.shape[0]}'
+    
+    ax.text(0.98, 0.98, stats_text, transform=ax.transAxes, 
+           verticalalignment='top', horizontalalignment='right',
+           bbox=dict(boxstyle='round,pad=0.5', facecolor='white', alpha=0.8),
+           fontsize=10)
+    
+    # Add horizontal lines for monitoring
+    ax.axhline(y=mean_kl_raw, color='blue', linestyle='--', alpha=0.8, linewidth=2, label=f'Mean Raw: {mean_kl_raw:.3f}')
+    ax.axhline(y=delta_per_dim, color='red', linestyle='-', alpha=0.8, linewidth=2, label=f'Free-bits δ: {delta_per_dim:.3f}')
+    ax.legend(loc='upper left')
+    
+    # Grid and formatting
+    ax.grid(True, alpha=0.3, axis='y')
+    ax.set_xlim(-0.5, latent_dim - 0.5)
+    ax.set_ylim(0, max(kl_per_dim) * 1.1)
+    
+    # Set x-axis ticks
+    if latent_dim <= 30:
+        ax.set_xticks(dimensions)
+        ax.set_xticklabels([f'D{i}' for i in dimensions], rotation=45 if latent_dim > 15 else 0)
+    else:
+        # For high-dimensional spaces, use fewer ticks
+        step = max(1, latent_dim // 10)
+        tick_positions = dimensions[::step]
+        ax.set_xticks(tick_positions)
+        ax.set_xticklabels([f'D{i}' for i in tick_positions])
+    
+    plt.tight_layout()
+    
+    # Save and log to wandb
+    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
+        plt.savefig(tmp_file.name, dpi=150, bbox_inches='tight')
+        temp_plot_path = tmp_file.name
+    plt.close()
+    
+    if wandb_logger and global_step is not None:
+        try:
+            import wandb
+            
+            # Create wandb key based on context
+            if encoder_idx is not None:
+                wandb_key = f'kl_analysis/per_dimension_kl_encoder_{encoder_idx}'
+                metrics_key = f'kl_analysis/encoder_{encoder_idx}'
+            else:
+                wandb_key = f'kl_analysis/per_dimension_kl_poe'
+                metrics_key = f'kl_analysis/poe'
+            
+            # Log plot and metrics (RAW + collapse detection)
+            log_dict = {
+                wandb_key: wandb.Image(temp_plot_path),
+                f'{metrics_key}_mean_kl_per_dim_raw': mean_kl_raw,
+                f'{metrics_key}_mean_kl_per_dim_clamped': mean_kl_clamped,
+                f'{metrics_key}_std_kl_per_dim': std_kl,
+                f'{metrics_key}_total_kl_raw': total_kl_raw,
+                f'{metrics_key}_total_kl_clamped': total_kl_clamped,
+                f'{metrics_key}_max_kl_per_dim': max_kl,
+                f'{metrics_key}_min_kl_per_dim': min_kl,
+                f'{metrics_key}_collapsed_dimensions': dims_collapsed,
+                f'{metrics_key}_collapse_fraction': dims_collapsed / latent_dim,
+                f'{metrics_key}_free_bits_delta': delta_per_dim,
+                f'{metrics_key}_latent_dimension': latent_dim,
+                f'{metrics_key}_samples_analyzed': all_mus.shape[0]
+            }
+            
+            wandb_logger._safe_log(log_dict, step_hint=global_step)
+            
+            print(f"✓ Per-dimension KL plot logged to WandB at step {global_step}")
+            print(f"  - Encoder: {'PoE' if encoder_idx is None else encoder_idx}")
+            print(f"  - Latent dimension: {latent_dim}")
+            print(f"  - Mean KL per dimension (RAW): {mean_kl_raw:.3f}")
+            print(f"  - Collapsed dimensions: {dims_collapsed}/{latent_dim} ({dims_collapsed/latent_dim:.1%})")
+            print(f"  - Samples analyzed: {all_mus.shape[0]}")
+            
+        except Exception as e:
+            print(f"⚠ Failed to log per-dimension KL plot to WandB: {e}")
+        finally:
+            os.unlink(temp_plot_path)
+    else:
+        print(f"✓ Per-dimension KL plot generated for epoch {epoch}")
+        print(f"  - Encoder: {'PoE' if encoder_idx is None else encoder_idx}")
+        print(f"  - Latent dimension: {latent_dim}")
+        print(f"  - Mean KL per dimension (RAW): {mean_kl_raw:.3f}")
+        print(f"  - Collapsed dimensions: {dims_collapsed}/{latent_dim} ({dims_collapsed/latent_dim:.1%})")
+        print(f"  - Samples analyzed: {all_mus.shape[0]}")
+        os.unlink(temp_plot_path)
+    
+    model.train()

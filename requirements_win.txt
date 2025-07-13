@@ -10,3 +10,4 @@ tabulate
 seaborn
 wandb
 scipy
+torchviz

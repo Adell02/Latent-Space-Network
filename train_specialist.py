@@ -115,6 +115,7 @@ from utils.model_utils import (
 
 from utils.wandb_logger import init_wandb_for_mode, get_wandb_logger
 from utils.evaluation_utils import run_quick_evaluation, should_run_evaluation, log_evaluation_to_wandb
+from utils.visualizers import generate_per_dimension_kl_plot
 
 
 def generate_specialist_reconstruction_plot(model, dataloader, device, epoch, phase, encoder_idx=None, 
@@ -656,9 +657,19 @@ def _create_accuracy_matrix(model, eval_keys, num_encoders, device, wandb_logger
             os.unlink(temp_plot_path)
 
 
-def build_model(device):
-    """Build and return LatentProgramNetwork."""
-    return LatentProgramNetwork().to(device)
+def build_model(device, wandb_logger=None, global_step=None):
+    """Build and return LatentProgramNetwork with architecture visualization."""
+    from utils.model_architecture_viz import generate_architecture_visualizations, log_model_summary
+    
+    model = LatentProgramNetwork().to(device)
+    
+    # Generate architecture visualizations and upload to wandb
+    if wandb_logger:
+        print("🏗️ Generating model architecture visualizations...")
+        generate_architecture_visualizations(model, wandb_logger, device, global_step)
+        log_model_summary(model, wandb_logger, global_step)
+    
+    return model
 
 
 def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_logger, run_dir, phase_epochs=None):
@@ -1003,6 +1014,14 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                     except Exception as hist_error:
                         logger.warning(f"Latent histogram generation failed for Encoder {encoder_idx} at epoch {epoch + 1}: {hist_error}")
                 
+                # Generate per-dimension KL divergence plots at evaluation intervals
+                if should_run_evaluation(epoch + 1, eval_interval, phase_epochs):
+                    try:
+                        generate_per_dimension_kl_plot(model, dataloader, device, epoch + 1, encoder_idx=encoder_idx, wandb_logger=wandb_logger, global_step=global_step)
+                        print(f"✓ Per-dimension KL plot logged for Encoder {encoder_idx} at epoch {epoch + 1}")
+                    except Exception as kl_error:
+                        logger.warning(f"Per-dimension KL plot generation failed for Encoder {encoder_idx} at epoch {epoch + 1}: {kl_error}")
+                
                 # Basic visualizations are handled by the reconstruction plots above
             
             # Generate reconstruction plot at evaluation intervals            
@@ -1321,6 +1340,14 @@ def train_phase_b_decoder(model, encoder_datasets, device, logger, wandb_logger,
                 except Exception as eval_error:
                     logger.warning(f"PoE evaluation failed at Phase B epoch {epoch + 1}: {eval_error}")
             
+            # Generate per-dimension KL divergence plots at evaluation intervals for PoE
+            if should_run_evaluation(epoch + 1, eval_interval, phase_epochs):
+                try:
+                    generate_per_dimension_kl_plot(model, mixed_dataloader, device, epoch + 1, encoder_idx=None, wandb_logger=wandb_logger, global_step=global_step)
+                    print(f"✓ Per-dimension KL plot logged for PoE at Phase B epoch {epoch + 1}")
+                except Exception as kl_error:
+                    logger.warning(f"Per-dimension KL plot generation failed for PoE at Phase B epoch {epoch + 1}: {kl_error}")
+            
             # Basic visualizations are handled by the reconstruction plots below
         
         # Save checkpoint periodically
@@ -1488,8 +1515,53 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
     # Create run directory and setup logging
     run_dir = create_run_directory(file_store_name)
     logger = setup_logging(run_dir)
+    
+    # ========================================
+    # FREEZE CONFIGURATION FOR CONSISTENCY
+    # ========================================
+    frozen_config_path = os.path.join(run_dir, 'frozen_config.json')
+    
+    if resume_from_phase and os.path.exists(frozen_config_path):
+        # Resuming: Load frozen config from run directory
+        print(f"🔄 Resuming from phase {resume_from_phase}: Loading frozen config from run directory")
+        logger.info(f"Resuming training - loading frozen config from {frozen_config_path}")
+        
+        with open(frozen_config_path, 'r') as f:
+            frozen_config = json.load(f)
+        
+        # Update settings with frozen config
+        settings.set_settings(frozen_config)
+        
+        # Re-extract settings after loading frozen config
+        data_settings = settings.get_data_settings()
+        model_architecture = settings.get_model_architecture()
+        training_settings = settings.get_training_settings()
+        latent_optimization = settings.get_latent_optimization()
+        repulsion_loss_settings = settings.get_repulsion_loss_settings()
+        wandb_settings = settings.get_wandb_settings()
+        specialist_settings = settings.get_specialist_training_settings()
+        
+        # Update derived variables
+        TRAINING_KEYS = data_settings.get('training_keys', [data_settings.get('key', None)])
+        NUM_ENCODERS = model_architecture.get('num_encoders', 1)
+        N_EXAMPLES_PER_TASK = data_settings['n']
+        
+        print(f"✓ Loaded frozen config: {NUM_ENCODERS} encoders, decoder_hidden_dim={model_architecture.get('decoder_hidden_dim')}")
+        
+    else:
+        # Starting fresh: Save current config as frozen config
+        print("💾 Starting fresh training: Freezing current config in run directory")
+        logger.info(f"Saving frozen config to {frozen_config_path}")
+        
+        current_config = settings.get_settings()
+        with open(frozen_config_path, 'w') as f:
+            json.dump(current_config, f, indent=2)
+        
+        print(f"✓ Frozen config saved: {NUM_ENCODERS} encoders, decoder_hidden_dim={model_architecture.get('decoder_hidden_dim')}")
+    
     logger.info(f"Starting specialist training for ARC problems: {TRAINING_KEYS}")
-    logger.info(f"Full settings dump: {json.dumps(settings.get_settings(), indent=2)}")
+    logger.info(f"Using frozen config - Model architecture: encoders={NUM_ENCODERS}, decoder_hidden_dim={model_architecture.get('decoder_hidden_dim')}, decoder_layers={model_architecture.get('decoder_layers')}")
+    logger.info(f"Full frozen settings dump: {json.dumps(settings.get_settings(), indent=2)}")
     print("Run directory created:", run_dir)
     
     # Initialize wandb
@@ -1528,7 +1600,7 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
     
     # Initialize model first so param_info is available
     logger.info("Initializing multi-encoder model...")
-    model = build_model(device)
+    model = build_model(device, wandb_logger, global_step=0)
     param_info = count_model_parameters(model)
     logger.info(f"Model initialized with {param_info['total_params']:,} parameters")
     
