@@ -5,193 +5,292 @@ Model Architecture Visualization Utility
 Generates torchviz diagrams for the model architecture and uploads to wandb.
 """
 
-import torch
-import tempfile
 import os
+import tempfile
+import torch
+from pathlib import Path
 
-def generate_architecture_visualizations(model, wandb_logger=None, device='cuda', global_step=None):
+
+def create_simple_architecture_diagram(model, device='cpu'):
+    """Create a simple, clean architecture diagram showing model structure and parameters."""
+    
+    # Get model settings
+    from utils.settings_manager import settings
+    model_arch = settings.get_model_architecture()
+    
+    # Determine model type
+    is_multi_encoder = hasattr(model, 'is_multi_encoder') and model.is_multi_encoder
+    is_actually_single_encoder = hasattr(model, 'is_actually_single_encoder') and model.is_actually_single_encoder
+    is_vq_vae = hasattr(model, 'is_using_vq_vae') and model.is_using_vq_vae()
+    num_encoders = getattr(model, 'num_encoders', 1)
+    
+    # Use the correct logic for display
+    display_as_multi_encoder = is_multi_encoder and not is_actually_single_encoder
+    
+    # Get architecture parameters
+    latent_dim = model_arch.get('latent_dim', 128)
+    encoder_hidden_dim = model_arch.get('encoder_hidden_dim', 96)
+    decoder_hidden_dim = model_arch.get('decoder_hidden_dim', 96)
+    encoder_layers = model_arch.get('encoder_layers', 2)
+    decoder_layers = model_arch.get('decoder_layers', 2)
+    encoder_heads = model_arch.get('encoder_heads', 6)
+    decoder_heads = model_arch.get('decoder_heads', 6)
+    dropout = model_arch.get('dropout', 1e-6)
+    
+    # Create Mermaid diagram
+    mermaid_code = f"""
+graph TD
+    %% Input Layer
+    Input["Input Sequence<br/>Shape: [B, 902]<br/>Grid: [0-9], Shape: [0-30]"] 
+    
+    %% Encoder Section
     """
-    Generate torchviz architecture visualization for the model.
     
-    Args:
-        model: LatentProgramNetwork instance (single or multi-encoder)
-        wandb_logger: WandB logger instance (optional)
-        device: Device to run the model on
-        global_step: Current training step for wandb logging
+    if display_as_multi_encoder:
+        mermaid_code += f"""
+    subgraph "Multi-Encoder ({num_encoders} Encoders)"
+        """
+        for i in range(num_encoders):
+            mermaid_code += f"""
+        Enc{i}["Encoder {i}<br/>Layers: {encoder_layers}<br/>Hidden: {encoder_hidden_dim}<br/>Heads: {encoder_heads}<br/>Dropout: {dropout:.1e}"]
+        """
+        mermaid_code += """
+    end
+    
+    %% PoE Fusion
+    PoE["Product of Experts<br/>Gaussian Fusion<br/>mu*, sigma*"]
     """
-    try:
-        from torchviz import make_dot
-        print("✓ torchviz available - generating architecture visualization...")
-    except ImportError:
-        print("⚠ torchviz not available - skipping architecture visualization")
-        print("  Install with: pip install torchviz")
-        return
+        
+        # Connect encoders to PoE
+        for i in range(num_encoders):
+            mermaid_code += f"""
+    Enc{i} --> PoE
+    """
+    else:
+        mermaid_code += f"""
+    subgraph "Single Encoder"
+        Enc0["Transformer Encoder<br/>Layers: {encoder_layers}<br/>Hidden: {encoder_hidden_dim}<br/>Heads: {encoder_heads}<br/>Dropout: {dropout:.1e}"]
+    end
+    """
     
-    model.eval()
+    # Latent Space
+    if is_vq_vae:
+        # Get VQ-VAE settings
+        vq_settings = model_arch.get('vq_vae', {})
+        num_embeddings = vq_settings.get('num_embeddings', 512)
+        commitment_cost = vq_settings.get('commitment_cost', 0.25)
+        
+        mermaid_code += f"""
     
-    try:
-        # Enable gradient computation for better graph tracing
-        model.train()  # Enable gradients
+    %% VQ-VAE Latent Space
+    subgraph "VQ-VAE Latent Space"
+        VQLatent["Discrete Latent<br/>Codebook: {num_embeddings} embeddings<br/>Dim: {latent_dim}<br/>Commitment: {commitment_cost}"]
+    end
+    """
+    else:
+        mermaid_code += f"""
+    
+    %% VAE Latent Space
+    subgraph "VAE Latent Space"
+        VAELatent["Continuous Latent<br/>Dim: {latent_dim}<br/>mu, sigma^2 (Gaussian)<br/>KL Regularization"]
+    end
+    """
+    
+    # Decoder Section
+    mermaid_code += f"""
+    
+    %% Decoder Section
+    subgraph "Transformer Decoder"
+        Dec["Decoder<br/>Layers: {decoder_layers}<br/>Hidden: {decoder_hidden_dim}<br/>Heads: {decoder_heads}<br/>Dropout: {dropout:.1e}"]
+    end
+    
+    %% Output Layer
+    subgraph "Output Predictions"
+        ShapeOut["Shape Output<br/>Linear(hidden -> 31)<br/>Softmax over [0-30]"]
+        GridOut["Grid Output<br/>Linear(hidden -> 10)<br/>Softmax over [0-9]"]
+    end
+    
+    %% Final Output
+    Output["Final Output<br/>Shape: [B, 2] + [B, 900]<br/>Cross-entropy Loss"]
+    
+    %% Connections
+    Input --> Enc0
+    """
+    
+    # Connect encoder(s) to latent space
+    if display_as_multi_encoder:
+        # Only add connections for encoders that actually exist
+        for i in range(1, num_encoders):
+            mermaid_code += f"""
+    Input --> Enc{i}
+    """
         
-        # Create sample inputs in proper ARC format
-        batch_size = 1
-        seq_len = 902  # Standard sequence length
-        
-        # Generate proper ARC-formatted sequences directly (no in-place operations)
-        # Grid tokens (0-899): discrete values 0-9 for pixel colors
-        # Shape tokens (900-901): discrete values 0-30 for dimensions
-        
-        # Create grid data
-        grid_data = torch.randint(0, 10, (batch_size, 900), device=device, dtype=torch.float32)
-        shape_data = torch.tensor([[5, 5]], device=device, dtype=torch.float32)
-        
-        # Concatenate to form complete sequences
-        input_seq = torch.cat([grid_data, shape_data], dim=1)
-        target_seq = torch.cat([grid_data, shape_data], dim=1)
-        
-        # Enable gradients for proper tracing
-        input_seq.requires_grad_(True)
-        target_seq.requires_grad_(True)
-        
-        # Forward pass through the model with gradient computation enabled
-        if hasattr(model, 'multi_encoder') and model.num_encoders > 1:
-            # Multi-encoder model - trace through more components
-            print(f"  Generating multi-encoder architecture diagram ({model.num_encoders} encoders)...")
-            
-            # Get individual encoder outputs for better tracing
-            individual_mus = []
-            individual_logvars = []
-            
-            for i in range(model.num_encoders):
-                mu_i, logvar_i = model.multi_encoder.encoders[i](input_seq, target_seq)
-                individual_mus.append(mu_i)
-                individual_logvars.append(logvar_i)
-            
-            # PoE fusion
-            mu_stack = torch.stack(individual_mus)
-            logvar_stack = torch.stack(individual_logvars)
-            
-            # Get final model output
-            (shape_logits, grid_logits), mu, logvar = model(input_seq, target_seq)
-            
-            # Create comprehensive output that traces through all components
-            output = torch.cat([
-                shape_logits.flatten(),
-                grid_logits.flatten(),
-                mu.flatten(),
-                logvar.flatten(),
-                torch.stack(individual_mus).flatten(),
-                torch.stack(individual_logvars).flatten()
-            ])
+        if is_vq_vae:
+            mermaid_code += """
+    PoE --> VQLatent
+    VQLatent --> Dec
+    """
         else:
-            # Single encoder model
-            print("  Generating single encoder architecture diagram...")
+            mermaid_code += """
+    PoE --> VAELatent
+    VAELatent --> Dec
+    """
+    else:
+        if is_vq_vae:
+            mermaid_code += """
+    Enc0 --> VQLatent
+    VQLatent --> Dec
+    """
+        else:
+            mermaid_code += """
+    Enc0 --> VAELatent
+    VAELatent --> Dec
+    """
+    
+    # Final connections
+    mermaid_code += """
+    Dec --> ShapeOut
+    Dec --> GridOut
+    ShapeOut --> Output
+    GridOut --> Output
+    
+    %% Styling
+    classDef inputStyle fill:#e1f5fe,stroke:#01579b,stroke-width:2px
+    classDef encoderStyle fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    classDef latentStyle fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    classDef decoderStyle fill:#e8f5e8,stroke:#1b5e20,stroke-width:2px
+    classDef outputStyle fill:#ffebee,stroke:#b71c1c,stroke-width:2px
+    
+    class Input inputStyle
+    """
+    
+    # Apply styles
+    if display_as_multi_encoder:
+        for i in range(num_encoders):
+            mermaid_code += f"""
+    class Enc{i} encoderStyle
+    """
+        mermaid_code += """
+    class PoE encoderStyle
+    """
+    else:
+        mermaid_code += """
+    class Enc0 encoderStyle
+    """
+    
+    if is_vq_vae:
+        mermaid_code += """
+    class VQLatent latentStyle
+    """
+    else:
+        mermaid_code += """
+    class VAELatent latentStyle
+    """
+    
+    mermaid_code += """
+    class Dec decoderStyle
+    class ShapeOut outputStyle
+    class GridOut outputStyle
+    class Output outputStyle
+    """
+    
+    return mermaid_code.strip()
+
+
+def generate_architecture_visualizations(model, wandb_logger=None, device='cpu', global_step=0):
+    """Generate clean model architecture visualizations."""
+    print(f"🏗️ Generating clean architecture visualization...")
+    
+    try:
+        # Create simple architecture diagram
+        mermaid_code = create_simple_architecture_diagram(model, device)
+        
+        # Try to render diagram if create_diagram is available
+        try:
+            # This would use the create_diagram tool if available
+            print("Generated Mermaid diagram:")
+            print(mermaid_code)
+        except Exception as e:
+            print(f"Diagram rendering info: {e}")
+        
+        if wandb_logger:
+            # Log the diagram to wandb as HTML with Mermaid rendering
+            import wandb
+            mermaid_html = f"""
+            <div class="mermaid">
+                {mermaid_code}
+            </div>
+            <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+            <script>
+                mermaid.initialize({{startOnLoad: true}});
+            </script>
+            """
             
-            # Get intermediate encoder outputs for better tracing
-            if hasattr(model, 'multi_encoder'):
-                mu_enc, logvar_enc = model.multi_encoder.encoders[0](input_seq, target_seq)
-            else:
-                mu_enc, logvar_enc = model.encoder(input_seq, target_seq)
+            wandb_logger._safe_log({
+                'model_architecture/diagram': wandb.Html(mermaid_html),
+                'model_architecture/diagram_code': mermaid_code,
+                'model_architecture/step': global_step
+            }, step_hint=global_step)
             
-            # Get final model output
-            (shape_logits, grid_logits), mu, logvar = model(input_seq, target_seq)
-            
-            # Create comprehensive output that traces through encoder and decoder
-            output = torch.cat([
-                shape_logits.flatten(),
-                grid_logits.flatten(),
-                mu.flatten(),
-                logvar.flatten(),
-                mu_enc.flatten(),
-                logvar_enc.flatten()
-            ])
+            print(f"✓ Architecture diagram uploaded to WandB")
         
-        # Generate more detailed visualization
-        dot = make_dot(output, params=dict(model.named_parameters()),
-                      show_attrs=True, show_saved=True)
-        
-        # Improve visualization layout and readability
-        dot.attr(rankdir='TB', size='20,24')  # Even larger size for complex architecture
-        dot.attr('node', fontsize='7', style='filled', fillcolor='lightblue')
-        dot.attr('edge', fontsize='5')
-        
-        # Add graph title with model info
-        num_encoders = getattr(model, 'num_encoders', 1)
-        latent_dim = getattr(model, 'latent_dim', 'unknown')
-        is_vq_vae = hasattr(model, 'is_using_vq_vae') and model.is_using_vq_vae()
-        vq_status = " (VQ-VAE)" if is_vq_vae else " (VAE)"
-        dot.attr(label=f'Latent Program Network{vq_status}\\n{num_encoders} Encoder(s), Latent Dim: {latent_dim}')
-        dot.attr(fontsize='12')
-        
-        # Save diagram
-        viz_path = None
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
-            dot.format = 'png'
-            dot.render(tmp_file.name.replace('.png', ''), cleanup=True)
-            viz_path = tmp_file.name.replace('.png', '') + '.png'
-        
-        print(f"    ✓ Architecture visualization saved to {viz_path}")
-        
-        # Upload to wandb
-        if wandb_logger and viz_path and os.path.exists(viz_path):
-            try:
-                import wandb
-                
-                log_dict = {
-                    'architecture/model_diagram': wandb.Image(viz_path),
-                    'architecture/num_encoders': getattr(model, 'num_encoders', 1),
-                    'architecture/latent_dim': getattr(model, 'latent_dim', 'unknown'),
-                    'architecture/visualization_generated': True
-                }
-                
-                wandb_logger._safe_log(log_dict, step_hint=global_step or 0)
-                print("    ✓ Architecture diagram uploaded to wandb")
-                
-            except Exception as e:
-                print(f"    ⚠ Failed to upload to wandb: {e}")
-        
-        # Cleanup
-        if viz_path and os.path.exists(viz_path):
-            try:
-                os.unlink(viz_path)
-            except Exception as e:
-                print(f"    ⚠ Cleanup warning: {e}")
-        
-        model.train()
-        print("✓ Architecture visualization complete")
+        print(f"✓ Clean architecture visualization generated successfully")
         
     except Exception as e:
         print(f"⚠ Architecture visualization failed: {e}")
-        model.train()
+        import traceback
+        traceback.print_exc()
 
 
-def log_model_summary(model, wandb_logger=None, global_step=None):
-    """
-    Log a comprehensive model summary to wandb.
-    
-    Args:
-        model: LatentProgramNetwork instance
-        wandb_logger: WandB logger instance (optional)  
-        global_step: Current training step for wandb logging
-    """
+def log_model_summary(model, wandb_logger=None, global_step=0):
+    """Log model parameter summary."""
     if not wandb_logger:
         return
-    
+        
     try:
+        from utils.settings_manager import settings
+        model_arch = settings.get_model_architecture()
+        
         # Count parameters
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         
+        # Model info
+        is_multi_encoder = hasattr(model, 'is_multi_encoder') and model.is_multi_encoder
+        is_actually_single_encoder = hasattr(model, 'is_actually_single_encoder') and model.is_actually_single_encoder
+        is_vq_vae = hasattr(model, 'is_using_vq_vae') and model.is_using_vq_vae()
+        num_encoders = getattr(model, 'num_encoders', 1)
+        
+        # Create summary
         summary = {
-            'model_summary/total_parameters': total_params,
-            'model_summary/trainable_parameters': trainable_params,
-            'model_summary/num_encoders': getattr(model, 'num_encoders', 1),
-            'model_summary/latent_dimension': getattr(model, 'latent_dim', 'unknown'),
-            'model_summary/parameter_size_mb': total_params * 4 / (1024 * 1024)  # Assuming float32
+            'model_type': 'Multi-Encoder' if (is_multi_encoder and not is_actually_single_encoder) else 'Single-Encoder',
+            'latent_type': 'VQ-VAE' if is_vq_vae else 'VAE',
+            'num_encoders': num_encoders,
+            'total_parameters': total_params,
+            'trainable_parameters': trainable_params,
+            'latent_dim': model_arch.get('latent_dim', 128),
+            'encoder_layers': model_arch.get('encoder_layers', 2),
+            'decoder_layers': model_arch.get('decoder_layers', 2),
+            'encoder_hidden_dim': model_arch.get('encoder_hidden_dim', 96),
+            'decoder_hidden_dim': model_arch.get('decoder_hidden_dim', 96),
         }
         
-        wandb_logger._safe_log(summary, step_hint=global_step or 0)
-        print(f"✓ Model summary logged: {total_params:,} total parameters ({trainable_params:,} trainable)")
+        # Log to wandb
+        wandb_logger._safe_log({
+            'model_summary': summary,
+            'model_summary/step': global_step
+        }, step_hint=global_step)
+        
+        print(f"✓ Model summary logged: {total_params:,} parameters, {summary['model_type']} + {summary['latent_type']}")
         
     except Exception as e:
-        print(f"⚠ Failed to log model summary: {e}")
+        print(f"⚠ Model summary logging failed: {e}")
+
+
+# Remove the problematic import section
+def render_mermaid_diagram(mermaid_code):
+    """Simple function to output Mermaid diagram code."""
+    print("=== MERMAID DIAGRAM ===")
+    print(mermaid_code)
+    print("=== END DIAGRAM ===")
+    return mermaid_code
