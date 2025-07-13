@@ -13,6 +13,62 @@ ENHANCED MULTI-KEY EVALUATION SYSTEM:
 - Provides comprehensive evaluation while maintaining efficiency
 - Supports different eval_keys from training_keys for validation
 
+ENHANCED TRAINING MECHANISMS:
+This implementation includes advanced mechanisms to guarantee latent activity 
+and specialization based on latest research:
+
+1. FREE-BITS MECHANISM:
+   - Guarantees minimum KL divergence per dimension: kl_loss = clamp(kl_loss, min=δ)
+   - Prevents posterior collapse by enforcing δ ≈ 0.05-0.1 × latent_dim
+   - Keeps latents active even during early training phases
+   - Debug signal: KL/dim should stabilize ≥ 0.2 after warm-up
+
+2. CYCLICAL β-ANNEALING:
+   - Ramps β from 0 → β_max over K epochs, then resets (repeats)
+   - Typical params: β_max ≈ 1e-3, K = 3-5 epochs
+   - Prevents KL vanishing while allowing periodic high-capacity phases
+   - Balances reconstruction quality with latent utilization
+
+3. DYNAMIC λ SCHEDULING:
+   - Scales anti-batch penalty with current β value
+   - High-β phases: λ = 2-5 × β_max (strong specialization pressure)
+   - Low-β phases: λ = 0.01 (relaxed specialization)
+   - Maintains KL gap between in-slice and anti-batch samples
+
+4. CONTRASTIVE KL MARGIN:
+   - Enforces gap between in-slice and anti-batch KL losses
+   - gap = kl_in.detach() - kl_anti (should be >0 for specialization)
+   - anti_loss = ReLU(τ - gap) where τ ≈ 1-2 nats
+   - Only penalizes when encoder fails to maintain specialization gap
+
+5. DEBUG METRICS:
+   - KL per dimension tracking for each encoder
+   - Anti-batch KL monitoring
+   - Specialization gap (kl_in - kl_anti) tracking
+   - Effective β and λ values logged to WandB
+
+These mechanisms work together to:
+- Guarantee minimum latent activity (free-bits)
+- Prevent posterior collapse (cyclical β)
+- Enforce specialization (dynamic λ + contrastive margin)
+- Enable reliable uncertainty estimation for routing/OOD detection
+
+Configuration:
+Set enhanced_training parameters in model_specialist_settings.json:
+```json
+"enhanced_training": {
+    "use_cyclical_beta": true,
+    "beta_cycle_length": 4,
+    "use_free_bits": true,
+    "free_bits_delta": 0.07,
+    "use_dynamic_lambda": true,
+    "lambda_high_multiplier": 3.0,
+    "use_contrastive_margin": true,
+    "margin_tau": 1.5,
+    "debug_kl_metrics": true
+}
+```
+
 Usage:
     python train_specialist.py [--phases A,B] [--resume_from_phase PHASE]
 """
@@ -658,7 +714,39 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
         logger.info(f"    - Anti-batch proportion: {anti_batch_size:.1%}")
         logger.info(f"    - Anti-batch λ: {anti_batch_lambda:.3f}")
     logger.info(f"  Beta warmup epochs: {phase_a_settings.get('beta_warmup_epochs', 5)}")
+    
+    # Log enhanced training mechanisms
+    phase_a_enhanced = phase_a_settings.get('enhanced_training', {})
+    logger.info(f"Enhanced training mechanisms:")
+    logger.info(f"  - Free-bits (minimum KL): {'ENABLED' if phase_a_enhanced.get('use_free_bits', True) else 'DISABLED'}")
+    if phase_a_enhanced.get('use_free_bits', True):
+        logger.info(f"    δ = {phase_a_enhanced.get('free_bits_delta', 0.07):.3f} per dimension")
+    logger.info(f"  - Cyclical β-annealing: {'ENABLED' if phase_a_enhanced.get('use_cyclical_beta', False) else 'DISABLED'}")
+    if phase_a_enhanced.get('use_cyclical_beta', False):
+        logger.info(f"    Cycle length: {phase_a_enhanced.get('beta_cycle_length', 4)} epochs")
+    logger.info(f"  - Dynamic λ scheduling: {'ENABLED' if phase_a_enhanced.get('use_dynamic_lambda', True) else 'DISABLED'}")
+    if phase_a_enhanced.get('use_dynamic_lambda', True):
+        logger.info(f"    High-β multiplier: {phase_a_enhanced.get('lambda_high_multiplier', 3.0)}")
+    logger.info(f"  - Contrastive KL margin: {'ENABLED' if phase_a_enhanced.get('use_contrastive_margin', True) else 'DISABLED'}")
+    if phase_a_enhanced.get('use_contrastive_margin', True):
+        logger.info(f"    Margin τ: {phase_a_enhanced.get('margin_tau', 1.5):.1f} nats")
+    logger.info(f"  - Debug KL metrics: {'ENABLED' if phase_a_enhanced.get('debug_kl_metrics', False) else 'DISABLED'}")
+    
     print(f"Phase A Enhanced Training: cross-pair={'ON' if cross_pair_enabled else 'OFF'}, anti-batch={'ON' if anti_batch_size > 0 else 'OFF'}")
+    
+    # Enhanced mechanisms summary
+    enhanced_summary = []
+    if phase_a_enhanced.get('use_free_bits', True):
+        enhanced_summary.append("free-bits")
+    if phase_a_enhanced.get('use_cyclical_beta', False):
+        enhanced_summary.append("cyclical-β")
+    if phase_a_enhanced.get('use_dynamic_lambda', True):
+        enhanced_summary.append("dynamic-λ")
+    if phase_a_enhanced.get('use_contrastive_margin', True):
+        enhanced_summary.append("contrastive-margin")
+    
+    print(f"Enhanced mechanisms: {', '.join(enhanced_summary) if enhanced_summary else 'NONE'}")
+    print(f"Target KL/dim after warm-up: ≥ 0.2 (debug_kl_metrics={'ON' if phase_a_enhanced.get('debug_kl_metrics', False) else 'OFF'})")
     
     # Phase A setup - all parameters unfrozen but we'll train one encoder+decoder at a time
     setup_phase_training(model, 'pretrain')
@@ -746,7 +834,7 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                         other_encoder_indices = [i for i in range(num_encoders) if i != encoder_idx]
                         if other_encoder_indices:
                             # Sample from other encoders' datasets
-                            other_datasets = [dataset_splits[i] for i in other_encoder_indices if dataset_splits[i][0]]
+                            other_datasets = [encoder_datasets[i] for i in other_encoder_indices if encoder_datasets[i][0]]
                             if other_datasets:
                                 # Combine other encoders' data
                                 all_other_inputs = []
@@ -786,7 +874,19 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                     else:
                         anti_mask = None
                     
-                    # SPECIALIST LOSS: Cross-pair reconstruction + beta warmup + anti-batch KL
+                    # SPECIALIST LOSS: Cross-pair reconstruction + beta warmup + anti-batch KL + ENHANCED MECHANISMS
+                    # Get enhanced training settings
+                    phase_a_enhanced = phase_a_settings.get('enhanced_training', {})
+                    use_cyclical_beta = phase_a_enhanced.get('use_cyclical_beta', False)
+                    beta_cycle_length = phase_a_enhanced.get('beta_cycle_length', 4)
+                    use_free_bits = phase_a_enhanced.get('use_free_bits', True)
+                    free_bits_delta = phase_a_enhanced.get('free_bits_delta', 0.07)
+                    use_dynamic_lambda = phase_a_enhanced.get('use_dynamic_lambda', True)
+                    lambda_high_multiplier = phase_a_enhanced.get('lambda_high_multiplier', 3.0)
+                    use_contrastive_margin = phase_a_enhanced.get('use_contrastive_margin', True)
+                    margin_tau = phase_a_enhanced.get('margin_tau', 1.5)
+                    debug_kl_metrics = phase_a_enhanced.get('debug_kl_metrics', False)
+                    
                     loss_result = compute_loss(
                         model, input_seq, target_seq, 
                         beta=BETA, encoder_idx=encoder_idx, use_independent_decoder=True,
@@ -796,6 +896,16 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                         anti_batch_lambda=anti_batch_lambda,
                         cross_pair_enabled=cross_pair_enabled,
                         cross_pair_num_pairs=cross_pair_num_pairs,
+                        # Enhanced mechanisms
+                        use_cyclical_beta=use_cyclical_beta,
+                        beta_cycle_length=beta_cycle_length,
+                        use_free_bits=use_free_bits,
+                        free_bits_delta=free_bits_delta,
+                        use_dynamic_lambda=use_dynamic_lambda,
+                        lambda_high_multiplier=lambda_high_multiplier,
+                        use_contrastive_margin=use_contrastive_margin,
+                        margin_tau=margin_tau,
+                        debug_kl_metrics=debug_kl_metrics,
                         return_components=True  # Get detailed loss breakdown
                     )
                     
@@ -804,12 +914,30 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                         loss = loss_result['total_loss']
                         # Log detailed components for monitoring (use consistent global_step)
                         if batch_idx == 0 and wandb_logger:  # Log once per epoch for efficiency
-                            wandb_logger.log_training_metrics(global_step, {
+                            log_dict = {
                                 f'phase_a/encoder_{encoder_idx}_cross_pair_loss': loss_result['cross_pair_loss'].item(),
                                 f'phase_a/encoder_{encoder_idx}_in_slice_kl_loss': loss_result['in_slice_kl_loss'].item(),
                                 f'phase_a/encoder_{encoder_idx}_effective_beta': loss_result['effective_beta'],
+                                f'phase_a/encoder_{encoder_idx}_effective_lambda': loss_result['effective_lambda'],
                                 f'phase_a/encoder_{encoder_idx}_epoch': epoch + 1
-                            })
+                            }
+                            
+                            # Add enhanced mechanism metrics
+                            if 'contrastive_margin_loss' in loss_result:
+                                log_dict[f'phase_a/encoder_{encoder_idx}_contrastive_margin_loss'] = loss_result['contrastive_margin_loss'].item()
+                            if 'anti_kl_loss' in loss_result:
+                                log_dict[f'phase_a/encoder_{encoder_idx}_anti_kl_loss'] = loss_result['anti_kl_loss'].item()
+                            
+                            # Add debug KL metrics if enabled
+                            if debug_kl_metrics:
+                                if 'kl_per_dim' in loss_result and loss_result['kl_per_dim'] is not None:
+                                    log_dict[f'phase_a/encoder_{encoder_idx}_kl_per_dim'] = loss_result['kl_per_dim'].item()
+                                if 'anti_kl_per_dim' in loss_result and loss_result['anti_kl_per_dim'] is not None:
+                                    log_dict[f'phase_a/encoder_{encoder_idx}_anti_kl_per_dim'] = loss_result['anti_kl_per_dim'].item()
+                                if 'kl_gap' in loss_result and loss_result['kl_gap'] is not None:
+                                    log_dict[f'phase_a/encoder_{encoder_idx}_kl_gap'] = loss_result['kl_gap'].item()
+                            
+                            wandb_logger.log_training_metrics(global_step, log_dict)
                     else:
                         loss = loss_result  # Fallback for backward compatibility
                     
@@ -1095,11 +1223,48 @@ def train_phase_b_decoder(model, encoder_datasets, device, logger, wandb_logger,
             encoder_indices = encoder_indices.to(device)
             
             with torch.amp.autocast(device_type=device.type, enabled=use_mixed_precision):
-                # Use PoE inference with shared decoder (encoder_idx=None triggers PoE)
-                loss = compute_loss(
+                # Get enhanced training settings for Phase B
+                phase_b_settings = specialist_settings.get('phase_b', {})
+                phase_b_enhanced = phase_b_settings.get('enhanced_training', {})
+                use_cyclical_beta = phase_b_enhanced.get('use_cyclical_beta', False)
+                beta_cycle_length = phase_b_enhanced.get('beta_cycle_length', 4)
+                use_free_bits = phase_b_enhanced.get('use_free_bits', True)
+                free_bits_delta = phase_b_enhanced.get('free_bits_delta', 0.07)
+                debug_kl_metrics = phase_b_enhanced.get('debug_kl_metrics', False)
+                
+                # Use PoE inference with shared decoder (encoder_idx=None triggers PoE) + enhanced mechanisms
+                loss_result = compute_loss(
                     model, input_seq, target_seq,
-                    beta=BETA, encoder_idx=None, use_independent_decoder=False
+                    beta=BETA, encoder_idx=None, use_independent_decoder=False,
+                    # Enhanced mechanisms for Phase B
+                    current_epoch=epoch + 1,  # 1-indexed for cyclical beta
+                    use_cyclical_beta=use_cyclical_beta,
+                    beta_cycle_length=beta_cycle_length,
+                    use_free_bits=use_free_bits,
+                    free_bits_delta=free_bits_delta,
+                    debug_kl_metrics=debug_kl_metrics,
+                    return_components=True  # Get detailed loss breakdown
                 )
+                
+                # Extract loss and components
+                if isinstance(loss_result, dict):
+                    loss = loss_result['total_loss']
+                    # Log Phase B enhanced metrics periodically
+                    if batch_idx == 0 and wandb_logger:  # Log once per epoch
+                        log_dict = {
+                            'phase_b/effective_beta': loss_result['effective_beta'],
+                            'phase_b/reconstruction_loss': loss_result['reconstruction_loss'].item(),
+                            'phase_b/kl_loss': loss_result['kl_loss'].item(),
+                        }
+                        
+                        # Add debug KL metrics if enabled
+                        if debug_kl_metrics and 'kl_per_dim' in loss_result and loss_result['kl_per_dim'] is not None:
+                            log_dict['phase_b/kl_per_dim'] = loss_result['kl_per_dim'].item()
+                        
+                        wandb_logger.log_training_metrics(base_global_step + epoch + 1, log_dict)
+                else:
+                    loss = loss_result  # Fallback for backward compatibility
+                    
                 loss = loss / gradient_accumulation_steps
             
             scaler.scale(loss).backward()

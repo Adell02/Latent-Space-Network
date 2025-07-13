@@ -532,7 +532,34 @@ def load_model(run_dir, epoch=None, device='cuda', model_type='lpn'):
     
     # Load checkpoint
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(checkpoint['model_state_dict'])
+
+    # Get the current model's state dict keys
+    current_model_keys = set(model.state_dict().keys())
+    checkpoint_keys = set(checkpoint['model_state_dict'].keys())
+    
+    # Find unexpected keys (keys in checkpoint but not in current model)
+    unexpected_keys = checkpoint_keys - current_model_keys
+    
+    # Find missing keys (keys in current model but not in checkpoint)
+    missing_keys = current_model_keys - checkpoint_keys
+    
+    if unexpected_keys:
+        print(f"⚠ Warning: Found {len(unexpected_keys)} unexpected keys in checkpoint:")
+        for key in sorted(unexpected_keys):
+            print(f"  - {key}")
+        print("  These keys will be ignored during loading.")
+    
+    if missing_keys:
+        print(f"⚠ Warning: Found {len(missing_keys)} missing keys in checkpoint:")
+        for key in sorted(missing_keys):
+            print(f"  - {key}")
+        print("  These keys will be randomly initialized.")
+    
+    # Filter out unexpected keys from the checkpoint
+    filtered_state_dict = {k: v for k, v in checkpoint['model_state_dict'].items() if k in current_model_keys}
+    
+    # Load the filtered state dict
+    model.load_state_dict(filtered_state_dict, strict=False)    
     try:
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     except (KeyError, ValueError) as e:

@@ -851,6 +851,92 @@ def get_beta_warmup(current_epoch: int, warmup_epochs: int, beta_max: float) -> 
     return beta_max * warmup_factor
 
 
+def get_cyclical_beta(current_epoch: int, cycle_length: int, beta_max: float) -> float:
+    """
+    Cyclical β-annealing: ramp β 0 → β_max over K epochs, then reset (repeat).
+    
+    Args:
+        current_epoch: Current training epoch (1-indexed)
+        cycle_length: Number of epochs per cycle (K)
+        beta_max: Maximum beta value
+    
+    Returns:
+        float: Current beta value
+    """
+    if cycle_length <= 0:
+        return beta_max
+    
+    cycle_position = (current_epoch - 1) % cycle_length
+    ramp_factor = cycle_position / cycle_length
+    return beta_max * ramp_factor
+
+
+def get_dynamic_anti_lambda(current_beta: float, beta_max: float, 
+                           high_phase_multiplier: float = 3.0, 
+                           low_phase_base: float = 0.01) -> float:
+    """
+    Dynamic λ scheduling: During high-β phases set λ = 2–5 × β_max; 
+    during low-β phases drop it to 0.01.
+    
+    Args:
+        current_beta: Current beta value
+        beta_max: Maximum beta value
+        high_phase_multiplier: Multiplier for high-beta phases (2-5)
+        low_phase_base: Base value for low-beta phases
+    
+    Returns:
+        float: Current anti-batch lambda value
+    """
+    # Consider "high-β phase" when β > 0.5 * β_max
+    high_phase_threshold = 0.5 * beta_max
+    
+    if current_beta > high_phase_threshold:
+        # High-β phase: λ = multiplier × β_max
+        return high_phase_multiplier * beta_max
+    else:
+        # Low-β phase: use base value
+        return low_phase_base
+
+
+def apply_free_bits(kl_loss: torch.Tensor, latent_dim: int, 
+                   delta_per_dim: float = 0.07) -> torch.Tensor:
+    """
+    Free-bits / Minimum-rate mechanism: kl_loss = torch.clamp(kl_loss, min=δ)
+    
+    Args:
+        kl_loss: KL divergence loss tensor
+        latent_dim: Latent space dimensionality
+        delta_per_dim: Minimum rate per dimension (δ ≈ 0.05 – 0.1 × latent_dim)
+    
+    Returns:
+        torch.Tensor: Clamped KL loss
+    """
+    min_kl = delta_per_dim * latent_dim
+    return torch.clamp(kl_loss, min=min_kl)
+
+
+def compute_contrastive_kl_margin(in_slice_kl: torch.Tensor, anti_kl: torch.Tensor, 
+                                 tau: float = 1.5) -> torch.Tensor:
+    """
+    Contrastive KL "margin" mechanism:
+    gap = kl_in.detach() - kl_anti        # >0 if encoder uses z for its own task
+    anti_loss = F.relu(tau - gap)         # tau ≈ 1–2 nats
+    
+    Args:
+        in_slice_kl: KL divergence for in-slice samples
+        anti_kl: KL divergence for anti-batch samples
+        tau: Target margin in nats
+    
+    Returns:
+        torch.Tensor: Contrastive margin loss
+    """
+    # gap should be positive when encoder specializes on its own data
+    gap = in_slice_kl.detach() - anti_kl
+    # Penalize when gap < tau (encoder not specialized enough)
+    margin_loss = F.relu(tau - gap)
+    return margin_loss
+
+
 # -------------------------------------------------
 #  Convenience loss wrapper (matches existing API)
 # -------------------------------------------------
@@ -889,31 +975,52 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
                 # New parameters for specialist training
                 current_epoch: int = None, anti_mask: torch.Tensor = None, 
                 anti_batch_lambda: float = None, cross_pair_enabled: bool = False,
-                cross_pair_num_pairs: int = None) -> torch.Tensor:
+                cross_pair_num_pairs: int = None,
+                # New parameters for enhanced training mechanisms
+                use_cyclical_beta: bool = False, beta_cycle_length: int = 4,
+                use_free_bits: bool = True, free_bits_delta: float = 0.07,
+                use_dynamic_lambda: bool = True, lambda_high_multiplier: float = 3.0,
+                use_contrastive_margin: bool = True, margin_tau: float = 1.5,
+                debug_kl_metrics: bool = False) -> torch.Tensor:
     """
-    Compute loss following Bonnet's LPN approach exactly:
+    Compute loss following Bonnet's LPN approach with enhanced mechanisms for specialist training:
     
-    L_total = L_rec + β * L_KL
+    ENHANCED MECHANISMS:
+    1. Cyclical β-annealing: Ramp β 0 → β_max over K epochs, then reset
+    2. Free-bits: Ensure minimum KL (δ ≈ 0.05-0.1 × latent_dim) to keep latents active
+    3. Dynamic λ scheduling: Scale anti-batch penalty with β (λ = 2-5 × β_max during high-β)
+    4. Contrastive KL margin: Enforce gap between in-slice and anti-batch KL losses
     
-    Where:
-    - L_rec: Cross-pair reconstruction loss (sum over samples)
-    - L_KL: KL divergence to N(0,I) (sum over samples)
-    - β: Small weight (~1e-3) so KL contributes ~1% early in training
+    L_total = L_rec + β * L_KL + λ * L_anti + margin_loss
     
     Args:
         model: The model (single or multi-encoder)
         input_seq: Input sequence
         target_seq: Target sequence  
-        beta: KL divergence weight (should be ~1e-3 as in Bonnet)
+        beta: Base KL divergence weight
         return_components: Whether to return loss components
         encoder_idx: Which encoder to use (None for PoE inference)
         use_independent_decoder: Whether to use independent decoder (Phase A) or shared decoder (Phase B)
-        current_epoch: Current training epoch for beta warmup (1-indexed)
+        current_epoch: Current training epoch for beta warmup/cycling (1-indexed)
         anti_mask: Boolean mask indicating anti-samples [B] (True = anti-sample, False = in-slice)
-        anti_batch_lambda: Lambda weight for anti-batch KL regularization
+        anti_batch_lambda: Base lambda weight for anti-batch KL regularization
         cross_pair_enabled: Whether to use cross-pair reconstruction loss
         cross_pair_num_pairs: Number of cross-pairs to sample (None = all pairs)
+        use_cyclical_beta: Whether to use cyclical β-annealing
+        beta_cycle_length: Number of epochs per β cycle
+        use_free_bits: Whether to apply free-bits mechanism
+        free_bits_delta: Minimum rate per dimension for free-bits
+        use_dynamic_lambda: Whether to use dynamic λ scheduling
+        lambda_high_multiplier: Multiplier for high-β phases
+        use_contrastive_margin: Whether to use contrastive KL margin
+        margin_tau: Target margin in nats for contrastive loss
+        debug_kl_metrics: Whether to return debug KL metrics
     """
+    device = input_seq.device
+    
+    # Get latent dimensionality for free-bits calculation
+    latent_dim = get_latent_dim()
+    
     if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
         # ----------------------------------------------------------
         # Multi-encoder specialist training path
@@ -945,13 +1052,26 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
                     grid_loss_sum += loss_i
                     active_pixels_total += 1  # Count samples, not pixels for averaging
                     
-            grid_loss = grid_loss_sum / active_pixels_total if active_pixels_total > 0 else torch.tensor(0.0, device=target_seq.device)
+            grid_loss = grid_loss_sum / active_pixels_total if active_pixels_total > 0 else torch.tensor(0.0, device=device)
             reconstruction_loss = shape_loss + grid_loss
             
             # Bonnet's KL divergence computation (sum over samples, divide by batch size)
             kl_loss = 0.5 * torch.mean(torch.sum(mu_star.pow(2) + logvar_star.exp() - 1 - logvar_star, dim=1))
             
-            total_loss = reconstruction_loss + beta * kl_loss
+            # Apply free-bits mechanism to keep latents active
+            if use_free_bits:
+                kl_loss = apply_free_bits(kl_loss, latent_dim, free_bits_delta)
+            
+            # Compute effective beta (cyclical annealing if enabled)
+            if use_cyclical_beta and current_epoch is not None:
+                effective_beta = get_cyclical_beta(current_epoch, beta_cycle_length, beta)
+            else:
+                effective_beta = beta
+            
+            total_loss = reconstruction_loss + effective_beta * kl_loss
+            
+            # Debug metrics
+            kl_per_dim = kl_loss / latent_dim if debug_kl_metrics else None
             
             if return_components:
                 return {
@@ -960,13 +1080,13 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
                     'shape_loss': shape_loss,
                     'grid_loss': grid_loss,
                     'kl_loss': kl_loss,
-                    'effective_beta': beta
+                    'effective_beta': effective_beta,
+                    'kl_per_dim': kl_per_dim
                 }
             return total_loss
             
         else:
-            # Individual encoder training (Phase A) - Use Bonnet's approach
-            device = input_seq.device
+            # Individual encoder training (Phase A) - Enhanced with new mechanisms
             batch_size = input_seq.size(0)
             
             # Get latent distributions for KL computation
@@ -987,6 +1107,7 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
             reconstruction_loss = torch.tensor(0.0, device=device)
             kl_loss = torch.tensor(0.0, device=device)
             anti_kl_loss = torch.tensor(0.0, device=device)
+            contrastive_margin_loss = torch.tensor(0.0, device=device)
             
             # 1. CROSS-PAIR RECONSTRUCTION LOSS (Bonnet's approach on in-slice samples)
             if cross_pair_enabled and has_in_slice:
@@ -1006,7 +1127,7 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
                         use_independent_decoder, opt_steps, opt_lr
                     )
             
-            # 2. KL DIVERGENCE LOSS (Bonnet's approach)
+            # 2. KL DIVERGENCE LOSS (Bonnet's approach with enhancements)
             if has_in_slice:
                 in_slice_mu = mu[in_slice_mask]
                 in_slice_logvar = logvar[in_slice_mask]
@@ -1015,9 +1136,13 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
                     kl_loss = 0.5 * torch.mean(torch.sum(
                         in_slice_mu.pow(2) + in_slice_logvar.exp() - 1 - in_slice_logvar, dim=1
                     ))
+                    
+                    # Apply free-bits mechanism to guarantee minimum KL (keep latents active)
+                    if use_free_bits:
+                        kl_loss = apply_free_bits(kl_loss, latent_dim, free_bits_delta)
             
-            # 3. ANTI-BATCH KL REGULARIZATION (if enabled)
-            if has_anti and anti_batch_lambda is not None:
+            # 3. ANTI-BATCH KL REGULARIZATION (enhanced with dynamic scheduling)
+            if has_anti:
                 anti_mu = mu[anti_mask]
                 anti_logvar = logvar[anti_mask]
                 if anti_mu.size(0) > 0:
@@ -1025,8 +1150,12 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
                         anti_mu.pow(2) + anti_logvar.exp() - 1 - anti_logvar, dim=1
                     ))
             
-            # Apply beta warmup if specified
-            if current_epoch is not None:
+            # 4. BETA AND LAMBDA SCHEDULING
+            # Compute effective beta (cyclical annealing if enabled)
+            if use_cyclical_beta and current_epoch is not None:
+                effective_beta = get_cyclical_beta(current_epoch, beta_cycle_length, beta)
+            elif current_epoch is not None:
+                # Apply beta warmup if specified
                 specialist_settings = get_current_settings().get('specialist_training', {})
                 phase_a_settings = specialist_settings.get('phase_a', {})
                 warmup_epochs = phase_a_settings.get('beta_warmup_epochs', 5)
@@ -1034,10 +1163,34 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
             else:
                 effective_beta = beta
             
-            # BONNET'S TOTAL LOSS: L_total = L_rec + β * L_KL (+ optional anti-batch term)
+            # Compute effective lambda (dynamic scheduling if enabled)
+            if use_dynamic_lambda and has_anti:
+                effective_lambda = get_dynamic_anti_lambda(
+                    effective_beta, beta, lambda_high_multiplier, 
+                    anti_batch_lambda if anti_batch_lambda is not None else 0.01
+                )
+            else:
+                effective_lambda = anti_batch_lambda if anti_batch_lambda is not None else 0.01
+            
+            # 5. CONTRASTIVE KL MARGIN (enforce specialization gap)
+            if use_contrastive_margin and has_in_slice and has_anti:
+                contrastive_margin_loss = compute_contrastive_kl_margin(
+                    kl_loss, anti_kl_loss, margin_tau
+                )
+            
+            # 6. BONNET'S TOTAL LOSS (enhanced with new mechanisms)
             total_loss = reconstruction_loss + effective_beta * kl_loss
-            if has_anti and anti_batch_lambda is not None:
-                total_loss += anti_batch_lambda * anti_kl_loss
+            
+            if has_anti:
+                total_loss += effective_lambda * anti_kl_loss
+            
+            if use_contrastive_margin:
+                total_loss += contrastive_margin_loss
+            
+            # Debug metrics
+            kl_per_dim = kl_loss / latent_dim if debug_kl_metrics else None
+            anti_kl_per_dim = anti_kl_loss / latent_dim if debug_kl_metrics and has_anti else None
+            kl_gap = (kl_loss - anti_kl_loss) if debug_kl_metrics and has_anti else None
             
             if return_components:
                 return {
@@ -1047,13 +1200,19 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
                     'in_slice_kl_loss': kl_loss,
                     'kl_loss': kl_loss,  # For backward compatibility  
                     'anti_kl_loss': anti_kl_loss,
+                    'contrastive_margin_loss': contrastive_margin_loss,
                     'effective_beta': effective_beta,
-                    'anti_lambda': anti_batch_lambda if anti_batch_lambda is not None else 0.0
+                    'effective_lambda': effective_lambda,
+                    'anti_lambda': effective_lambda,  # For backward compatibility
+                    # Debug metrics
+                    'kl_per_dim': kl_per_dim,
+                    'anti_kl_per_dim': anti_kl_per_dim,
+                    'kl_gap': kl_gap
                 }
             return total_loss
             
     else:
-        # Single encoder model - use Bonnet's standard approach
+        # Single encoder model - use Bonnet's standard approach with enhancements
         reconstruction, mu, log_var = model(input_seq, target_seq)
         shape_logits, grid_logits = reconstruction
 
@@ -1082,9 +1241,22 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
         reconstruction_loss = shape_loss + grid_loss
 
         # Bonnet's KL divergence loss computation
-        kl_loss = 0.5 * torch.mean(torch.sum(mu.pow(2) + log_var.exp() - 1 - log_var, dim=1)) 
+        kl_loss = 0.5 * torch.mean(torch.sum(mu.pow(2) + log_var.exp() - 1 - log_var, dim=1))
+        
+        # Apply free-bits mechanism to keep latents active
+        if use_free_bits:
+            kl_loss = apply_free_bits(kl_loss, latent_dim, free_bits_delta)
+        
+        # Compute effective beta (cyclical annealing if enabled)
+        if use_cyclical_beta and current_epoch is not None:
+            effective_beta = get_cyclical_beta(current_epoch, beta_cycle_length, beta)
+        else:
+            effective_beta = beta
 
-        total_loss = reconstruction_loss + beta * kl_loss
+        total_loss = reconstruction_loss + effective_beta * kl_loss
+        
+        # Debug metrics
+        kl_per_dim = kl_loss / latent_dim if debug_kl_metrics else None
         
         if return_components:
             return {
@@ -1093,7 +1265,8 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
                 'shape_loss': shape_loss,
                 'grid_loss': grid_loss,
                 'kl_loss': kl_loss,
-                'effective_beta': beta
+                'effective_beta': effective_beta,
+                'kl_per_dim': kl_per_dim
             }
         return total_loss
 
