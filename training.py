@@ -962,12 +962,29 @@ def main_training(file_store_name):
                 wandb_logger.log_accuracy_metrics(epoch + 1, epoch_accuracy_data)
             else:
                 # Single encoder logging
-                wandb_logger.log_training_metrics(epoch + 1, {
+                log_dict = {
                     'avg_shape_loss': avg_shape_loss,
                     'avg_grid_loss': avg_grid_loss,
                     'avg_kl_loss': avg_kl_loss,
                     'avg_total_loss': avg_loss
-                })
+                }
+                
+                # Add VQ-VAE metrics if enabled
+                if hasattr(model, 'is_using_vq_vae') and model.is_using_vq_vae():
+                    vq_metrics = model.get_vq_metrics()
+                    if vq_metrics:
+                        log_dict.update({
+                            'vq_codebook_perplexity': vq_metrics.get('codebook_perplexity', 0.0),
+                            'vq_num_embeddings': vq_metrics.get('num_embeddings', 0),
+                        })
+                        # Log codebook usage histogram
+                        codebook_usage = vq_metrics.get('codebook_usage', None)
+                        if codebook_usage is not None:
+                            log_dict['vq_codebook_usage_entropy'] = -torch.sum(codebook_usage * torch.log(codebook_usage + 1e-10)).item()
+                            log_dict['vq_codebook_usage_max'] = torch.max(codebook_usage).item()
+                            log_dict['vq_codebook_usage_min'] = torch.min(codebook_usage).item()
+                
+                wandb_logger.log_training_metrics(epoch + 1, log_dict)
                 wandb_logger.log_accuracy_metrics(epoch + 1, single_accuracy)
 
         # Run evaluation and log visualizations every N epochs

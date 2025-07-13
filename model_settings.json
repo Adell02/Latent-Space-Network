@@ -64,7 +64,19 @@
     "max_length": 902,
     "encoder_max_length": 1805,
     "decoder_max_length": 902,
-    "use_gradient_checkpointing": true
+    "use_gradient_checkpointing": true,
+    "vq_vae": {
+      "enabled": true,
+      "num_embeddings": 128,
+      "embedding_dim": 16,
+      "commitment_cost": 0.25,
+      "decay": 0.99,
+      "epsilon": 1e-5,
+      "use_ema": true,
+      "restart_unused_codes": true,
+      "restart_threshold": 0.5,
+      "split_batch_size": null
+    }
   },
   "training_settings": {
     "num_epochs": 30,
@@ -90,7 +102,7 @@
     "enabled": true,
     "entity": "ga624-imperial-college-london",
     "api_key": "e2853fdc991b057f1cebf7df2a747ecca6fdaf6c",
-    "project": "test_toy_example",
+    "project": "VQ-VAE-test",
     "log_interval": 1,
     "log_trajectory_plots": true,
     "trajectory_max_samples": 3,

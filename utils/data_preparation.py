@@ -16,6 +16,14 @@ def transform_grid_to_sequence(grid:np.ndarray):
     """
     # Get original shape
     rows, cols = grid.shape
+    
+    # Validate dimensions (should be <= 30 for ARC)
+    if rows > 30 or cols > 30:
+        raise ValueError(f"Grid dimensions ({rows}, {cols}) exceed maximum of 30x30")
+    
+    # Validate pixel values (should be 0-9 for ARC)
+    if grid.min() < 0 or grid.max() > 9:
+        raise ValueError(f"Grid contains invalid pixel values. Range: [{grid.min()}, {grid.max()}], expected: [0, 9]")
 
     # Create the shape prefix (2 values)
     shape_info = np.array([rows, cols])

@@ -62,7 +62,19 @@
     "max_length": 902,
     "encoder_max_length": 1805,
     "decoder_max_length": 902,
-    "use_gradient_checkpointing": true
+    "use_gradient_checkpointing": true,
+    "vq_vae": {
+      "enabled": true,
+      "num_embeddings": 128,
+      "embedding_dim": 16,
+      "commitment_cost": 0.25,
+      "decay": 0.99,
+      "epsilon": 1e-5,
+      "use_ema": true,
+      "restart_unused_codes": true,
+      "restart_threshold": 0.5,
+      "split_batch_size": null
+    }
   },
   "training_settings": {
     "num_epochs": 200,

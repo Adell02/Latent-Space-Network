@@ -933,14 +933,35 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                                 f'phase_a/encoder_{encoder_idx}_epoch': epoch + 1
                             }
                             
+                            # Add VQ-VAE or KL metrics
+                            if hasattr(model, 'is_using_vq_vae') and model.is_using_vq_vae():
+                                log_dict[f'phase_a/encoder_{encoder_idx}_vq_loss'] = loss_result['vq_loss'].item()
+                                if 'anti_vq_loss' in loss_result:
+                                    log_dict[f'phase_a/encoder_{encoder_idx}_anti_vq_loss'] = loss_result['anti_vq_loss'].item()
+                                
+                                # Add VQ-VAE metrics
+                                vq_metrics = model.multi_encoder.encoders[encoder_idx].get_vq_metrics()
+                                if vq_metrics:
+                                    log_dict[f'phase_a/encoder_{encoder_idx}_vq_codebook_perplexity'] = vq_metrics.get('codebook_perplexity', 0.0)
+                                    log_dict[f'phase_a/encoder_{encoder_idx}_vq_num_embeddings'] = vq_metrics.get('num_embeddings', 0)
+                                    
+                                    # Log codebook usage statistics
+                                    codebook_usage = vq_metrics.get('codebook_usage', None)
+                                    if codebook_usage is not None:
+                                        log_dict[f'phase_a/encoder_{encoder_idx}_vq_codebook_usage_entropy'] = -torch.sum(codebook_usage * torch.log(codebook_usage + 1e-10)).item()
+                                        log_dict[f'phase_a/encoder_{encoder_idx}_vq_codebook_usage_max'] = torch.max(codebook_usage).item()
+                                        log_dict[f'phase_a/encoder_{encoder_idx}_vq_codebook_usage_min'] = torch.min(codebook_usage).item()
+                            else:
+                                # Standard KL metrics
+                                if 'anti_kl_loss' in loss_result:
+                                    log_dict[f'phase_a/encoder_{encoder_idx}_anti_kl_loss'] = loss_result['anti_kl_loss'].item()
+                            
                             # Add enhanced mechanism metrics
                             if 'contrastive_margin_loss' in loss_result:
                                 log_dict[f'phase_a/encoder_{encoder_idx}_contrastive_margin_loss'] = loss_result['contrastive_margin_loss'].item()
-                            if 'anti_kl_loss' in loss_result:
-                                log_dict[f'phase_a/encoder_{encoder_idx}_anti_kl_loss'] = loss_result['anti_kl_loss'].item()
                             
                             # Add debug KL metrics if enabled
-                            if debug_kl_metrics:
+                            if debug_kl_metrics and not (hasattr(model, 'is_using_vq_vae') and model.is_using_vq_vae()):
                                 if 'kl_per_dim' in loss_result and loss_result['kl_per_dim'] is not None:
                                     log_dict[f'phase_a/encoder_{encoder_idx}_kl_per_dim'] = loss_result['kl_per_dim'].item()
                                 if 'anti_kl_per_dim' in loss_result and loss_result['anti_kl_per_dim'] is not None:
@@ -1273,8 +1294,33 @@ def train_phase_b_decoder(model, encoder_datasets, device, logger, wandb_logger,
                         log_dict = {
                             'phase_b/effective_beta': loss_result['effective_beta'],
                             'phase_b/reconstruction_loss': loss_result['reconstruction_loss'].item(),
-                            'phase_b/kl_loss': loss_result['kl_loss'].item(),
                         }
+                        
+                        # Add VQ-VAE or KL metrics
+                        if hasattr(model, 'is_using_vq_vae') and model.is_using_vq_vae():
+                            log_dict['phase_b/vq_loss'] = loss_result['vq_loss'].item()
+                            
+                            # Add VQ-VAE metrics from all encoders
+                            vq_metrics = model.multi_encoder.get_vq_metrics()
+                            if vq_metrics:
+                                # Aggregate metrics across encoders
+                                total_perplexity = 0
+                                total_usage_entropy = 0
+                                num_encoders = 0
+                                
+                                for key, value in vq_metrics.items():
+                                    if 'codebook_perplexity' in key:
+                                        total_perplexity += value
+                                        num_encoders += 1
+                                    elif 'codebook_usage' in key and isinstance(value, torch.Tensor):
+                                        usage_entropy = -torch.sum(value * torch.log(value + 1e-10)).item()
+                                        total_usage_entropy += usage_entropy
+                                
+                                if num_encoders > 0:
+                                    log_dict['phase_b/vq_avg_codebook_perplexity'] = total_perplexity / num_encoders
+                                    log_dict['phase_b/vq_avg_codebook_usage_entropy'] = total_usage_entropy / num_encoders
+                        else:
+                            log_dict['phase_b/kl_loss'] = loss_result['kl_loss'].item()
                         
                         # Add debug KL metrics if enabled
                         if debug_kl_metrics and 'kl_per_dim' in loss_result and loss_result['kl_per_dim'] is not None:

@@ -1,16 +1,33 @@
+#!/usr/bin/env python3
+"""
+Base Model for Latent Program Network (LPN)
+
+This module implements the core architecture of the LPN, including:
+- TransformerEncoder: Processes input sequences to generate latent distributions
+- TransformerDecoder: Generates outputs from latent programs and inputs
+- LatentProgramNetwork: Combines encoder and decoder with optimization
+- VQ-VAE support: Optional discrete latent space to prevent posterior collapse
+
+The model supports both single and multi-encoder configurations.
+"""
+
 import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import sys
-from typing import Tuple, List, Union
+from typing import Tuple, List, Union, Optional, Dict, Any
 import copy
+import numpy as np
 
 # add the parent directory to the path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.model_utils import (set_seed)
 from utils.settings_manager import settings
+
+# Import VQ-VAE components
+from models.vq_vae import create_vq_vae_from_settings, VQVAEWrapper
 
 
 #########################################
@@ -259,8 +276,19 @@ class TransformerEncoder(nn.Module):
 
         # Output projections for latent distribution
         self.layer_norm = nn.LayerNorm(hidden_dim)
-        self.fc_mu = nn.Linear(hidden_dim, get_latent_dim())
-        self.fc_log_var = nn.Linear(hidden_dim, get_latent_dim())
+        
+        # VQ-VAE support
+        self.vq_vae = create_vq_vae_from_settings(current_model_arch)
+        self.use_vq_vae = self.vq_vae is not None
+        
+        if self.use_vq_vae:
+            # For VQ-VAE, we only need one projection to continuous space before quantization
+            self.fc_latent = nn.Linear(hidden_dim, get_latent_dim())
+            print(f"✓ VQ-VAE enabled with {self.vq_vae.vq_layer.num_embeddings} embeddings")
+        else:
+            # Standard VAE projections
+            self.fc_mu = nn.Linear(hidden_dim, get_latent_dim())
+            self.fc_log_var = nn.Linear(hidden_dim, get_latent_dim())
 
     def create_padding_mask(self, shape_values: torch.Tensor) -> torch.Tensor:
         """Create padding mask based on shape values"""
@@ -281,15 +309,25 @@ class TransformerEncoder(nn.Module):
     def forward(self, input_seq: torch.Tensor, target_seq: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         batch_size = input_seq.size(0)
         device = input_seq.device
+        
+        # Validate and clamp input values to prevent embedding index errors
+        # Grid tokens (0-899) should be in range [0, 9]
+        input_grid_tokens = torch.clamp(input_seq[:, :900], 0, 9).long()
+        target_grid_tokens = torch.clamp(target_seq[:, :900], 0, 9).long()
+        
+        # Shape tokens (900-902) should be in range [0, 30]
+        input_shape_tokens = torch.clamp(input_seq[:, 900:902], 0, 30).long()
+        target_shape_tokens = torch.clamp(target_seq[:, 900:902], 0, 30).long()
+        
         # Updated indexing: grid tokens first (0-899), then shape tokens (900:902)
-        input_color_emb = self.color_embedding(input_seq[:, :900].long())
-        input_shape_emb = self.shape_embedding(input_seq[:, 900:902].long())
-        target_color_emb = self.color_embedding(target_seq[:, :900].long())
-        target_shape_emb = self.shape_embedding(target_seq[:, 900:902].long())
+        input_color_emb = self.color_embedding(input_grid_tokens)
+        input_shape_emb = self.shape_embedding(input_shape_tokens)
+        target_color_emb = self.color_embedding(target_grid_tokens)
+        target_shape_emb = self.shape_embedding(target_shape_tokens)
 
         # Create padding masks using the shape tokens
-        input_mask = self.create_padding_mask(input_seq[:, 900:902])
-        target_mask = self.create_padding_mask(target_seq[:, 900:902])
+        input_mask = self.create_padding_mask(input_shape_tokens)
+        target_mask = self.create_padding_mask(target_shape_tokens)
 
         # Create position indices for a 30x30 grid
         pos_i = torch.arange(30, device=device).view(1, -1, 1).repeat(batch_size, 1, 30)
@@ -323,9 +361,24 @@ class TransformerEncoder(nn.Module):
 
         encoder_output = self.transformer_encoder(combined_emb, src_key_padding_mask=~combined_mask)
         cls_output = self.layer_norm(encoder_output[:, -1])
-        mu = self.fc_mu(cls_output)
-        log_var = self.fc_log_var(cls_output)
-        return mu, log_var
+        
+        if self.use_vq_vae:
+            # VQ-VAE path: continuous -> discrete quantization
+            z_continuous = self.fc_latent(cls_output)
+            z_quantized, vq_loss, encoding_indices = self.vq_vae(z_continuous)
+            # Return quantized latent and VQ loss (stored in log_var position for compatibility)
+            return z_quantized, vq_loss.unsqueeze(0).expand(batch_size, -1) if vq_loss.dim() == 0 else vq_loss
+        else:
+            # Standard VAE path
+            mu = self.fc_mu(cls_output)
+            log_var = self.fc_log_var(cls_output)
+            return mu, log_var
+
+    def get_vq_metrics(self) -> Optional[Dict[str, Any]]:
+        """Get VQ-VAE metrics if enabled."""
+        if self.use_vq_vae:
+            return self.vq_vae.get_metrics()
+        return None
 
 class TransformerDecoder(nn.Module):
     def __init__(self, output_dim: int, hidden_dim: int = None, num_layers: int = None, 
@@ -409,6 +462,10 @@ class TransformerDecoder(nn.Module):
                 mask_tokens = torch.rand(input_grid.shape, device=device) < 0.1  # Mask 10% of tokens
                 input_grid = input_grid.masked_fill(mask_tokens, 0)  # Replace with 0 (background)
 
+        # Clamp input values to ensure valid embedding indices
+        input_grid = torch.clamp(input_grid, 0, 9)  # Grid tokens should be 0-9
+        input_shapes = torch.clamp(input_shapes, 0, 30)  # Shape tokens should be 0-30
+
         # For memory we use the same embeddings as in the encoder
         grid_emb = self.output_grid_embedding(input_grid.long())
         shape_emb = self.output_shape_embedding(input_shapes.long())
@@ -473,8 +530,9 @@ class TransformerDecoder(nn.Module):
         memory = self.prepare_input_memory(z, input_seq, training=self.training)
 
         # ----- Teacher Forcing Mode -----
-        tgt_grid = target_seq[:, :900].long()
-        tgt_shape = target_seq[:, 900:902].long()
+        # Clamp target sequence values to ensure valid embedding indices
+        tgt_grid = torch.clamp(target_seq[:, :900], 0, 9).long()
+        tgt_shape = torch.clamp(target_seq[:, 900:902], 0, 30).long()
         grid_emb = self.output_grid_embedding(tgt_grid)
         shape_emb = self.output_shape_embedding(tgt_shape)
         pos_i = torch.arange(30, device=device).view(1, -1, 1).repeat(batch_size, 1, 30)
@@ -561,11 +619,34 @@ class MultiEncoderLPN(nn.Module):
     #  Re‑parameterisation
     # -------------------------------------------------
     def _reparam(self, mu: torch.Tensor, logvar: torch.Tensor, sample: bool = True) -> torch.Tensor:
-        """Deterministic when sample=False, otherwise draws one sample."""
-        if sample:
-            eps = torch.randn_like(mu)
-            return mu + eps * torch.exp(0.5 * logvar)
-        return mu
+        """
+        Reparameterization for both VAE and VQ-VAE modes.
+        
+        For VQ-VAE: mu contains quantized latents, logvar contains VQ loss
+        For VAE: standard reparameterization trick
+        """
+        # Check if any encoder is using VQ-VAE
+        if hasattr(self.encoders[0], 'use_vq_vae') and self.encoders[0].use_vq_vae:
+            # VQ-VAE mode: mu already contains quantized latents, no sampling needed
+            return mu
+        else:
+            # Standard VAE reparameterization
+            if sample:
+                eps = torch.randn_like(mu)
+                return mu + eps * torch.exp(0.5 * logvar)
+            return mu
+
+    def get_vq_metrics(self) -> Optional[Dict[str, Any]]:
+        """Get VQ-VAE metrics from all encoders if enabled."""
+        if hasattr(self.encoders[0], 'use_vq_vae') and self.encoders[0].use_vq_vae:
+            metrics = {}
+            for i, encoder in enumerate(self.encoders):
+                encoder_metrics = encoder.get_vq_metrics()
+                if encoder_metrics:
+                    for key, value in encoder_metrics.items():
+                        metrics[f'encoder_{i}_{key}'] = value
+            return metrics
+        return None
 
     # -------------------------------------------------
     #  Forward methods for training and inference
@@ -692,11 +773,30 @@ class LatentProgramNetwork(nn.Module):
         self.is_actually_single_encoder = (num_encoders == 1)
     
     def _reparam(self, mu: torch.Tensor, logvar: torch.Tensor, sample: bool = True) -> torch.Tensor:
-        """Wrapper to use the same sampling logic as the multi-encoder."""
-        if sample:
-            eps = torch.randn_like(mu)
-            return mu + eps * torch.exp(0.5 * logvar)
-        return mu
+        """
+        Reparameterization for both VAE and VQ-VAE modes.
+        
+        For VQ-VAE: mu contains quantized latents, logvar contains VQ loss
+        For VAE: standard reparameterization trick
+        """
+        # Check if using VQ-VAE
+        if hasattr(self.multi_encoder.encoders[0], 'use_vq_vae') and self.multi_encoder.encoders[0].use_vq_vae:
+            # VQ-VAE mode: mu already contains quantized latents, no sampling needed
+            return mu
+        else:
+            # Standard VAE reparameterization
+            if sample:
+                eps = torch.randn_like(mu)
+                return mu + eps * torch.exp(0.5 * logvar)
+            return mu
+
+    def get_vq_metrics(self) -> Optional[Dict[str, Any]]:
+        """Get VQ-VAE metrics if enabled."""
+        return self.multi_encoder.get_vq_metrics()
+
+    def is_using_vq_vae(self) -> bool:
+        """Check if the model is using VQ-VAE."""
+        return hasattr(self.multi_encoder.encoders[0], 'use_vq_vae') and self.multi_encoder.encoders[0].use_vq_vae
 
     def forward(self, input_seq: torch.Tensor, target_seq: torch.Tensor, encoder_idx: int = None) -> Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor]:
         """Unified forward for both single and multi-encoder setups."""
@@ -1000,21 +1100,24 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
                 use_contrastive_margin: bool = True, margin_tau: float = 1.5,
                 debug_kl_metrics: bool = False) -> torch.Tensor:
     """
-    Compute loss following Bonnet's LPN approach with enhanced mechanisms for specialist training:
+    Compute loss following Bonnet's LPN approach with enhanced mechanisms for specialist training.
+    
+    SUPPORTS VQ-VAE: When VQ-VAE is enabled, replaces KL divergence with VQ loss (commitment + codebook losses).
     
     ENHANCED MECHANISMS:
     1. Cyclical β-annealing: Ramp β 0 → β_max over K epochs, then reset
     2. Free-bits: Ensure minimum KL (δ ≈ 0.05-0.1 × latent_dim) to keep latents active
     3. Dynamic λ scheduling: Scale anti-batch penalty with β (λ = 2-5 × β_max during high-β)
     4. Contrastive KL margin: Enforce gap between in-slice and anti-batch KL losses
+    5. VQ-VAE support: Use discrete latents to prevent posterior collapse
     
-    L_total = L_rec + β * L_KL + λ * L_anti + margin_loss
+    L_total = L_rec + β * L_KL/VQ + λ * L_anti + margin_loss
     
     Args:
         model: The model (single or multi-encoder)
         input_seq: Input sequence
         target_seq: Target sequence  
-        beta: Base KL divergence weight
+        beta: Base KL divergence weight (also used for VQ loss weight)
         return_components: Whether to return loss components
         encoder_idx: Which encoder to use (None for PoE inference)
         use_independent_decoder: Whether to use independent decoder (Phase A) or shared decoder (Phase B)
@@ -1037,6 +1140,9 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
     
     # Get latent dimensionality for free-bits calculation
     latent_dim = get_latent_dim()
+    
+    # Check if model is using VQ-VAE
+    is_vq_vae = hasattr(model, 'is_using_vq_vae') and model.is_using_vq_vae()
     
     if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
         # ----------------------------------------------------------
@@ -1072,13 +1178,21 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
             grid_loss = grid_loss_sum / active_pixels_total if active_pixels_total > 0 else torch.tensor(0.0, device=device)
             reconstruction_loss = shape_loss + grid_loss
             
-            # Bonnet's KL divergence computation with FIXED per-dimension free-bits
-            if use_free_bits:
-                raw_kl_loss, kl_loss, kl_per_dim_mean = apply_free_bits_per_dimension(mu_star, logvar_star, free_bits_delta)
+            # Latent regularization loss (KL or VQ)
+            if is_vq_vae:
+                # VQ-VAE: logvar_star contains VQ loss
+                vq_loss = torch.mean(logvar_star)  # VQ loss is stored in logvar position
+                latent_loss = vq_loss
+                raw_kl_loss = torch.tensor(0.0, device=device)
+                kl_per_dim_mean = torch.tensor(0.0, device=device)
             else:
-                kl_loss = 0.5 * torch.mean(torch.sum(mu_star.pow(2) + logvar_star.exp() - 1 - logvar_star, dim=1))
-                raw_kl_loss = kl_loss
-                kl_per_dim_mean = kl_loss / latent_dim
+                # Standard VAE: KL divergence with free-bits
+                if use_free_bits:
+                    raw_kl_loss, latent_loss, kl_per_dim_mean = apply_free_bits_per_dimension(mu_star, logvar_star, free_bits_delta)
+                else:
+                    latent_loss = 0.5 * torch.mean(torch.sum(mu_star.pow(2) + logvar_star.exp() - 1 - logvar_star, dim=1))
+                    raw_kl_loss = latent_loss
+                    kl_per_dim_mean = latent_loss / latent_dim
             
             # Compute effective beta (cyclical annealing if enabled)
             if use_cyclical_beta and current_epoch is not None:
@@ -1086,21 +1200,33 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
             else:
                 effective_beta = beta
             
-            total_loss = reconstruction_loss + effective_beta * kl_loss
+            total_loss = reconstruction_loss + effective_beta * latent_loss
             
             if return_components:
-                return {
+                components = {
                     'total_loss': total_loss,
                     'reconstruction_loss': reconstruction_loss,
                     'shape_loss': shape_loss,
                     'grid_loss': grid_loss,
-                    'kl_loss': kl_loss,
                     'effective_beta': effective_beta,
-                    # CRITICAL debug metrics to detect collapse (PoE)
-                    'raw_kl_loss': raw_kl_loss if 'raw_kl_loss' in locals() else kl_loss,
-                    'clamped_kl_loss': kl_loss,
-                    'kl_per_dim': kl_per_dim_mean if 'kl_per_dim_mean' in locals() else (kl_loss / latent_dim)
                 }
+                
+                if is_vq_vae:
+                    components.update({
+                        'vq_loss': latent_loss,
+                        'kl_loss': torch.tensor(0.0, device=device),  # No KL for VQ-VAE
+                        'raw_kl_loss': torch.tensor(0.0, device=device),
+                        'kl_per_dim': torch.tensor(0.0, device=device),
+                    })
+                else:
+                    components.update({
+                        'kl_loss': latent_loss,
+                        'vq_loss': torch.tensor(0.0, device=device),  # No VQ for standard VAE
+                        'raw_kl_loss': raw_kl_loss,
+                        'kl_per_dim': kl_per_dim_mean,
+                    })
+                
+                return components
             return total_loss
             
         else:
@@ -1123,8 +1249,8 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
             
             # Initialize loss components
             reconstruction_loss = torch.tensor(0.0, device=device)
-            kl_loss = torch.tensor(0.0, device=device)
-            anti_kl_loss = torch.tensor(0.0, device=device)
+            latent_loss = torch.tensor(0.0, device=device)
+            anti_latent_loss = torch.tensor(0.0, device=device)
             contrastive_margin_loss = torch.tensor(0.0, device=device)
             
             # 1. CROSS-PAIR RECONSTRUCTION LOSS (Bonnet's approach on in-slice samples)
@@ -1145,36 +1271,52 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
                         use_independent_decoder, opt_steps, opt_lr
                     )
             
-            # 2. KL DIVERGENCE LOSS (Bonnet's approach with FIXED per-dimension free-bits)
+            # 2. LATENT REGULARIZATION LOSS (KL or VQ)
             raw_kl_loss = torch.tensor(0.0, device=device)
             kl_per_dim_mean = torch.tensor(0.0, device=device)
+            vq_loss = torch.tensor(0.0, device=device)
+            
             if has_in_slice:
                 in_slice_mu = mu[in_slice_mask]
                 in_slice_logvar = logvar[in_slice_mask]
+                
                 if in_slice_mu.size(0) > 0:
-                    # Apply FIXED per-dimension free-bits to guarantee every latent dimension is active
-                    if use_free_bits:
-                        raw_kl_loss, kl_loss, kl_per_dim_mean = apply_free_bits_per_dimension(in_slice_mu, in_slice_logvar, free_bits_delta)
+                    if is_vq_vae:
+                        # VQ-VAE: logvar contains VQ loss
+                        vq_loss = torch.mean(in_slice_logvar)
+                        latent_loss = vq_loss
                     else:
-                        kl_loss = 0.5 * torch.mean(torch.sum(
-                            in_slice_mu.pow(2) + in_slice_logvar.exp() - 1 - in_slice_logvar, dim=1
-                        ))
-                        raw_kl_loss = kl_loss
-                        kl_per_dim_mean = kl_loss / latent_dim
+                        # Standard VAE: KL divergence with free-bits
+                        if use_free_bits:
+                            raw_kl_loss, latent_loss, kl_per_dim_mean = apply_free_bits_per_dimension(in_slice_mu, in_slice_logvar, free_bits_delta)
+                        else:
+                            latent_loss = 0.5 * torch.mean(torch.sum(
+                                in_slice_mu.pow(2) + in_slice_logvar.exp() - 1 - in_slice_logvar, dim=1
+                            ))
+                            raw_kl_loss = latent_loss
+                            kl_per_dim_mean = latent_loss / latent_dim
             
-            # 3. ANTI-BATCH KL REGULARIZATION (enhanced with dynamic scheduling)
+            # 3. ANTI-BATCH REGULARIZATION (enhanced with dynamic scheduling)
             raw_anti_kl_loss = torch.tensor(0.0, device=device)
             anti_kl_per_dim_mean = torch.tensor(0.0, device=device)
+            anti_vq_loss = torch.tensor(0.0, device=device)
+            
             if has_anti:
                 anti_mu = mu[anti_mask]
                 anti_logvar = logvar[anti_mask]
+                
                 if anti_mu.size(0) > 0:
-                    # Calculate raw anti-KL (no free-bits clamping for anti-batch)
-                    anti_kl_loss = 0.5 * torch.mean(torch.sum(
-                        anti_mu.pow(2) + anti_logvar.exp() - 1 - anti_logvar, dim=1
-                    ))
-                    raw_anti_kl_loss = anti_kl_loss
-                    anti_kl_per_dim_mean = anti_kl_loss / latent_dim
+                    if is_vq_vae:
+                        # VQ-VAE: anti-batch VQ loss
+                        anti_vq_loss = torch.mean(anti_logvar)
+                        anti_latent_loss = anti_vq_loss
+                    else:
+                        # Standard VAE: anti-batch KL (no free-bits clamping)
+                        anti_latent_loss = 0.5 * torch.mean(torch.sum(
+                            anti_mu.pow(2) + anti_logvar.exp() - 1 - anti_logvar, dim=1
+                        ))
+                        raw_anti_kl_loss = anti_latent_loss
+                        anti_kl_per_dim_mean = anti_latent_loss / latent_dim
             
             # 4. BETA AND LAMBDA SCHEDULING
             # Compute effective beta (cyclical annealing if enabled)
@@ -1192,54 +1334,74 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
             # Compute effective lambda (dynamic scheduling if enabled)
             if use_dynamic_lambda and has_anti:
                 effective_lambda = get_dynamic_anti_lambda(
-                    effective_beta, beta, lambda_high_multiplier, 
+                    effective_beta, beta, lambda_high_multiplier,
                     anti_batch_lambda if anti_batch_lambda is not None else 0.01
                 )
             else:
                 effective_lambda = anti_batch_lambda if anti_batch_lambda is not None else 0.01
             
-            # 5. CONTRASTIVE KL MARGIN (enforce specialization gap)
-            if use_contrastive_margin and has_in_slice and has_anti:
+            # 5. CONTRASTIVE MARGIN (enforce specialization gap)
+            if use_contrastive_margin and has_in_slice and has_anti and not is_vq_vae:
+                # Only apply contrastive margin for VAE (not meaningful for VQ-VAE)
                 contrastive_margin_loss = compute_contrastive_kl_margin(
-                    kl_loss, anti_kl_loss, margin_tau
+                    latent_loss, anti_latent_loss, margin_tau
                 )
             
-            # 6. BONNET'S TOTAL LOSS (enhanced with new mechanisms)
-            total_loss = reconstruction_loss + effective_beta * kl_loss
+            # 6. TOTAL LOSS (enhanced with new mechanisms)
+            total_loss = reconstruction_loss + effective_beta * latent_loss
             
             if has_anti:
-                total_loss += effective_lambda * anti_kl_loss
+                total_loss += effective_lambda * anti_latent_loss
             
-            if use_contrastive_margin:
+            if use_contrastive_margin and not is_vq_vae:
                 total_loss += contrastive_margin_loss
             
-            # Debug metrics: CRITICAL - Use RAW KL values to see actual collapse
-            kl_gap_raw = (raw_kl_loss - raw_anti_kl_loss) if debug_kl_metrics and has_anti else None
-            kl_gap_clamped = (kl_loss - anti_kl_loss) if debug_kl_metrics and has_anti else None
+            # Debug metrics
+            kl_gap_raw = (raw_kl_loss - raw_anti_kl_loss) if debug_kl_metrics and has_anti and not is_vq_vae else None
+            kl_gap_clamped = (latent_loss - anti_latent_loss) if debug_kl_metrics and has_anti and not is_vq_vae else None
             
             if return_components:
-                return {
+                components = {
                     'total_loss': total_loss,
-                    'cross_pair_loss': reconstruction_loss,  # For backward compatibility
                     'reconstruction_loss': reconstruction_loss,
-                    'in_slice_kl_loss': kl_loss,
-                    'kl_loss': kl_loss,  # For backward compatibility  
-                    'anti_kl_loss': anti_kl_loss,
-                    'contrastive_margin_loss': contrastive_margin_loss,
+                    'cross_pair_loss': reconstruction_loss,
+                    'in_slice_kl_loss': latent_loss,
                     'effective_beta': effective_beta,
                     'effective_lambda': effective_lambda,
-                    'anti_lambda': effective_lambda,  # For backward compatibility
-                    # CRITICAL debug metrics to detect collapse
-                    'raw_kl_loss': raw_kl_loss,  # KL before free-bits clamping
-                    'clamped_kl_loss': kl_loss,  # KL after free-bits clamping
-                    'raw_anti_kl_loss': raw_anti_kl_loss,  # Anti-KL (always raw)
-                    'kl_per_dim': kl_per_dim_mean,  # Average KL per dimension
-                    'anti_kl_per_dim': anti_kl_per_dim_mean,  # Average anti-KL per dimension
-                    'kl_gap_raw': kl_gap_raw,  # Raw KL gap (seen - unseen)
-                    'kl_gap_clamped': kl_gap_clamped,  # Clamped KL gap
-                    # Legacy aliases
-                    'kl_gap': kl_gap_raw  # For backward compatibility
                 }
+                
+                if is_vq_vae:
+                    components.update({
+                        'vq_loss': vq_loss,
+                        'anti_vq_loss': anti_vq_loss,
+                        'kl_loss': torch.tensor(0.0, device=device),
+                        'anti_kl_loss': torch.tensor(0.0, device=device),
+                        'raw_kl_loss': torch.tensor(0.0, device=device),
+                        'kl_per_dim': torch.tensor(0.0, device=device),
+                    })
+                else:
+                    components.update({
+                        'kl_loss': latent_loss,
+                        'anti_kl_loss': anti_latent_loss,
+                        'vq_loss': torch.tensor(0.0, device=device),
+                        'anti_vq_loss': torch.tensor(0.0, device=device),
+                        'raw_kl_loss': raw_kl_loss,
+                        'kl_per_dim': kl_per_dim_mean,
+                    })
+                
+                # Add enhanced mechanism losses
+                if use_contrastive_margin and not is_vq_vae:
+                    components['contrastive_margin_loss'] = contrastive_margin_loss
+                
+                # Add debug metrics
+                if debug_kl_metrics and not is_vq_vae:
+                    if kl_gap_raw is not None:
+                        components['kl_gap'] = kl_gap_raw
+                    if 'anti_kl_per_dim_mean' in locals():
+                        components['anti_kl_per_dim'] = anti_kl_per_dim_mean
+                
+                return components
+            
             return total_loss
             
     else:
@@ -1271,35 +1433,56 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
         grid_loss = grid_loss_sum / active_samples_count if active_samples_count > 0 else torch.tensor(0.0, device=input_seq.device)
         reconstruction_loss = shape_loss + grid_loss
 
-        # Bonnet's KL divergence loss computation with FIXED per-dimension free-bits
-        if use_free_bits:
-            raw_kl_loss, kl_loss, kl_per_dim_mean = apply_free_bits_per_dimension(mu, log_var, free_bits_delta)
+        # Latent regularization loss (KL or VQ)
+        if is_vq_vae:
+            # VQ-VAE: log_var contains VQ loss
+            vq_loss = torch.mean(log_var)
+            latent_loss = vq_loss
+            raw_kl_loss = torch.tensor(0.0, device=input_seq.device)
+            kl_per_dim_mean = torch.tensor(0.0, device=input_seq.device)
         else:
-            kl_loss = 0.5 * torch.mean(torch.sum(mu.pow(2) + log_var.exp() - 1 - log_var, dim=1))
-            raw_kl_loss = kl_loss
-            kl_per_dim_mean = kl_loss / latent_dim
-        
+            # Standard VAE: KL divergence with free-bits
+            if use_free_bits:
+                raw_kl_loss, latent_loss, kl_per_dim_mean = apply_free_bits_per_dimension(mu, log_var, free_bits_delta)
+            else:
+                latent_loss = 0.5 * torch.mean(torch.sum(mu.pow(2) + log_var.exp() - 1 - log_var, dim=1))
+                raw_kl_loss = latent_loss
+                kl_per_dim_mean = latent_loss / latent_dim
+
         # Compute effective beta (cyclical annealing if enabled)
         if use_cyclical_beta and current_epoch is not None:
             effective_beta = get_cyclical_beta(current_epoch, beta_cycle_length, beta)
         else:
             effective_beta = beta
 
-        total_loss = reconstruction_loss + effective_beta * kl_loss
-        
-        # Debug metrics
-        kl_per_dim = kl_loss / latent_dim if debug_kl_metrics else None
-        
+        total_loss = reconstruction_loss + effective_beta * latent_loss
+
         if return_components:
-            return {
+            components = {
                 'total_loss': total_loss,
                 'reconstruction_loss': reconstruction_loss,
                 'shape_loss': shape_loss,
                 'grid_loss': grid_loss,
-                'kl_loss': kl_loss,
                 'effective_beta': effective_beta,
-                'kl_per_dim': kl_per_dim
             }
+            
+            if is_vq_vae:
+                components.update({
+                    'vq_loss': vq_loss,
+                    'kl_loss': torch.tensor(0.0, device=input_seq.device),
+                    'raw_kl_loss': torch.tensor(0.0, device=input_seq.device),
+                    'kl_per_dim': torch.tensor(0.0, device=input_seq.device),
+                })
+            else:
+                components.update({
+                    'kl_loss': latent_loss,
+                    'vq_loss': torch.tensor(0.0, device=input_seq.device),
+                    'raw_kl_loss': raw_kl_loss,
+                    'kl_per_dim': kl_per_dim_mean,
+                })
+            
+            return components
+        
         return total_loss
 
 
