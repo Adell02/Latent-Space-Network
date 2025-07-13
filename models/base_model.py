@@ -439,6 +439,13 @@ class TransformerDecoder(nn.Module):
         self.shape_output = nn.Linear(hidden_dim, 31)  # For shape values (indices 0-30)
         self.grid_output = nn.Linear(hidden_dim, 10)   # For grid values (indices 0-9)
         self.layer_norm = nn.LayerNorm(hidden_dim)
+        
+        # Initialize the input-latent gating mechanism
+        # This will be properly registered as a module parameter
+        self.input_latent_gate = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),  # memory_input + latent_emb
+            nn.Sigmoid()
+        )
 
     def prepare_input_memory(self, z: torch.Tensor, input_seq: torch.Tensor, training: bool = True) -> torch.Tensor:
         """Prepare memory from input sequence and latent vector."""
@@ -493,14 +500,7 @@ class TransformerDecoder(nn.Module):
         # This forces the model to learn when to use latent vs input information
         latent_expanded = latent_emb.unsqueeze(1).expand(-1, memory_input.size(1), -1)
         
-        # Learnable gating between input and latent information
-        if not hasattr(self, 'input_latent_gate'):
-            self.input_latent_gate = nn.Sequential(
-                nn.Linear(memory_input.size(-1) + latent_emb.size(-1), memory_input.size(-1)),
-                nn.Sigmoid()
-            ).to(device)
-        
-        # Compute gating weights
+        # Compute gating weights using the properly initialized gate
         combined_for_gate = torch.cat([memory_input, latent_expanded], dim=-1)
         gate_weights = self.input_latent_gate(combined_for_gate)
         
