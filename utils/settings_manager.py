@@ -59,7 +59,7 @@ class SettingsManager:
         """Get wandb settings."""
         if self._settings is None:
             self.load_settings()
-        return self._settings['training_settings'].get('wandb', {
+        return self._settings.get('wandb_settings', {
             'enabled': False,
             'entity': None,
             'api_key': None,

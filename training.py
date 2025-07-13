@@ -351,14 +351,46 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed
                 # Original training modes (single encoder or individual encoder training)
                 if encoder_idx is not None:
                     # Multi-encoder: train specific encoder
-                    loss, shape_loss_comp, grid_loss_comp, kl_loss_comp = compute_loss(
-                        model, input_seq, target_seq, beta=BETA, return_components=True, encoder_idx=encoder_idx
+                    loss_result = compute_loss(
+                        model, input_seq, target_seq, beta=BETA, return_components=True, encoder_idx=encoder_idx,
+                        # Enhanced mechanisms (use defaults)
+                        use_cyclical_beta=False, use_free_bits=True, use_dynamic_lambda=False,
+                        use_contrastive_margin=False, debug_kl_metrics=False
                     )
+                    
+                    # Extract components from the result dictionary
+                    if isinstance(loss_result, dict):
+                        loss = loss_result['total_loss']
+                        shape_loss_comp = loss_result.get('shape_loss', torch.tensor(0.0, device=input_seq.device))
+                        grid_loss_comp = loss_result.get('grid_loss', torch.tensor(0.0, device=input_seq.device))
+                        kl_loss_comp = loss_result.get('kl_loss', torch.tensor(0.0, device=input_seq.device))
+                    else:
+                        # Fallback for backward compatibility (shouldn't happen with enhanced function)
+                        loss = loss_result
+                        shape_loss_comp = torch.tensor(0.0, device=input_seq.device)
+                        grid_loss_comp = torch.tensor(0.0, device=input_seq.device)
+                        kl_loss_comp = torch.tensor(0.0, device=input_seq.device)
                 else:
                     # Single encoder or inference mode
-                    loss, shape_loss_comp, grid_loss_comp, kl_loss_comp = compute_loss(
-                        model, input_seq, target_seq, beta=BETA, return_components=True
+                    loss_result = compute_loss(
+                        model, input_seq, target_seq, beta=BETA, return_components=True,
+                        # Enhanced mechanisms (use defaults for regular training)
+                        use_cyclical_beta=False, use_free_bits=True, use_dynamic_lambda=False,
+                        use_contrastive_margin=False, debug_kl_metrics=False
                     )
+                    
+                    # Extract components from the result dictionary
+                    if isinstance(loss_result, dict):
+                        loss = loss_result['total_loss']
+                        shape_loss_comp = loss_result.get('shape_loss', torch.tensor(0.0, device=input_seq.device))
+                        grid_loss_comp = loss_result.get('grid_loss', torch.tensor(0.0, device=input_seq.device))
+                        kl_loss_comp = loss_result.get('kl_loss', torch.tensor(0.0, device=input_seq.device))
+                    else:
+                        # Fallback for backward compatibility (shouldn't happen with enhanced function)
+                        loss = loss_result
+                        shape_loss_comp = torch.tensor(0.0, device=input_seq.device)
+                        grid_loss_comp = torch.tensor(0.0, device=input_seq.device)
+                        kl_loss_comp = torch.tensor(0.0, device=input_seq.device)
                 loss = loss / gradient_accumulation_steps
                 repulsion_comp = torch.tensor(0.0, device=input_seq.device)  # No repulsion in original modes
         
