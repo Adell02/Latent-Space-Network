@@ -16,6 +16,15 @@ from utils.model_utils import (
     save_evaluation_results
 )
 from utils.visualizers import visualize_stored_results
+from utils.wandb_logger import init_wandb_for_mode, get_wandb_logger
+
+# Efficient latent validation import (graceful fallback)
+try:
+    from latent_validation import run_latent_validation_for_specialist
+    LATENT_VALIDATION_AVAILABLE = True
+except ImportError as e:
+    print(f"⚠ Latent validation not available: {e}")
+    LATENT_VALIDATION_AVAILABLE = False
 
 # --------------------------------------------------
 # Load settings-driven defaults for CLI parameters
@@ -135,6 +144,35 @@ def main_args():
             args.n_eval_samples, args.n_eval_queries, EVAL_SEED, device
         )
         save_evaluation_results(eval_results, run_dir)
+
+        # --- Efficient Latent Validation (after evaluation) ---
+        if LATENT_VALIDATION_AVAILABLE:
+            print("\n=== RUNNING SPECIALIST LATENT VALIDATION ===")
+            wandb_logger = None
+            try:
+                from utils.wandb_logger import get_wandb_logger
+                wandb_logger = get_wandb_logger()
+            except Exception:
+                pass
+            # Use a step counter that is always increasing (use eval epoch if int, else 1000)
+            try:
+                step_counter = int(args.epoch)
+            except Exception:
+                step_counter = 1000
+            result = run_latent_validation_for_specialist(
+                run_dir=run_dir,
+                model=model,
+                device=device,
+                eval_keys=args.keys,
+                n_samples_per_key=min(10, args.n_eval_samples),
+                wandb_logger=wandb_logger,
+                step_hint=step_counter + 1
+            )
+            print(f"Latent validation result: {result}")
+            if not result.get('success', True):
+                print(f"⚠ Latent validation failed or skipped: {result.get('reason', 'unknown reason')}")
+        else:
+            print("⚠ Latent validation skipped (scikit-learn not available)")
 
     # ----------------------
     # VISUALIZATION

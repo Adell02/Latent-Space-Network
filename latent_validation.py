@@ -214,12 +214,15 @@ def latent_space_visualization(model, input_seqs, target_seqs, device, max_sampl
     return latents_pca, latents_tsne, properties, explained_variance
 
 
-def create_visualization_plots(swap_results, zero_random_results, latents_pca, latents_tsne, properties, explained_variance=None):
+def create_visualization_plots(swap_results, zero_random_results, latents_pca, latents_tsne, properties, explained_variance=None, run_dir=None):
     """Create comprehensive visualization plots for WandB."""
+    import matplotlib.pyplot as plt
+    import os
     plots = {}
     
     # 1. LATENT SWAP VISUALIZATION
     if swap_results:
+        print("Creating latent swap plot...")
         fig, axes = plt.subplots(2, min(3, len(swap_results)), figsize=(15, 8))
         if len(swap_results) < 3:
             axes = axes.reshape(2, -1)
@@ -250,13 +253,17 @@ def create_visualization_plots(swap_results, zero_random_results, latents_pca, l
         plt.suptitle('LATENT SWAP TEST\nIf latents matter: swapped reconstructions should differ from targets', fontsize=14)
         plt.tight_layout()
         
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-            plt.savefig(tmp.name, dpi=150, bbox_inches='tight')
-            plots['latent_swap'] = tmp.name
+        fname = os.path.join(run_dir, 'latent_swap.png') if run_dir else 'latent_swap.png'
+        plt.savefig(fname, dpi=150, bbox_inches='tight')
+        plots['latent_swap'] = fname
+        print(f"  ✓ Latent swap plot saved: {fname}")
         plt.close()
+    else:
+        print("  ⚠ No swap results, skipping latent swap plot.")
     
     # 2. ZERO/RANDOM LATENT VISUALIZATION
     if zero_random_results['zero']:
+        print("Creating zero/random latent plot...")
         fig, axes = plt.subplots(3, min(3, len(zero_random_results['zero'])), figsize=(15, 12))
         if len(zero_random_results['zero']) < 3:
             axes = axes.reshape(3, -1)
@@ -301,13 +308,17 @@ def create_visualization_plots(swap_results, zero_random_results, latents_pca, l
         plt.suptitle('ZERO/RANDOM LATENT TEST\nIf latents matter: zero/random should produce garbage', fontsize=14)
         plt.tight_layout()
         
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-            plt.savefig(tmp.name, dpi=150, bbox_inches='tight')
-            plots['zero_random_latent'] = tmp.name
+        fname = os.path.join(run_dir, 'zero_random_latent.png') if run_dir else 'zero_random_latent.png'
+        plt.savefig(fname, dpi=150, bbox_inches='tight')
+        plots['zero_random_latent'] = fname
+        print(f"  ✓ Zero/random latent plot saved: {fname}")
         plt.close()
+    else:
+        print("  ⚠ No zero/random results, skipping zero/random latent plot.")
     
     # 3. ENHANCED LATENT SPACE VISUALIZATION
     if latents_pca is not None and len(latents_pca) > 0:
+        print("Creating latent space plot...")
         # Get unique keys and create color mapping
         keys = [p['key'] for p in properties]
         unique_keys = list(set(keys))
@@ -414,12 +425,79 @@ def create_visualization_plots(swap_results, zero_random_results, latents_pca, l
         plt.suptitle(f'LATENT SPACE CLUSTERING ANALYSIS\n{len(unique_keys)} Problem Keys • {len(latents_pca)} Samples', fontsize=16)
         plt.tight_layout()
         
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-            plt.savefig(tmp.name, dpi=200, bbox_inches='tight')
-            plots['latent_space'] = tmp.name
+        fname = os.path.join(run_dir, 'latent_space.png') if run_dir else 'latent_space.png'
+        plt.savefig(fname, dpi=200, bbox_inches='tight')
+        plots['latent_space'] = fname
+        print(f"  ✓ Latent space plot saved: {fname}")
         plt.close()
+    else:
+        print("  ⚠ No latent PCA data, skipping latent space plot.")
     
     return plots
+
+
+def run_latent_validation_for_specialist(run_dir, model, device, eval_keys, n_samples_per_key=5, wandb_logger=None, step_hint=None):
+    print("\n=== SPECIALIST LATENT VALIDATION ===")
+    if step_hint is None:
+        step_hint = 99999  # Always log at a high step to avoid WandB step order issues
+    all_inputs, all_outputs, sample_keys = [], [], []
+    for key in eval_keys[:2]:
+        try:
+            from re_arc.main import generate_and_process_tasks
+            _, _, _, inputs, outputs = generate_and_process_tasks(key, n_samples_per_key)
+            all_inputs.extend(inputs)
+            all_outputs.extend(outputs)
+            sample_keys.extend([key] * len(inputs))
+            print(f"  ✓ Generated {len(inputs)} samples for key '{key}'")
+        except Exception as e:
+            print(f"  ⚠ Failed to generate data for key {key}: {e}")
+    if not all_inputs:
+        print("⚠ No data available for latent validation")
+        return {'success': False, 'reason': 'no_data'}
+    try:
+        print(f"  Running latent validation on {len(all_inputs)} samples from {len(set(sample_keys))} keys...")
+        swap_results = latent_swap_test(model, all_inputs, all_outputs, device, n_samples=min(5, len(all_inputs)))
+        zero_random_results = zero_random_latent_test(model, all_inputs, all_outputs, device, n_samples=min(3, len(all_inputs)))
+        latents_pca, latents_tsne, properties, explained_variance = latent_space_visualization(
+            model, all_inputs, all_outputs, device, max_samples=min(30, len(all_inputs)), sample_keys=sample_keys
+        )
+        latent_plots = create_visualization_plots(swap_results, zero_random_results, latents_pca, latents_tsne, properties, explained_variance, run_dir=run_dir)
+        if latent_plots:
+            print(f"  ✓ Generated plots: {list(latent_plots.keys())}")
+            for k, v in latent_plots.items():
+                print(f"    - {k}: {v}")
+        else:
+            print("  ⚠ No plots were generated by latent validation.")
+        # Log to wandb if provided
+        if wandb_logger:
+            import wandb
+            log_dict = {
+                'latent_validation/n_samples_tested': len(all_inputs),
+                'latent_validation/n_swap_tests': len(swap_results),
+                'latent_validation/n_zero_random_tests': len(zero_random_results['zero']),
+                'latent_validation/latent_space_samples': len(latents_pca) if latents_pca is not None else 0,
+                'latent_validation/data_source': f'specialist_latent_validation_keys_{eval_keys[:2]}'
+            }
+            for plot_name, plot_path in latent_plots.items():
+                if os.path.exists(plot_path):
+                    log_dict[f'latent_validation/{plot_name}'] = wandb.Image(plot_path)
+                    print(f"  ✓ Uploaded {plot_name} to WandB: {plot_path}")
+                else:
+                    print(f"  ⚠ Plot file missing for WandB upload: {plot_path}")
+            wandb_logger._safe_log(log_dict, step_hint=step_hint)
+        print("  ✓ Latent validation complete.")
+        return {
+            'success': True,
+            'n_samples_tested': len(all_inputs),
+            'n_swap_tests': len(swap_results),
+            'n_zero_random_tests': len(zero_random_results['zero']),
+            'latent_space_samples': len(latents_pca) if latents_pca is not None else 0,
+            'test_keys': eval_keys[:2]
+        }
+    except Exception as e:
+        print(f"⚠ Latent validation failed: {e}")
+        import traceback; traceback.print_exc()
+        return {'success': False, 'reason': str(e)}
 
 
 def main():
@@ -488,7 +566,7 @@ def main():
     
     # Create visualizations
     print("4. Creating visualization plots...")
-    plots = create_visualization_plots(swap_results, zero_random_results, latents_pca, latents_tsne, properties, explained_variance)
+    plots = create_visualization_plots(swap_results, zero_random_results, latents_pca, latents_tsne, properties, explained_variance, run_dir=run_dir)
     
     # Log to WandB
     if wandb_logger:
@@ -509,6 +587,9 @@ def main():
             for plot_name, plot_path in plots.items():
                 if os.path.exists(plot_path):
                     log_dict[f'latent_validation/{plot_name}'] = wandb.Image(plot_path)
+                    print(f"  ✓ Uploaded {plot_name} to WandB: {plot_path}")
+                else:
+                    print(f"  ⚠ Plot file missing for WandB upload: {plot_path}")
             
             wandb_logger._safe_log(log_dict, step_hint=args.epoch)
             print(f"✓ Results logged to WandB at epoch {args.epoch}")
