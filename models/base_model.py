@@ -312,7 +312,7 @@ class TransformerEncoder(nn.Module):
 
         return torch.stack(masks)
 
-    def forward(self, input_seq: torch.Tensor, target_seq: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, input_seq: torch.Tensor, target_seq: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         batch_size = input_seq.size(0)
         device = input_seq.device
         
@@ -372,13 +372,13 @@ class TransformerEncoder(nn.Module):
             # VQ-VAE path: continuous -> discrete quantization
             z_continuous = self.fc_latent(cls_output)
             z_quantized, vq_loss, encoding_indices = self.vq_vae(z_continuous)
-            # Return quantized latent and VQ loss (stored in log_var position for compatibility)
-            return z_quantized, vq_loss.unsqueeze(0).expand(batch_size, -1) if vq_loss.dim() == 0 else vq_loss
+            # Return quantized latent, VQ loss, and encoding indices
+            return z_quantized, vq_loss.unsqueeze(0).expand(batch_size, -1) if vq_loss.dim() == 0 else vq_loss, encoding_indices
         else:
             # Standard VAE path
             mu = self.fc_mu(cls_output)
             log_var = self.fc_log_var(cls_output)
-            return mu, log_var
+            return mu, log_var, None
 
     def get_vq_metrics(self) -> Optional[Dict[str, Any]]:
         """Get VQ-VAE metrics if enabled."""
@@ -490,7 +490,10 @@ class TransformerDecoder(nn.Module):
         grid_emb = grid_emb + pos_emb
 
         # Concatenate shape embeddings and grid embeddings for memory.
-        memory_input = torch.cat([shape_emb, grid_emb], dim=1)
+        #memory_input = torch.cat([shape_emb, grid_emb], dim=1)
+        # IGNORE THE GROUND TRUTH AT THE DECODER
+        memory_input = torch.zeros_like(torch.cat([shape_emb, grid_emb], dim=1))      
+
 
         latent_emb = self.latent_projection(z)
         
@@ -528,30 +531,74 @@ class TransformerDecoder(nn.Module):
 
     def forward(self, z: torch.Tensor, input_seq: torch.Tensor, target_seq: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        If target_seq is provided, use teacher forcing mode (batch parallel processing).
-        Otherwise, fall back on autoregressive decoding.
+        If ``target_seq`` is provided, training uses a **teacher forcing** setup
+        where the ground‑truth tokens are shifted right and a start token is
+        prepended.  This prevents the decoder from simply copying the targets and
+        forces it to utilise the latent vector ``z``.  When ``target_seq`` is not
+        supplied the method falls back to a simple autoregressive decoding loop
+        (used during inference).
+
         """
         batch_size = input_seq.size(0)
         device = input_seq.device
         memory = self.prepare_input_memory(z, input_seq, training=self.training)
 
-        # ----- Teacher Forcing Mode -----
-        # Clamp target sequence values to ensure valid embedding indices
-        tgt_grid = torch.clamp(target_seq[:, :900], 0, 9).long()
-        tgt_shape = torch.clamp(target_seq[:, 900:902], 0, 30).long()
-        grid_emb = self.output_grid_embedding(tgt_grid)
-        shape_emb = self.output_shape_embedding(tgt_shape)
-        pos_i = torch.arange(30, device=device).view(1, -1, 1).repeat(batch_size, 1, 30)
-        pos_j = torch.arange(30, device=device).view(1, 1, -1).repeat(batch_size, 30, 1)
-        pos_emb_grid = (self.row_embedding(pos_i) + self.col_embedding(pos_j)).view(batch_size, 900, -1)
-        grid_emb = grid_emb + pos_emb_grid
-        teacher_tgt = torch.cat([grid_emb, shape_emb], dim=1)  # [B, 902, hidden_dim]
+        if target_seq is not None:
+            # ----- Teacher Forcing (autoregressive shift) -----
+            tgt_grid = torch.clamp(target_seq[:, :900], 0, 9).long()
+            tgt_shape = torch.clamp(target_seq[:, 900:902], 0, 30).long()
 
-        decoder_output = self.transformer_decoder(tgt=teacher_tgt, memory=memory)
-        decoder_output = self.layer_norm(decoder_output)
-        grid_logits = self.grid_output(decoder_output[:, :900])
-        shape_logits = self.shape_output(decoder_output[:, 900:902])
-        return shape_logits, grid_logits
+            grid_emb = self.output_grid_embedding(tgt_grid)
+            shape_emb = self.output_shape_embedding(tgt_shape)
+
+            pos_i = torch.arange(30, device=device).view(1, -1, 1).repeat(batch_size, 1, 30)
+            pos_j = torch.arange(30, device=device).view(1, 1, -1).repeat(batch_size, 30, 1)
+            pos_emb_grid = (self.row_embedding(pos_i) + self.col_embedding(pos_j)).view(batch_size, 900, -1)
+            grid_emb = grid_emb + pos_emb_grid
+
+            seq_emb = torch.cat([grid_emb, shape_emb], dim=1)  # [B, 902, hidden_dim]
+
+            start_tok = self.start_token_embedding.expand(batch_size, 1, -1)
+            teacher_inputs = torch.cat([start_tok, seq_emb], dim=1)  # [B, 903, hidden_dim]
+
+            causal_mask = self.create_causal_mask(teacher_inputs.size(1), device)
+            decoder_output = self.transformer_decoder(tgt=teacher_inputs, memory=memory, tgt_mask=causal_mask)
+            decoder_output = self.layer_norm(decoder_output)
+            decoder_output = decoder_output[:, 1:]  # remove start token output
+
+            grid_logits = self.grid_output(decoder_output[:, :900])
+            shape_logits = self.shape_output(decoder_output[:, 900:902])
+            return shape_logits, grid_logits
+        else:
+            # ----- Autoregressive Inference -----
+            seq_len = 902
+            inputs = self.start_token_embedding.expand(batch_size, 1, -1)
+            logits_seq = []
+            for step in range(seq_len):
+                mask = self.create_causal_mask(inputs.size(1), device)
+                dec_out = self.transformer_decoder(tgt=inputs, memory=memory, tgt_mask=mask)
+                dec_out = self.layer_norm(dec_out)
+                last_out = dec_out[:, -1:]
+
+                if step < 900:
+                    logits = self.grid_output(last_out)
+                    pred = torch.argmax(logits, dim=-1)
+                    emb = self.output_grid_embedding(pred)
+                    row_idx, col_idx = divmod(step, 30)
+                    emb = emb + self.get_position_embedding(row_idx, col_idx, device)
+                else:
+                    logits = self.shape_output(last_out)
+                    pred = torch.argmax(logits, dim=-1)
+                    emb = self.output_shape_embedding(pred)
+
+                inputs = torch.cat([inputs, emb], dim=1)
+                logits_seq.append(logits)
+
+            logits_seq = torch.cat(logits_seq, dim=1)
+            grid_logits = logits_seq[:, :900]
+            shape_logits = logits_seq[:, 900:]
+            return shape_logits, grid_logits
+
 
 # -------------------------------------------------
 #  Multi‑Encoder wrapper
@@ -662,20 +709,20 @@ class MultiEncoderLPN(nn.Module):
         """Forward pass for a single encoder with its independent decoder (Phase A)."""
         assert 0 <= encoder_idx < self.num_encoders, f"encoder_idx {encoder_idx} out of range [0, {self.num_encoders})"
         
-        mu, logvar = self.encoders[encoder_idx](input_seq, target_seq)
+        mu, logvar, encoding_indices = self.encoders[encoder_idx](input_seq, target_seq)
         z = self._reparam(mu, logvar, sample_latent)
         shape_logits, grid_logits = self.independent_decoders[encoder_idx](z, input_seq, target_seq=target_seq)
-        return (shape_logits, grid_logits), mu, logvar
+        return (shape_logits, grid_logits), mu, logvar, encoding_indices
 
     def forward_single_encoder(self, encoder_idx: int, input_seq: torch.Tensor, target_seq: torch.Tensor, 
                               training: bool = True, sample_latent: bool = True) -> Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor]:
         """Forward pass for a single encoder with shared decoder (legacy compatibility)."""
         assert 0 <= encoder_idx < self.num_encoders, f"encoder_idx {encoder_idx} out of range [0, {self.num_encoders})"
         
-        mu, logvar = self.encoders[encoder_idx](input_seq, target_seq)
+        mu, logvar, encoding_indices = self.encoders[encoder_idx](input_seq, target_seq)
         z = self._reparam(mu, logvar, sample_latent)
         shape_logits, grid_logits = self.shared_decoder(z, input_seq, target_seq=target_seq)
-        return (shape_logits, grid_logits), mu, logvar
+        return (shape_logits, grid_logits), mu, logvar, encoding_indices
 
     def forward_poe_with_shared_decoder(self, input_views: List[Tuple[torch.Tensor, torch.Tensor]], 
                                        sample_latent: bool = True) -> Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor]:
@@ -686,7 +733,7 @@ class MultiEncoderLPN(nn.Module):
         # Collect latent distributions from all encoders
         mu_list, logvar_list = [], []
         for (enc, (x, y)) in zip(self.encoders, input_views):
-            μ, logσ2 = enc(x, y)
+            μ, logσ2, _ = enc(x, y)
             mu_list.append(μ)
             logvar_list.append(logσ2)
         
@@ -700,7 +747,7 @@ class MultiEncoderLPN(nn.Module):
         # Use shared decoder
         x0, y0 = input_views[0]  # decoder conditions on one input grid
         shape_logits, grid_logits = self.shared_decoder(z, x0, target_seq=y0)
-        return (shape_logits, grid_logits), mu_star, logvar_star
+        return (shape_logits, grid_logits), mu_star, logvar_star, None
 
     def forward(
         self,
@@ -863,7 +910,7 @@ def compute_bonnet_cross_pair_loss(
         return torch.tensor(0.0, device=device)
     
     # Encode all samples to get latent codes z_i
-    mu_all, logvar_all = model.multi_encoder.encoders[encoder_idx](input_seq, target_seq)
+    mu_all, logvar_all, _ = model.multi_encoder.encoders[encoder_idx](input_seq, target_seq)
     z_all = model.multi_encoder._reparam(mu_all, logvar_all, sample=True)  # [B, latent_dim]
     
     total_cross_pair_loss = 0.0
@@ -1157,7 +1204,7 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
         if encoder_idx is None:
             # PoE training with shared decoder (Phase B)
             input_views = [(input_seq, target_seq) for _ in range(model.num_encoders)]
-            reconstruction, mu_star, logvar_star = model.multi_encoder.forward_poe_with_shared_decoder(
+            reconstruction, mu_star, logvar_star, _ = model.multi_encoder.forward_poe_with_shared_decoder(
                 input_views, sample_latent=True
             )
             shape_logits, grid_logits = reconstruction
@@ -1240,7 +1287,7 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
             batch_size = input_seq.size(0)
             
             # Get latent distributions for KL computation
-            mu, logvar = model.multi_encoder.encoders[encoder_idx](input_seq, target_seq)
+            mu, logvar, encoding_indices = model.multi_encoder.encoders[encoder_idx](input_seq, target_seq)
             
             # Separate in-slice and anti-samples if anti-batch is used
             if anti_mask is not None:
@@ -1412,7 +1459,7 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
             
     else:
         # Single encoder model - use Bonnet's standard approach with enhancements
-        reconstruction, mu, log_var = model(input_seq, target_seq)
+        reconstruction, mu, log_var, _ = model(input_seq, target_seq)
         shape_logits, grid_logits = reconstruction
 
         # Bonnet's reconstruction loss computation

@@ -294,7 +294,7 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed
                 K = model.num_encoders
                 mus, logvars = [], []
                 for enc_idx in range(K):
-                    mu, logvar = model.multi_encoder.encoders[enc_idx](input_seq, target_seq)
+                    mu, logvar,_ = model.multi_encoder.encoders[enc_idx](input_seq, target_seq)
                     mus.append(mu)
                     logvars.append(logvar)
                 

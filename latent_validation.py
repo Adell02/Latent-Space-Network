@@ -40,22 +40,30 @@ def latent_swap_test(model, input_seqs, target_seqs, device, n_samples=5):
     """
     model.eval()
     results = []
-    
+    correct_recons = []
     with torch.no_grad():
         # Get latents from all samples
         latents = []
         for i in range(min(n_samples, len(input_seqs))):
             input_seq = torch.tensor(input_seqs[i], dtype=torch.float32).unsqueeze(0).to(device)
             target_seq = torch.tensor(target_seqs[i], dtype=torch.float32).unsqueeze(0).to(device)
-            
             if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
-                # Use first encoder for simplicity
                 mu, logvar = model.multi_encoder.encoders[0](input_seq, target_seq)
             else:
                 _, mu, logvar = model(input_seq, target_seq)
-            
             latents.append(mu[0])  # Take mean (deterministic)
-        
+            # Compute correct reconstruction
+            if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
+                shape_logits, grid_logits = model.multi_encoder.shared_decoder(mu, input_seq, target_seq=target_seq)
+            else:
+                shape_logits, grid_logits = model.decoder(mu, input_seq, target_seq=target_seq)
+            correct_recons.append({
+                'input_source': i,
+                'input_seq': input_seqs[i],
+                'target_seq': target_seqs[i],
+                'shape_logits': shape_logits[0].argmax(dim=-1).cpu().numpy(),
+                'grid_logits': grid_logits[0].argmax(dim=-1).cpu().numpy()
+            })
         # Now do the swaps: use latent[i] to decode input[j] where i != j
         for i in range(min(n_samples, len(latents))):
             for j in range(min(n_samples, len(latents))):
@@ -63,8 +71,6 @@ def latent_swap_test(model, input_seqs, target_seqs, device, n_samples=5):
                     input_seq = torch.tensor(input_seqs[j], dtype=torch.float32).unsqueeze(0).to(device)
                     target_seq = torch.tensor(target_seqs[j], dtype=torch.float32).unsqueeze(0).to(device)
                     swapped_latent = latents[i].unsqueeze(0)
-                    
-                    # Decode with swapped latent
                     if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
                         shape_logits, grid_logits = model.multi_encoder.shared_decoder(
                             swapped_latent, input_seq, target_seq=target_seq
@@ -73,8 +79,6 @@ def latent_swap_test(model, input_seqs, target_seqs, device, n_samples=5):
                         shape_logits, grid_logits = model.decoder(
                             swapped_latent, input_seq, target_seq=target_seq
                         )
-                    
-                    # Store result
                     results.append({
                         'latent_source': i,
                         'input_source': j,
@@ -83,8 +87,7 @@ def latent_swap_test(model, input_seqs, target_seqs, device, n_samples=5):
                         'shape_logits': shape_logits[0].argmax(dim=-1).cpu().numpy(),
                         'grid_logits': grid_logits[0].argmax(dim=-1).cpu().numpy()
                     })
-    
-    return results
+    return correct_recons, results
 
 
 def zero_random_latent_test(model, input_seqs, target_seqs, device, n_samples=3):
@@ -94,14 +97,25 @@ def zero_random_latent_test(model, input_seqs, target_seqs, device, n_samples=3)
     If decoder ignores latents, outputs will look normal.
     """
     model.eval()
-    results = {'zero': [], 'random': []}
+    results = {'zero': [], 'random': [], 'correct': []}
     latent_dim = model.multi_encoder.latent_dim if hasattr(model, 'multi_encoder') else model.latent_dim
-    
     with torch.no_grad():
         for i in range(min(n_samples, len(input_seqs))):
             input_seq = torch.tensor(input_seqs[i], dtype=torch.float32).unsqueeze(0).to(device)
             target_seq = torch.tensor(target_seqs[i], dtype=torch.float32).unsqueeze(0).to(device)
-            
+            # Compute correct latent and reconstruction
+            if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
+                mu, logvar = model.multi_encoder.encoders[0](input_seq, target_seq)
+                shape_logits_corr, grid_logits_corr = model.multi_encoder.shared_decoder(mu, input_seq, target_seq=target_seq)
+            else:
+                _, mu, logvar = model(input_seq, target_seq)
+                shape_logits_corr, grid_logits_corr = model.decoder(mu, input_seq, target_seq=target_seq)
+            results['correct'].append({
+                'input_seq': input_seqs[i],
+                'target_seq': target_seqs[i],
+                'shape_logits': shape_logits_corr[0].argmax(dim=-1).cpu().numpy(),
+                'grid_logits': grid_logits_corr[0].argmax(dim=-1).cpu().numpy()
+            })
             # Test with zero latent
             zero_latent = torch.zeros(1, latent_dim, device=device)
             if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
@@ -112,7 +126,6 @@ def zero_random_latent_test(model, input_seqs, target_seqs, device, n_samples=3)
                 shape_logits_zero, grid_logits_zero = model.decoder(
                     zero_latent, input_seq, target_seq=target_seq
                 )
-            
             # Test with random latent
             random_latent = torch.randn(1, latent_dim, device=device)
             if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
@@ -123,21 +136,18 @@ def zero_random_latent_test(model, input_seqs, target_seqs, device, n_samples=3)
                 shape_logits_rand, grid_logits_rand = model.decoder(
                     random_latent, input_seq, target_seq=target_seq
                 )
-            
             results['zero'].append({
                 'input_seq': input_seqs[i],
                 'target_seq': target_seqs[i],
                 'shape_logits': shape_logits_zero[0].argmax(dim=-1).cpu().numpy(),
                 'grid_logits': grid_logits_zero[0].argmax(dim=-1).cpu().numpy()
             })
-            
             results['random'].append({
                 'input_seq': input_seqs[i],
                 'target_seq': target_seqs[i],
                 'shape_logits': shape_logits_rand[0].argmax(dim=-1).cpu().numpy(),
                 'grid_logits': grid_logits_rand[0].argmax(dim=-1).cpu().numpy()
             })
-    
     return results
 
 
@@ -214,45 +224,53 @@ def latent_space_visualization(model, input_seqs, target_seqs, device, max_sampl
     return latents_pca, latents_tsne, properties, explained_variance
 
 
-def create_visualization_plots(swap_results, zero_random_results, latents_pca, latents_tsne, properties, explained_variance=None, run_dir=None):
+def create_visualization_plots(swap_results_tuple, zero_random_results, latents_pca, latents_tsne, properties, explained_variance=None, run_dir=None):
     """Create comprehensive visualization plots for WandB."""
     import matplotlib.pyplot as plt
     import os
     plots = {}
-    
+    correct_recons, swap_results = swap_results_tuple
     # 1. LATENT SWAP VISUALIZATION
-    if swap_results:
+    if correct_recons and swap_results:
         print("Creating latent swap plot...")
-        fig, axes = plt.subplots(2, min(3, len(swap_results)), figsize=(15, 8))
-        if len(swap_results) < 3:
-            axes = axes.reshape(2, -1)
-        
-        for idx, result in enumerate(swap_results[:3]):
+        n_show = min(3, len(correct_recons))
+        fig, axes = plt.subplots(3, n_show, figsize=(5 * n_show, 12))
+        if n_show == 1:
+            axes = axes.reshape(3, 1)
+        for idx in range(n_show):
             try:
                 # Original target
-                target_grid, target_shape = extract_grid_from_sequence(result['target_seq'])
+                target_grid, _ = extract_grid_from_sequence(correct_recons[idx]['target_seq'])
                 axes[0, idx].imshow(target_grid, cmap='viridis', interpolation='nearest')
-                axes[0, idx].set_title(f'Target (Input {result["input_source"]})')
+                axes[0, idx].set_title(f'Target {idx}')
                 axes[0, idx].axis('off')
-                
-                # Swapped reconstruction
-                recon_seq = result['target_seq'].copy()
-                recon_seq[900:902] = result['shape_logits']
-                if len(result['shape_logits']) >= 2 and result['shape_logits'][0] > 0:
-                    recon_seq[:min(len(result['grid_logits']), 900)] = result['grid_logits'][:900]
-                
-                recon_grid, recon_shape = extract_grid_from_sequence(recon_seq)
-                axes[1, idx].imshow(recon_grid, cmap='viridis', interpolation='nearest')
-                axes[1, idx].set_title(f'Swapped Recon\n(Latent {result["latent_source"]} → Input {result["input_source"]})')
+                # Correct reconstruction
+                corr_seq = correct_recons[idx]['target_seq'].copy()
+                corr_seq[900:902] = correct_recons[idx]['shape_logits']
+                if len(correct_recons[idx]['shape_logits']) >= 2 and correct_recons[idx]['shape_logits'][0] > 0:
+                    corr_seq[:min(len(correct_recons[idx]['grid_logits']), 900)] = correct_recons[idx]['grid_logits'][:900]
+                corr_grid, _ = extract_grid_from_sequence(corr_seq)
+                axes[1, idx].imshow(corr_grid, cmap='viridis', interpolation='nearest')
+                axes[1, idx].set_title('Correct Recon')
                 axes[1, idx].axis('off')
-                
+                # Swapped reconstruction (pick the first swap for this input)
+                swap = next((s for s in swap_results if s['input_source'] == idx), None)
+                if swap:
+                    swap_seq = swap['target_seq'].copy()
+                    swap_seq[900:902] = swap['shape_logits']
+                    if len(swap['shape_logits']) >= 2 and swap['shape_logits'][0] > 0:
+                        swap_seq[:min(len(swap['grid_logits']), 900)] = swap['grid_logits'][:900]
+                    swap_grid, _ = extract_grid_from_sequence(swap_seq)
+                    axes[2, idx].imshow(swap_grid, cmap='viridis', interpolation='nearest')
+                    axes[2, idx].set_title(f'Swapped Recon\n(Latent {swap["latent_source"]} → Input {swap["input_source"]})')
+                    axes[2, idx].axis('off')
+                else:
+                    axes[2, idx].text(0.5, 0.5, 'No swap', ha='center', va='center')
             except Exception as e:
-                axes[0, idx].text(0.5, 0.5, f'Error: {str(e)[:30]}', ha='center', va='center')
-                axes[1, idx].text(0.5, 0.5, f'Error: {str(e)[:30]}', ha='center', va='center')
-        
-        plt.suptitle('LATENT SWAP TEST\nIf latents matter: swapped reconstructions should differ from targets', fontsize=14)
+                for row in range(3):
+                    axes[row, idx].text(0.5, 0.5, f'Error: {str(e)[:30]}', ha='center', va='center')
+        plt.suptitle('LATENT SWAP TEST\nRow 1: Target, Row 2: Correct Recon, Row 3: Swapped Recon', fontsize=14)
         plt.tight_layout()
-        
         fname = os.path.join(run_dir, 'latent_swap.png') if run_dir else 'latent_swap.png'
         plt.savefig(fname, dpi=150, bbox_inches='tight')
         plots['latent_swap'] = fname
@@ -260,54 +278,52 @@ def create_visualization_plots(swap_results, zero_random_results, latents_pca, l
         plt.close()
     else:
         print("  ⚠ No swap results, skipping latent swap plot.")
-    
     # 2. ZERO/RANDOM LATENT VISUALIZATION
-    if zero_random_results['zero']:
+    if zero_random_results['zero'] and zero_random_results['correct']:
         print("Creating zero/random latent plot...")
-        fig, axes = plt.subplots(3, min(3, len(zero_random_results['zero'])), figsize=(15, 12))
-        if len(zero_random_results['zero']) < 3:
-            axes = axes.reshape(3, -1)
-        
-        for idx in range(min(3, len(zero_random_results['zero']))):
+        n_show = min(3, len(zero_random_results['zero']))
+        fig, axes = plt.subplots(4, n_show, figsize=(5 * n_show, 16))
+        if n_show == 1:
+            axes = axes.reshape(4, 1)
+        for idx in range(n_show):
             try:
-                zero_result = zero_random_results['zero'][idx]
-                rand_result = zero_random_results['random'][idx]
-                
                 # Original target
-                target_grid, _ = extract_grid_from_sequence(zero_result['target_seq'])
+                target_grid, _ = extract_grid_from_sequence(zero_random_results['correct'][idx]['target_seq'])
                 axes[0, idx].imshow(target_grid, cmap='viridis', interpolation='nearest')
                 axes[0, idx].set_title(f'Target {idx}')
                 axes[0, idx].axis('off')
-                
-                # Zero latent reconstruction
-                zero_seq = zero_result['target_seq'].copy()
-                zero_seq[900:902] = zero_result['shape_logits']
-                if len(zero_result['shape_logits']) >= 2 and zero_result['shape_logits'][0] > 0:
-                    zero_seq[:min(len(zero_result['grid_logits']), 900)] = zero_result['grid_logits'][:900]
-                
-                zero_grid, _ = extract_grid_from_sequence(zero_seq)
-                axes[1, idx].imshow(zero_grid, cmap='viridis', interpolation='nearest')
-                axes[1, idx].set_title(f'Zero Latent')
+                # Correct reconstruction
+                corr_seq = zero_random_results['correct'][idx]['target_seq'].copy()
+                corr_seq[900:902] = zero_random_results['correct'][idx]['shape_logits']
+                if len(zero_random_results['correct'][idx]['shape_logits']) >= 2 and zero_random_results['correct'][idx]['shape_logits'][0] > 0:
+                    corr_seq[:min(len(zero_random_results['correct'][idx]['grid_logits']), 900)] = zero_random_results['correct'][idx]['grid_logits'][:900]
+                corr_grid, _ = extract_grid_from_sequence(corr_seq)
+                axes[1, idx].imshow(corr_grid, cmap='viridis', interpolation='nearest')
+                axes[1, idx].set_title('Correct Recon')
                 axes[1, idx].axis('off')
-                
-                # Random latent reconstruction
-                rand_seq = rand_result['target_seq'].copy()
-                rand_seq[900:902] = rand_result['shape_logits']
-                if len(rand_result['shape_logits']) >= 2 and rand_result['shape_logits'][0] > 0:
-                    rand_seq[:min(len(rand_result['grid_logits']), 900)] = rand_result['grid_logits'][:900]
-                
-                rand_grid, _ = extract_grid_from_sequence(rand_seq)
-                axes[2, idx].imshow(rand_grid, cmap='viridis', interpolation='nearest')
-                axes[2, idx].set_title(f'Random Latent')
+                # Zero latent reconstruction
+                zero_seq = zero_random_results['zero'][idx]['target_seq'].copy()
+                zero_seq[900:902] = zero_random_results['zero'][idx]['shape_logits']
+                if len(zero_random_results['zero'][idx]['shape_logits']) >= 2 and zero_random_results['zero'][idx]['shape_logits'][0] > 0:
+                    zero_seq[:min(len(zero_random_results['zero'][idx]['grid_logits']), 900)] = zero_random_results['zero'][idx]['grid_logits'][:900]
+                zero_grid, _ = extract_grid_from_sequence(zero_seq)
+                axes[2, idx].imshow(zero_grid, cmap='viridis', interpolation='nearest')
+                axes[2, idx].set_title('Zero Latent')
                 axes[2, idx].axis('off')
-                
+                # Random latent reconstruction
+                rand_seq = zero_random_results['random'][idx]['target_seq'].copy()
+                rand_seq[900:902] = zero_random_results['random'][idx]['shape_logits']
+                if len(zero_random_results['random'][idx]['shape_logits']) >= 2 and zero_random_results['random'][idx]['shape_logits'][0] > 0:
+                    rand_seq[:min(len(zero_random_results['random'][idx]['grid_logits']), 900)] = zero_random_results['random'][idx]['grid_logits'][:900]
+                rand_grid, _ = extract_grid_from_sequence(rand_seq)
+                axes[3, idx].imshow(rand_grid, cmap='viridis', interpolation='nearest')
+                axes[3, idx].set_title('Random Latent')
+                axes[3, idx].axis('off')
             except Exception as e:
-                for row in range(3):
+                for row in range(4):
                     axes[row, idx].text(0.5, 0.5, f'Error: {str(e)[:20]}', ha='center', va='center')
-        
-        plt.suptitle('ZERO/RANDOM LATENT TEST\nIf latents matter: zero/random should produce garbage', fontsize=14)
+        plt.suptitle('ZERO/RANDOM LATENT TEST\nRow 1: Target, Row 2: Correct Recon, Row 3: Zero Latent, Row 4: Random Latent', fontsize=14)
         plt.tight_layout()
-        
         fname = os.path.join(run_dir, 'zero_random_latent.png') if run_dir else 'zero_random_latent.png'
         plt.savefig(fname, dpi=150, bbox_inches='tight')
         plots['zero_random_latent'] = fname
@@ -456,12 +472,12 @@ def run_latent_validation_for_specialist(run_dir, model, device, eval_keys, n_sa
         return {'success': False, 'reason': 'no_data'}
     try:
         print(f"  Running latent validation on {len(all_inputs)} samples from {len(set(sample_keys))} keys...")
-        swap_results = latent_swap_test(model, all_inputs, all_outputs, device, n_samples=min(5, len(all_inputs)))
+        correct_recons, swap_results = latent_swap_test(model, all_inputs, all_outputs, device, n_samples=min(5, len(all_inputs)))
         zero_random_results = zero_random_latent_test(model, all_inputs, all_outputs, device, n_samples=min(3, len(all_inputs)))
         latents_pca, latents_tsne, properties, explained_variance = latent_space_visualization(
             model, all_inputs, all_outputs, device, max_samples=min(30, len(all_inputs)), sample_keys=sample_keys
         )
-        latent_plots = create_visualization_plots(swap_results, zero_random_results, latents_pca, latents_tsne, properties, explained_variance, run_dir=run_dir)
+        latent_plots = create_visualization_plots((correct_recons, swap_results), zero_random_results, latents_pca, latents_tsne, properties, explained_variance, run_dir=run_dir)
         if latent_plots:
             print(f"  ✓ Generated plots: {list(latent_plots.keys())}")
             for k, v in latent_plots.items():
@@ -554,7 +570,7 @@ def main():
     print("\n=== RUNNING LATENT VALIDATION TESTS ===")
     
     print("1. Latent Swap Test...")
-    swap_results = latent_swap_test(model, all_inputs, all_outputs, device, n_samples=5)
+    correct_recons, swap_results = latent_swap_test(model, all_inputs, all_outputs, device, n_samples=5)
     
     print("2. Zero/Random Latent Test...")
     zero_random_results = zero_random_latent_test(model, all_inputs, all_outputs, device, n_samples=3)
@@ -566,7 +582,7 @@ def main():
     
     # Create visualizations
     print("4. Creating visualization plots...")
-    plots = create_visualization_plots(swap_results, zero_random_results, latents_pca, latents_tsne, properties, explained_variance, run_dir=run_dir)
+    plots = create_visualization_plots((correct_recons, swap_results), zero_random_results, latents_pca, latents_tsne, properties, explained_variance, run_dir=run_dir)
     
     # Log to WandB
     if wandb_logger:

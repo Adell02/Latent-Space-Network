@@ -307,9 +307,13 @@ def main_args():
                         
                         # Add latent validation plots
                         import wandb
-                        for plot_name, plot_path in latent_plots.items():
-                            if os.path.exists(plot_path):
+                        required_plots = ['latent_swap', 'zero_random_latent']
+                        for plot_name in required_plots:
+                            plot_path = latent_plots.get(plot_name)
+                            if plot_path and os.path.exists(plot_path):
                                 log_dict[f'latent_validation/{plot_name}'] = wandb.Image(plot_path)
+                            else:
+                                print(f"⚠ Warning: {plot_name}.png not found or not generated!")
                         
                         # Add interpretation guide
                         interpretation = """
