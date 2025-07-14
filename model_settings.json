@@ -58,7 +58,7 @@
     "decoder_heads": 6,
     "encoder_hidden_dim": 96,
     "decoder_hidden_dim": 48,
-    "latent_dim": 128,
+    "latent_dim": 32,
     "dropout": 0.1,
     "max_length": 902,
     "encoder_max_length": 1805,

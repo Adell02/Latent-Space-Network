@@ -278,6 +278,12 @@ class TransformerEncoder(nn.Module):
         self.layer_norm = nn.LayerNorm(hidden_dim)
         
         # VQ-VAE support
+        current_settings = get_current_settings()
+        if 'model_architecture' not in current_settings:
+            raise KeyError("'model_architecture' key not found in settings. Please check your settings file and how it is loaded.")
+        current_model_arch = current_settings['model_architecture']
+        if 'vq_vae' not in current_model_arch:
+            print("Warning: 'vq_vae' key not found in model_architecture. VQ-VAE will be disabled.")
         self.vq_vae = create_vq_vae_from_settings(current_model_arch)
         self.use_vq_vae = self.vq_vae is not None
         

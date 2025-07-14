@@ -214,7 +214,9 @@ def main_args():
                         )
                         
                         print("  4. Creating enhanced latent validation plots...")
-                        latent_plots = create_visualization_plots(swap_results, zero_random_results, latents_pca, latents_tsne, properties, explained_variance)
+                        latent_plots = create_visualization_plots(
+                            swap_results, zero_random_results, latents_pca, latents_tsne, properties, explained_variance, run_dir=run_dir
+                        )
                         
                         # Store validation results for logging
                         latent_validation_results = {
@@ -335,7 +337,8 @@ def main_args():
                     # Clean up temporary plot files
                     for plot_path in latent_plots.values():
                         try:
-                            os.unlink(plot_path)
+                            if os.path.exists(plot_path):
+                                os.unlink(plot_path)
                         except:
                             pass
                     
