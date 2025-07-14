@@ -335,12 +335,12 @@ def main_args():
                     wandb_logger._safe_log(log_dict, step_hint=step_counter)
                     
                     # Clean up temporary plot files
-                    for plot_path in latent_plots.values():
-                        try:
-                            if os.path.exists(plot_path):
-                                os.unlink(plot_path)
-                        except:
-                            pass
+                    # for plot_path in latent_plots.values():
+                    #     try:
+                    #         if os.path.exists(plot_path):
+                    #             os.unlink(plot_path)
+                    #     except:
+                    #         pass
                     
                     log_message = f"✓ Evaluation results logged to WandB at step {step_counter} for {total_keys_evaluated} keys"
                     if latent_validation_results:

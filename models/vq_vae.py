@@ -76,17 +76,7 @@ class VectorQuantization(nn.Module):
             self.ema_weight.data.copy_(self.embeddings.data)
     
     def forward(self, inputs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Forward pass through vector quantization.
-        
-        Args:
-            inputs: Input tensor of shape [..., embedding_dim]
-            
-        Returns:
-            quantized: Quantized tensor (same shape as inputs)
-            vq_loss: Vector quantization loss
-            encoding_indices: Indices of selected codes
-        """
+        print(f"VQ-VAE forward: training={self.training}, use_ema={self.use_ema}, input_shape={inputs.shape}")
         # Flatten inputs for processing
         input_shape = inputs.shape
         flat_inputs = inputs.view(-1, self.embedding_dim)
@@ -283,8 +273,10 @@ def create_vq_vae_from_settings(model_architecture: dict) -> Optional[VQVAEWrapp
     vq_config = model_architecture.get('vq_vae', {})
     
     if not vq_config.get('enabled', False):
+        print("VQ-VAE is disabled")
         return None
-    
+    print("VQ-VAE is enabled")
+    print(f"VQ-VAE Config: {model_architecture.get('latent_dim', 64),vq_config.get('embedding_dim', model_architecture.get('latent_dim', 64)),vq_config.get('num_embeddings', 512),vq_config.get('commitment_cost', 0.25),vq_config.get('decay', 0.99),vq_config.get('epsilon', 1e-5),vq_config.get('use_ema', True),vq_config.get('restart_unused_codes', True),vq_config.get('restart_threshold', 1.0)}")
     return VQVAEWrapper(
         latent_dim=model_architecture.get('latent_dim', 64),
         embedding_dim=vq_config.get('embedding_dim', model_architecture.get('latent_dim', 64)),

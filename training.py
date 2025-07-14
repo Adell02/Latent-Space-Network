@@ -250,6 +250,10 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed
     total_batches = len(dataloader)
 
     for batch_idx, (input_seq, target_seq) in enumerate(dataloader):
+        # --- PATCH: Ensure model and all submodules are in train mode ---
+        model.train()
+        # --- END PATCH ---
+
         device = next(model.parameters()).device
         input_seq = input_seq.to(device)
         target_seq = target_seq.to(device)
@@ -435,10 +439,10 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed
                     f"KL: {kl_loss_comp.item():.4f}, Repulsion: {repulsion_comp.item():.4f}, λ: {current_lambda_rep:.4f})"
                 )
             elif encoder_idx is not None:
-                logger.info(f"Encoder {encoder_idx} - Epoch [{current_epoch_num}/{total_epochs}] Batch [{batch_idx + 1}/{total_batches}] ({progress:.1f}%)")
+                logger.info(f"Encoder {encoder_idx} - Epoch [{current_epoch_num}/{total_batches}] Batch [{batch_idx + 1}/{total_batches}] ({progress:.1f}%)")
                 logger.info(f"  Step Loss: {loss.item() * gradient_accumulation_steps:.4f} (Shape: {shape_loss_comp.item():.4f}, Grid: {grid_loss_comp.item():.4f}, KL: {kl_loss_comp.item():.4f})")
             else:
-                logger.info(f"Epoch [{current_epoch_num}/{total_epochs}] Batch [{batch_idx + 1}/{total_batches}] ({progress:.1f}%)")
+                logger.info(f"Epoch [{current_epoch_num}/{total_batches}] Batch [{batch_idx + 1}/{total_batches}] ({progress:.1f}%)")
                 logger.info(f"  Step Loss: {loss.item() * gradient_accumulation_steps:.4f} (Shape: {shape_loss_comp.item():.4f}, Grid: {grid_loss_comp.item():.4f}, KL: {kl_loss_comp.item():.4f})")
 
     avg_loss_for_epoch = epoch_total_loss / total_batches

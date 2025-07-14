@@ -622,11 +622,11 @@ def main():
             print(f"⚠ Failed to log to WandB: {e}")
         
         # Clean up temporary files
-        for plot_path in plots.values():
-            try:
-                os.unlink(plot_path)
-            except:
-                pass
+        # for plot_path in plots.values():
+        #     try:
+        #         os.unlink(plot_path)
+        #     except:
+        #         pass
         
         wandb_logger.finish()
     
