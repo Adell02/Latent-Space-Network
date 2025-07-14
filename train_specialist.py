@@ -157,7 +157,7 @@ def generate_specialist_reconstruction_plot(model, dataloader, device, epoch, ph
             # Generate reconstruction
             if encoder_idx is not None:
                 # Phase A: specific encoder + independent decoder
-                mu, log_var = model.multi_encoder.encoders[encoder_idx](input_sample, target_sample)
+                mu, log_var,_ = model.multi_encoder.encoders[encoder_idx](input_sample, target_sample)
                 z = model.reparameterize(mu, log_var)
                 if use_independent_decoder:
                     shape_logits, grid_logits = model.multi_encoder.independent_decoders[encoder_idx](z, input_sample, target_seq=target_sample)
@@ -269,7 +269,7 @@ def generate_latent_histograms(model, dataloader, device, encoder_idx, epoch, wa
             target_seq = target_seq.to(device)
             
             # Get latent distributions from specific encoder
-            mu, log_var = model.multi_encoder.encoders[encoder_idx](input_seq, target_seq)
+            mu, log_var,_ = model.multi_encoder.encoders[encoder_idx](input_seq, target_seq)
             all_mus.append(mu.cpu().numpy())
             all_log_vars.append(log_var.cpu().numpy())
     
@@ -466,7 +466,7 @@ def _create_comprehensive_analysis_plot(model, data_source, device, data_type, n
         # Get encoder reconstructions
         encoder_reconstructions = []
         for enc_idx in range(num_encoders):
-            mu, log_var = model.multi_encoder.encoders[enc_idx](input_seq, target_seq)
+            mu, log_var,_ = model.multi_encoder.encoders[enc_idx](input_seq, target_seq)
             z = model.reparameterize(mu, log_var)
             shape_logits, grid_logits = model.multi_encoder.independent_decoders[enc_idx](
                 z, input_seq, target_seq=target_seq

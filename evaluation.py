@@ -121,7 +121,7 @@ def collect_unified_evaluation_latents(model, dataloader, device, is_multi_encod
         print(f"        Single encoder processing...")
         
         def single_encoder_processing(batch_inputs, batch_outputs):
-            mu, log_var = model.encoder(batch_inputs, batch_outputs)
+            mu, log_var,_ =model.encoder(batch_inputs, batch_outputs)
             return mu, log_var
         
         final_mus, final_log_vars, final_zs = process_in_batches(
@@ -338,7 +338,7 @@ def collect_unified_training_latents(model, input_sequences, output_sequences, d
         print(f"      Single encoder processing...")
         
         def single_encoder_processing(batch_inputs, batch_outputs):
-            mu, log_var = model.encoder(batch_inputs, batch_outputs)
+            mu, log_var,_ =model.encoder(batch_inputs, batch_outputs)
             return mu, log_var
         
         latent_data = process_training_in_batches(
@@ -442,7 +442,7 @@ def encode_training_sequences(model, run_dir, device='cuda', max_samples=500, ba
                     z = model.reparameterize(mu, log_var)
                 else:
                     # Single encoder
-                    mu, log_var = model.encoder(batch_input, batch_output)
+                    mu, log_var,_ =model.encoder(batch_input, batch_output)
                     z = model.reparameterize(mu, log_var)
                 
                 # Compute loss for this encoded latent (equivalent to initial trajectory loss)
@@ -849,7 +849,7 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda',
                         # Get individual encoder z vectors for this sample during optimization
                         with torch.no_grad():
                             for enc_idx in range(num_encoders):
-                                enc_mu, enc_log_var = model.multi_encoder.encoders[enc_idx](
+                                enc_mu, enc_log_var, _ = model.multi_encoder.encoders[enc_idx](
                                     batch_input_s[i:i+1], batch_target_s[i:i+1]
                                 )
                                 enc_z = model.reparameterize(enc_mu, enc_log_var)
@@ -872,7 +872,6 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda',
                         sample_trajectory['trajectory_decoder_type'] = decoder_type
                         sample_trajectory['used_independent_decoder'] = use_independent_decoder
                         
-                        print(f"  Using decoder type for trajectory: {decoder_type}")
                         
                         with torch.no_grad():
                             for enc_idx in range(num_encoders):
@@ -909,7 +908,7 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda',
                             
                             # Get encoder mu/log_var for metadata (but use PoE's z)
                             with torch.no_grad():
-                                enc_mu, enc_log_var = model.encoder(batch_input_s[i:i+1], batch_target_s[i:i+1])
+                                enc_mu, enc_log_var, _ = model.encoder(batch_input_s[i:i+1], batch_target_s[i:i+1])
                             
                             sample_trajectory['individual_encoder_trajectories']['encoder_0'] = {
                                 'mu': enc_mu.cpu().numpy(),
@@ -919,7 +918,7 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda',
                         else:
                             # Fallback: independent z (should not happen normally)
                             with torch.no_grad():
-                                enc_mu, enc_log_var = model.encoder(batch_input_s[i:i+1], batch_target_s[i:i+1])
+                                enc_mu, enc_log_var, _ =model.encoder(batch_input_s[i:i+1], batch_target_s[i:i+1])
                                 enc_z = model.reparameterize(enc_mu, enc_log_var)
                                 
                                 sample_trajectory['individual_encoder_trajectories']['encoder_0'] = {
@@ -1008,14 +1007,14 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda',
             with torch.no_grad():
                 if is_multi_encoder:
                     # For multi-encoder, use PoE inference (each encoder sees the same input)
-                    mu, log_var = model.multi_encoder(
+                    mu, log_var,_ = model.multi_encoder(
                         [(batch_input_s, batch_target_s) for _ in range(num_encoders)],
                         training=False, sample_latent=False, use_poe=True
                     )[1:3]  # Get mu, log_var from PoE
                     current_z_for_this_sample_batch = model.reparameterize(mu, log_var)
                 else:
                     # Single encoder
-                    mu, log_var = model.encoder(batch_input_s, batch_target_s)
+                    mu, log_var,_ =model.encoder(batch_input_s, batch_target_s)
                     current_z_for_this_sample_batch = model.reparameterize(mu, log_var)
                 print(f"Using encoder z (no optimization) for batch {batch_idx+1}")
         
@@ -1048,7 +1047,7 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda',
                     
                     # Also store individual encoder reconstructions for analysis
                     for enc_idx in range(num_encoders):
-                        enc_mu, enc_log_var = model.multi_encoder.encoders[enc_idx](batch_input_s, batch_target_s)
+                        enc_mu, enc_log_var,_ = model.multi_encoder.encoders[enc_idx](batch_input_s, batch_target_s)
                         enc_z = model.reparameterize(enc_mu, enc_log_var)
                         enc_shape_logits, enc_grid_logits = model.multi_encoder.decoder(
                             enc_z, batch_input_s, target_seq=batch_target_s
@@ -1194,7 +1193,7 @@ def evaluate_model(model, samples_dataloader, queries_dataloader, device='cuda',
                 
                 for enc_idx in range(num_encoders):
                     # Get individual encoder output
-                    enc_mu, enc_log_var = model.multi_encoder.encoders[enc_idx](batch_input_q, batch_target_q)
+                    enc_mu, enc_log_var,_ = model.multi_encoder.encoders[enc_idx](batch_input_q, batch_target_q)
                     all_enc_mus.append(enc_mu)
                     all_enc_logvars.append(enc_log_var)
                     

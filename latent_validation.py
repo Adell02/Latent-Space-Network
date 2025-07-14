@@ -48,7 +48,7 @@ def latent_swap_test(model, input_seqs, target_seqs, device, n_samples=5):
             input_seq = torch.tensor(input_seqs[i], dtype=torch.float32).unsqueeze(0).to(device)
             target_seq = torch.tensor(target_seqs[i], dtype=torch.float32).unsqueeze(0).to(device)
             if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
-                mu, logvar = model.multi_encoder.encoders[0](input_seq, target_seq)
+                mu, logvar,_ = model.multi_encoder.encoders[0](input_seq, target_seq)
             else:
                 _, mu, logvar = model(input_seq, target_seq)
             latents.append(mu[0])  # Take mean (deterministic)
@@ -105,7 +105,7 @@ def zero_random_latent_test(model, input_seqs, target_seqs, device, n_samples=3)
             target_seq = torch.tensor(target_seqs[i], dtype=torch.float32).unsqueeze(0).to(device)
             # Compute correct latent and reconstruction
             if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
-                mu, logvar = model.multi_encoder.encoders[0](input_seq, target_seq)
+                mu, logvar,_ = model.multi_encoder.encoders[0](input_seq, target_seq)
                 shape_logits_corr, grid_logits_corr = model.multi_encoder.shared_decoder(mu, input_seq, target_seq=target_seq)
             else:
                 _, mu, logvar = model(input_seq, target_seq)
@@ -171,7 +171,7 @@ def latent_space_visualization(model, input_seqs, target_seqs, device, max_sampl
             
             if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
                 # Use first encoder for simplicity
-                mu, logvar = model.multi_encoder.encoders[0](input_seq, target_seq)
+                mu, logvar,_ = model.multi_encoder.encoders[0](input_seq, target_seq)
             else:
                 _, mu, logvar = model(input_seq, target_seq)
             

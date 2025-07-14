@@ -643,7 +643,7 @@ def collect_latent_data(model, dataloader, device, encoder_idx=None, max_samples
                 else:
                     mu, log_var = model(batch_input, batch_target)[1:3]
             else:
-                mu, log_var = model.encoder(batch_input, batch_target)
+                mu, log_var,_ = model.encoder(batch_input, batch_target)
 
             z = model.reparameterize(mu, log_var)
 

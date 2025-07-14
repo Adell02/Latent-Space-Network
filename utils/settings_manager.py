@@ -42,7 +42,7 @@ class SettingsManager:
 
     def get_repulsion_loss_settings(self) -> dict:
         """Get repulsion loss settings."""
-        return self.get_training_settings().get('repulsion_loss', {'enabled': True, 'lambda': 0.1})
+        return self._settings['repulsion_loss_settings']
 
     def get_solo_loss_settings(self) -> Dict[str, Any]:
         """Get solo loss settings."""

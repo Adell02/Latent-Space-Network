@@ -200,7 +200,7 @@ def analyze_gradient_norms_during_optimization(model, trajectory_info_list, devi
         
         # Get initial z from encoder
         with torch.no_grad():
-            mu, log_var = model.encoder(input_sample, target_sample)
+            mu, log_var,_ = model.encoder(input_sample, target_sample)
             z = model.reparameterize(mu, log_var)
         
         # Simulate one optimization step to get gradients

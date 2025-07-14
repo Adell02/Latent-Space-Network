@@ -1928,10 +1928,10 @@ def generate_per_dimension_kl_plot(model, dataloader, device, epoch, encoder_idx
             if encoder_idx is not None:
                 # Specific encoder
                 if hasattr(model, 'multi_encoder') and hasattr(model.multi_encoder, 'encoders'):
-                    mu, log_var = model.multi_encoder.encoders[encoder_idx](input_seq, target_seq)
+                    mu, log_var,_ = model.multi_encoder.encoders[encoder_idx](input_seq, target_seq)
                 else:
                     # Single encoder model
-                    mu, log_var = model.encoder(input_seq, target_seq)
+                    mu, log_var,_ = model.encoder(input_seq, target_seq)
             else:
                 # PoE or single encoder
                 if hasattr(model, 'multi_encoder') and model.multi_encoder and hasattr(model.multi_encoder, 'encoders'):
@@ -1939,7 +1939,7 @@ def generate_per_dimension_kl_plot(model, dataloader, device, epoch, encoder_idx
                     _, mu, log_var = model(input_seq, target_seq)
                 else:
                     # Single encoder
-                    mu, log_var = model.encoder(input_seq, target_seq)
+                    mu, log_var,_ = model.encoder(input_seq, target_seq)
             
             all_mus.append(mu.cpu().numpy())
             all_log_vars.append(log_var.cpu().numpy())

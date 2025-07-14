@@ -105,7 +105,7 @@ def collect_single_encoder_latent_data(model, dataloader, device, max_samples=10
             batch_target = batch_target.to(device)
             
             # Get latent representations - always use mean vectors
-            mu, log_var = model.encoder(batch_input, batch_target)
+            mu, log_var,_ = model.encoder(batch_input, batch_target)
             z = model.reparameterize(mu, log_var)
             
             # Store data
@@ -181,7 +181,7 @@ def evaluate_accuracy(model, dataloader, device, is_multi_encoder=False, encoder
                     z_eval = model.reparameterize(mu_eval, log_var_eval)
                 else:
                     # Single encoder
-                    mu_eval, log_var_eval = model.encoder(batch_input_eval, batch_target_eval)
+                    mu_eval, log_var_eval,_ = model.encoder(batch_input_eval, batch_target_eval)
                     z_eval = model.reparameterize(mu_eval, log_var_eval)
 
             # Decode
