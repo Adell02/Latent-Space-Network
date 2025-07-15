@@ -8,6 +8,25 @@ import numpy as np
 from utils.settings_manager import init_settings
 settings = init_settings('model_specialist_settings.json')
 
+# --- Load frozen config if it exists in the run directory ---
+import json
+run_dir_env = None
+import sys
+if '--file_name' in sys.argv:
+    idx = sys.argv.index('--file_name')
+    if idx + 1 < len(sys.argv):
+        run_dir_env = sys.argv[idx + 1]
+if run_dir_env is not None:
+    import os
+    base_dir = settings.get_data_settings()['run_base_dir'] if hasattr(settings, 'get_data_settings') else '.'
+    run_dir = os.path.join(base_dir, run_dir_env)
+    frozen_config_path = os.path.join(run_dir, 'frozen_config.json')
+    if os.path.exists(frozen_config_path):
+        with open(frozen_config_path, 'r') as f:
+            frozen_config = json.load(f)
+        settings.set_settings(frozen_config)
+        print(f"✓ Loaded frozen config from {frozen_config_path} for all modes")
+
 # Now import modules that rely on the global `settings`
 from train_specialist import main_specialist_training
 from evaluation import main_test

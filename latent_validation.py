@@ -29,34 +29,52 @@ from utils.model_utils import load_model
 from utils.wandb_logger import init_wandb_for_mode
 from utils.data_preparation import extract_grid_from_sequence
 from re_arc.main import generate_and_process_tasks
+from models.base_model import gaussian_poe
 
 
 def latent_swap_test(model, input_seqs, target_seqs, device, n_samples=5):
     """
     Test 1: LATENT SWAP
-    Take latent from sample A, use it to decode input B.
-    If latents are meaningful, this should produce interesting combinations.
-    If decoder ignores latents, output will just be normal reconstruction of B.
+    For multi-encoder: use PoE of all encoders' latents for each sample.
     """
     model.eval()
     results = []
     correct_recons = []
     with torch.no_grad():
-        # Get latents from all samples
-        latents = []
-        for i in range(min(n_samples, len(input_seqs))):
+        n = min(n_samples, len(input_seqs))
+        is_multi = hasattr(model, 'is_multi_encoder') and model.is_multi_encoder
+        num_encoders = len(model.multi_encoder.encoders) if is_multi else 1
+        # Collect all encoder mus/logvars for all samples
+        all_mus = []  # shape: [n, num_encoders, latent_dim]
+        all_logvars = []
+        for i in range(n):
             input_seq = torch.tensor(input_seqs[i], dtype=torch.float32).unsqueeze(0).to(device)
             target_seq = torch.tensor(target_seqs[i], dtype=torch.float32).unsqueeze(0).to(device)
-            if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
-                mu, logvar,_ = model.multi_encoder.encoders[0](input_seq, target_seq)
+            if is_multi:
+                mus = []
+                logvars = []
+                for enc in model.multi_encoder.encoders:
+                    mu, logvar, _ = enc(input_seq, target_seq)
+                    mus.append(mu[0])
+                    logvars.append(logvar[0])
+                mus = torch.stack(mus)  # [num_encoders, latent_dim]
+                logvars = torch.stack(logvars)
             else:
                 _, mu, logvar = model(input_seq, target_seq)
-            latents.append(mu[0])  # Take mean (deterministic)
-            # Compute correct reconstruction
-            if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
-                shape_logits, grid_logits = model.multi_encoder.shared_decoder(mu, input_seq, target_seq=target_seq)
+                mus = mu[0].unsqueeze(0)
+                logvars = logvar[0].unsqueeze(0)
+            all_mus.append(mus)
+            all_logvars.append(logvars)
+        # Compute correct reconstructions (PoE for each sample)
+        for i in range(n):
+            input_seq = torch.tensor(input_seqs[i], dtype=torch.float32).unsqueeze(0).to(device)
+            target_seq = torch.tensor(target_seqs[i], dtype=torch.float32).unsqueeze(0).to(device)
+            if is_multi:
+                mu_star, logvar_star = gaussian_poe(all_mus[i], all_logvars[i])
+                z_star = mu_star.unsqueeze(0)
+                shape_logits, grid_logits = model.multi_encoder.shared_decoder(z_star, input_seq, target_seq=target_seq)
             else:
-                shape_logits, grid_logits = model.decoder(mu, input_seq, target_seq=target_seq)
+                shape_logits, grid_logits = model.decoder(all_mus[i][0].unsqueeze(0), input_seq, target_seq=target_seq)
             correct_recons.append({
                 'input_source': i,
                 'input_seq': input_seqs[i],
@@ -64,21 +82,18 @@ def latent_swap_test(model, input_seqs, target_seqs, device, n_samples=5):
                 'shape_logits': shape_logits[0].argmax(dim=-1).cpu().numpy(),
                 'grid_logits': grid_logits[0].argmax(dim=-1).cpu().numpy()
             })
-        # Now do the swaps: use latent[i] to decode input[j] where i != j
-        for i in range(min(n_samples, len(latents))):
-            for j in range(min(n_samples, len(latents))):
-                if i != j:  # Swap condition
+        # Swaps: use PoE of sample i's latents for sample j's input
+        for i in range(n):
+            for j in range(n):
+                if i != j:
                     input_seq = torch.tensor(input_seqs[j], dtype=torch.float32).unsqueeze(0).to(device)
                     target_seq = torch.tensor(target_seqs[j], dtype=torch.float32).unsqueeze(0).to(device)
-                    swapped_latent = latents[i].unsqueeze(0)
-                    if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
-                        shape_logits, grid_logits = model.multi_encoder.shared_decoder(
-                            swapped_latent, input_seq, target_seq=target_seq
-                        )
+                    if is_multi:
+                        mu_star, logvar_star = gaussian_poe(all_mus[i], all_logvars[i])
+                        z_star = mu_star.unsqueeze(0)
+                        shape_logits, grid_logits = model.multi_encoder.shared_decoder(z_star, input_seq, target_seq=target_seq)
                     else:
-                        shape_logits, grid_logits = model.decoder(
-                            swapped_latent, input_seq, target_seq=target_seq
-                        )
+                        shape_logits, grid_logits = model.decoder(all_mus[i][0].unsqueeze(0), input_seq, target_seq=target_seq)
                     results.append({
                         'latent_source': i,
                         'input_source': j,
@@ -93,49 +108,72 @@ def latent_swap_test(model, input_seqs, target_seqs, device, n_samples=5):
 def zero_random_latent_test(model, input_seqs, target_seqs, device, n_samples=3):
     """
     Test 2 & 3: ZERO LATENT and RANDOM LATENT
-    If decoder relies on latents, zero/random latents should produce garbage.
-    If decoder ignores latents, outputs will look normal.
+    For multi-encoder: use PoE of all encoders' zero/random latents.
     """
     model.eval()
     results = {'zero': [], 'random': [], 'correct': []}
-    latent_dim = model.multi_encoder.latent_dim if hasattr(model, 'multi_encoder') else model.latent_dim
+    is_multi = hasattr(model, 'is_multi_encoder') and model.is_multi_encoder
+    num_encoders = len(model.multi_encoder.encoders) if is_multi else 1
+    latent_dim = model.multi_encoder.latent_dim if is_multi else model.latent_dim
     with torch.no_grad():
-        for i in range(min(n_samples, len(input_seqs))):
+        n = min(n_samples, len(input_seqs))
+        # Precompute all mus/logvars for correct recon
+        all_mus = []
+        all_logvars = []
+        for i in range(n):
             input_seq = torch.tensor(input_seqs[i], dtype=torch.float32).unsqueeze(0).to(device)
             target_seq = torch.tensor(target_seqs[i], dtype=torch.float32).unsqueeze(0).to(device)
-            # Compute correct latent and reconstruction
-            if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
-                mu, logvar,_ = model.multi_encoder.encoders[0](input_seq, target_seq)
-                shape_logits_corr, grid_logits_corr = model.multi_encoder.shared_decoder(mu, input_seq, target_seq=target_seq)
+            if is_multi:
+                mus = []
+                logvars = []
+                for enc in model.multi_encoder.encoders:
+                    mu, logvar, _ = enc(input_seq, target_seq)
+                    mus.append(mu[0])
+                    logvars.append(logvar[0])
+                mus = torch.stack(mus)
+                logvars = torch.stack(logvars)
             else:
                 _, mu, logvar = model(input_seq, target_seq)
-                shape_logits_corr, grid_logits_corr = model.decoder(mu, input_seq, target_seq=target_seq)
+                mus = mu[0].unsqueeze(0)
+                logvars = logvar[0].unsqueeze(0)
+            all_mus.append(mus)
+            all_logvars.append(logvars)
+        for i in range(n):
+            input_seq = torch.tensor(input_seqs[i], dtype=torch.float32).unsqueeze(0).to(device)
+            target_seq = torch.tensor(target_seqs[i], dtype=torch.float32).unsqueeze(0).to(device)
+            # Correct recon (PoE)
+            if is_multi:
+                mu_star, logvar_star = gaussian_poe(all_mus[i], all_logvars[i])
+                z_star = mu_star.unsqueeze(0)
+                shape_logits_corr, grid_logits_corr = model.multi_encoder.shared_decoder(z_star, input_seq, target_seq=target_seq)
+            else:
+                shape_logits_corr, grid_logits_corr = model.decoder(all_mus[i][0].unsqueeze(0), input_seq, target_seq=target_seq)
             results['correct'].append({
                 'input_seq': input_seqs[i],
                 'target_seq': target_seqs[i],
                 'shape_logits': shape_logits_corr[0].argmax(dim=-1).cpu().numpy(),
                 'grid_logits': grid_logits_corr[0].argmax(dim=-1).cpu().numpy()
             })
-            # Test with zero latent
-            zero_latent = torch.zeros(1, latent_dim, device=device)
-            if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
-                shape_logits_zero, grid_logits_zero = model.multi_encoder.shared_decoder(
-                    zero_latent, input_seq, target_seq=target_seq
-                )
+            # Zero latent (PoE of all-zero)
+            if is_multi:
+                zero_latents = torch.zeros(num_encoders, latent_dim, device=device)
+                zero_logvars = torch.zeros(num_encoders, latent_dim, device=device)
+                mu_star, logvar_star = gaussian_poe(zero_latents, zero_logvars)
+                z_star = mu_star.unsqueeze(0)
+                shape_logits_zero, grid_logits_zero = model.multi_encoder.shared_decoder(z_star, input_seq, target_seq=target_seq)
             else:
-                shape_logits_zero, grid_logits_zero = model.decoder(
-                    zero_latent, input_seq, target_seq=target_seq
-                )
-            # Test with random latent
-            random_latent = torch.randn(1, latent_dim, device=device)
-            if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
-                shape_logits_rand, grid_logits_rand = model.multi_encoder.shared_decoder(
-                    random_latent, input_seq, target_seq=target_seq
-                )
+                zero_latent = torch.zeros(1, latent_dim, device=device)
+                shape_logits_zero, grid_logits_zero = model.decoder(zero_latent, input_seq, target_seq=target_seq)
+            # Random latent (PoE of all-random)
+            if is_multi:
+                rand_latents = torch.randn(num_encoders, latent_dim, device=device)
+                rand_logvars = torch.zeros(num_encoders, latent_dim, device=device)
+                mu_star, logvar_star = gaussian_poe(rand_latents, rand_logvars)
+                z_star = mu_star.unsqueeze(0)
+                shape_logits_rand, grid_logits_rand = model.multi_encoder.shared_decoder(z_star, input_seq, target_seq=target_seq)
             else:
-                shape_logits_rand, grid_logits_rand = model.decoder(
-                    random_latent, input_seq, target_seq=target_seq
-                )
+                rand_latent = torch.randn(1, latent_dim, device=device)
+                shape_logits_rand, grid_logits_rand = model.decoder(rand_latent, input_seq, target_seq=target_seq)
             results['zero'].append({
                 'input_seq': input_seqs[i],
                 'target_seq': target_seqs[i],

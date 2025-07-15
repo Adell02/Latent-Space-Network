@@ -387,44 +387,41 @@ class TransformerEncoder(nn.Module):
         return None
 
 class TransformerDecoder(nn.Module):
-    def __init__(self, output_dim: int, hidden_dim: int = None, num_layers: int = None, 
-                 num_heads: int = None, dropout: float = None):
+    def __init__(self, output_dim: int, hidden_dim: int = None,
+                 num_layers: int = None, num_heads: int = None,
+                 dropout: float = None):
         super().__init__()
-        
-        # Use current settings if parameters not provided
-        if hidden_dim is None:
-            hidden_dim = get_decoder_hidden_dim()
-        if num_layers is None:
-            num_layers = get_decoder_layers()
-        if num_heads is None:
-            num_heads = get_decoder_heads()
-        if dropout is None:
-            dropout = get_dropout()
-            
+
+        # Load hyperparameters from settings if not provided
+        hidden_dim = hidden_dim or get_decoder_hidden_dim()
+        num_layers = num_layers or get_decoder_layers()
+        num_heads  = num_heads  or get_decoder_heads()
+        dropout    = dropout    or get_dropout()
         self.hidden_dim = hidden_dim
 
-        # Embeddings for teacher forcing
-        self.output_shape_embedding = nn.Embedding(num_embeddings=31, embedding_dim=hidden_dim)
-        self.output_grid_embedding = nn.Embedding(num_embeddings=10, embedding_dim=hidden_dim)
+        # Embeddings for outputs
+        self.output_shape_embedding = nn.Embedding(31, hidden_dim)
+        self.output_grid_embedding  = nn.Embedding(10, hidden_dim)
 
-        # Positional embeddings for grid positions (we reuse row and col embeddings)
-        self.row_embedding = nn.Embedding(num_embeddings=30, embedding_dim=hidden_dim)
-        self.col_embedding = nn.Embedding(num_embeddings=30, embedding_dim=hidden_dim)
+        # Positional embeddings for grid
+        self.row_embedding = nn.Embedding(30, hidden_dim)
+        self.col_embedding = nn.Embedding(30, hidden_dim)
 
-        # Start token embedding (used for autoregressive mode)
+        # Start-of-sequence token
         self.start_token_embedding = nn.Parameter(torch.randn(1, 1, hidden_dim))
 
-        # Latent projection to initial decoder memory
+        # Project latent to hidden_dim
         self.latent_projection = nn.Linear(LATENT_DIM, hidden_dim)
 
-        # Memory projection (combines input and latent info)
+        # Memory projection: latent_expanded -> memory
         self.memory_projection = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim)
         )
 
+        # Transformer decoder layers
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=hidden_dim,
             nhead=num_heads,
@@ -433,171 +430,95 @@ class TransformerDecoder(nn.Module):
             batch_first=True,
             norm_first=True
         )
-        self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
-        
-        # Enable gradient checkpointing if specified in settings
-        current_model_arch = get_current_settings()['model_architecture']
-        if current_model_arch.get('use_gradient_checkpointing', False):
-            for mod in self.transformer_decoder.layers:
-                mod.use_checkpoint = True
+        self.transformer_decoder = nn.TransformerDecoder(decoder_layer,
+                                                         num_layers=num_layers)
 
-        # Output projections: one for shape tokens and one for grid tokens
-        self.shape_output = nn.Linear(hidden_dim, 31)  # For shape values (indices 0-30)
-        self.grid_output = nn.Linear(hidden_dim, 10)   # For grid values (indices 0-9)
-        self.layer_norm = nn.LayerNorm(hidden_dim)
-        
-        # Initialize the input-latent gating mechanism
-        # This will be properly registered as a module parameter
-        self.input_latent_gate = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),  # memory_input + latent_emb
-            nn.Sigmoid()
-        )
+        if get_current_settings()['model_architecture'].get('use_gradient_checkpointing', False):
+            for layer in self.transformer_decoder.layers:
+                layer.use_checkpoint = True
 
-    def prepare_input_memory(self, z: torch.Tensor, input_seq: torch.Tensor, training: bool = True) -> torch.Tensor:
-        """Prepare memory from input sequence and latent vector."""
-        batch_size = input_seq.size(0)
-        device = input_seq.device
+        # Output projections
+        self.shape_output = nn.Linear(hidden_dim, 31)
+        self.grid_output  = nn.Linear(hidden_dim, 10)
+        self.layer_norm   = nn.LayerNorm(hidden_dim)
 
-        # Updated indexing: grid tokens first, then shape tokens
-        input_grid = input_seq[:, :900]
-        input_shapes = input_seq[:, 900:902]
-
-        # Add noise to input during training to force latent dependency
-        if training and torch.rand(1).item() < 0.3:  # 30% chance during training
-            # Add noise to grid tokens to prevent decoder from just copying
-            noise_scale = 0.1
-            grid_noise = torch.randint_like(input_grid.long(), 0, 2) * noise_scale  # Binary noise
-            input_grid = input_grid + grid_noise
-            input_grid = torch.clamp(input_grid, 0, 9)  # Keep in valid range [0,9]
-            
-            # Occasionally mask some input tokens entirely
-            if torch.rand(1).item() < 0.2:  # 20% of the 30% noise cases
-                mask_tokens = torch.rand(input_grid.shape, device=device) < 0.1  # Mask 10% of tokens
-                input_grid = input_grid.masked_fill(mask_tokens, 0)  # Replace with 0 (background)
-
-        # Clamp input values to ensure valid embedding indices
-        input_grid = torch.clamp(input_grid, 0, 9)  # Grid tokens should be 0-9
-        input_shapes = torch.clamp(input_shapes, 0, 30)  # Shape tokens should be 0-30
-
-        # For memory we use the same embeddings as in the encoder
-        grid_emb = self.output_grid_embedding(input_grid.long())
-        shape_emb = self.output_shape_embedding(input_shapes.long())
-
-        # Create positional embeddings for grid tokens
-        pos_i = torch.arange(30, device=device).view(1, -1, 1).repeat(batch_size, 1, 30)
-        pos_j = torch.arange(30, device=device).view(1, 1, -1).repeat(batch_size, 30, 1)
-        pos_emb = (self.row_embedding(pos_i) + self.col_embedding(pos_j)).view(batch_size, 900, -1)
-        grid_emb = grid_emb + pos_emb
-
-        # Concatenate shape embeddings and grid embeddings for memory.
-        #memory_input = torch.cat([shape_emb, grid_emb], dim=1)
-        # IGNORE THE GROUND TRUTH AT THE DECODER
-        memory_input = torch.zeros_like(torch.cat([shape_emb, grid_emb], dim=1))      
-
-
-        latent_emb = self.latent_projection(z)
-        
-        # Apply latent dropout during training to force using both input and latent
-        if training and torch.rand(1).item() < 0.2:  # 20% chance to dropout latent
-            latent_emb = latent_emb * 0.1  # Severely attenuate latent signal
-        
-        # Ensure latent_emb has the correct batch size
-        if latent_emb.size(0) != batch_size:
-            latent_emb = latent_emb.expand(batch_size, -1)
-        
-        # Enhanced latent integration with gating mechanism
-        # This forces the model to learn when to use latent vs input information
-        latent_expanded = latent_emb.unsqueeze(1).expand(-1, memory_input.size(1), -1)
-        
-        # Compute gating weights using the properly initialized gate
-        combined_for_gate = torch.cat([memory_input, latent_expanded], dim=-1)
-        gate_weights = self.input_latent_gate(combined_for_gate)
-        
-        # Apply gating: balance between input context and latent information
-        memory_input_gated = memory_input * gate_weights
-        latent_contribution = latent_expanded * (1 - gate_weights)
-        
-        memory = torch.cat([memory_input_gated, latent_contribution], dim=-1)
-        memory = self.memory_projection(memory)
+    def prepare_input_memory(self, z: torch.Tensor) -> torch.Tensor:
+        """
+        Expand the latent across sequence length and project into memory space.
+        """
+        # z: [B, latent_dim]
+        latent_emb      = self.latent_projection(z)                # [B, hidden_dim]
+        latent_expanded = latent_emb.unsqueeze(1).expand(-1, 902, -1)  # [B, 902, hidden_dim]
+        memory          = self.memory_projection(latent_expanded)  # [B, 902, hidden_dim]
         return memory
 
     def get_position_embedding(self, row_idx: int, col_idx: int, device: torch.device) -> torch.Tensor:
-        row_emb = self.row_embedding(torch.tensor([row_idx], device=device))
-        col_emb = self.col_embedding(torch.tensor([col_idx], device=device))
-        return row_emb + col_emb
+        return (self.row_embedding(torch.tensor([row_idx], device=device)) +
+                self.col_embedding(torch.tensor([col_idx], device=device)))
 
     def create_causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
         return torch.triu(torch.ones(seq_len, seq_len, device=device) * float('-inf'), diagonal=1)
 
-    def forward(self, z: torch.Tensor, input_seq: torch.Tensor, target_seq: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        If ``target_seq`` is provided, training uses a **teacher forcing** setup
-        where the ground‑truth tokens are shifted right and a start token is
-        prepended.  This prevents the decoder from simply copying the targets and
-        forces it to utilise the latent vector ``z``.  When ``target_seq`` is not
-        supplied the method falls back to a simple autoregressive decoding loop
-        (used during inference).
-
-        """
-        batch_size = input_seq.size(0)
-        device = input_seq.device
-        memory = self.prepare_input_memory(z, input_seq, training=self.training)
+    def forward(self, z: torch.Tensor, input_seq: torch.Tensor,
+                target_seq: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        batch_size, device = input_seq.size(0), input_seq.device
+        memory = self.prepare_input_memory(z)
 
         if target_seq is not None:
-            # ----- Teacher Forcing (autoregressive shift) -----
-            tgt_grid = torch.clamp(target_seq[:, :900], 0, 9).long()
+            # Teacher forcing path
+            tgt_grid  = torch.clamp(target_seq[:, :900], 0, 9).long()
             tgt_shape = torch.clamp(target_seq[:, 900:902], 0, 30).long()
 
-            grid_emb = self.output_grid_embedding(tgt_grid)
+            grid_emb  = self.output_grid_embedding(tgt_grid)
             shape_emb = self.output_shape_embedding(tgt_shape)
 
+            # Positional embeddings for grid
             pos_i = torch.arange(30, device=device).view(1, -1, 1).repeat(batch_size, 1, 30)
             pos_j = torch.arange(30, device=device).view(1, 1, -1).repeat(batch_size, 30, 1)
-            pos_emb_grid = (self.row_embedding(pos_i) + self.col_embedding(pos_j)).view(batch_size, 900, -1)
-            grid_emb = grid_emb + pos_emb_grid
+            grid_emb = grid_emb + (self.row_embedding(pos_i) + self.col_embedding(pos_j)).view(batch_size, 900, -1)
 
-            seq_emb = torch.cat([grid_emb, shape_emb], dim=1)  # [B, 902, hidden_dim]
+            seq_emb = torch.cat([grid_emb, shape_emb], dim=1)      # [B, 902, hidden_dim]
+            teacher_inputs = torch.cat([self.start_token_embedding.expand(batch_size, 1, -1),
+                                        seq_emb], dim=1)          # [B, 903, hidden_dim]
 
-            start_tok = self.start_token_embedding.expand(batch_size, 1, -1)
-            teacher_inputs = torch.cat([start_tok, seq_emb], dim=1)  # [B, 903, hidden_dim]
+            mask   = self.create_causal_mask(teacher_inputs.size(1), device)
+            output = self.layer_norm(
+                self.transformer_decoder(tgt=teacher_inputs, memory=memory, tgt_mask=mask)
+            )[:, 1:]  # remove start token output
 
-            causal_mask = self.create_causal_mask(teacher_inputs.size(1), device)
-            decoder_output = self.transformer_decoder(tgt=teacher_inputs, memory=memory, tgt_mask=causal_mask)
-            decoder_output = self.layer_norm(decoder_output)
-            decoder_output = decoder_output[:, 1:]  # remove start token output
-
-            grid_logits = self.grid_output(decoder_output[:, :900])
-            shape_logits = self.shape_output(decoder_output[:, 900:902])
+            grid_logits  = self.grid_output(output[:, :900])
+            shape_logits = self.shape_output(output[:, 900:902])
             return shape_logits, grid_logits
-        else:
-            # ----- Autoregressive Inference -----
-            seq_len = 902
-            inputs = self.start_token_embedding.expand(batch_size, 1, -1)
-            logits_seq = []
-            for step in range(seq_len):
-                mask = self.create_causal_mask(inputs.size(1), device)
-                dec_out = self.transformer_decoder(tgt=inputs, memory=memory, tgt_mask=mask)
-                dec_out = self.layer_norm(dec_out)
-                last_out = dec_out[:, -1:]
 
-                if step < 900:
-                    logits = self.grid_output(last_out)
-                    pred = torch.argmax(logits, dim=-1)
-                    emb = self.output_grid_embedding(pred)
-                    row_idx, col_idx = divmod(step, 30)
-                    emb = emb + self.get_position_embedding(row_idx, col_idx, device)
-                else:
-                    logits = self.shape_output(last_out)
-                    pred = torch.argmax(logits, dim=-1)
-                    emb = self.output_shape_embedding(pred)
+        # Autoregressive inference
+        seq_len = 902
+        inputs = self.start_token_embedding.expand(batch_size, 1, -1)
+        logits_list = []
+        for step in range(seq_len):
+            mask   = self.create_causal_mask(inputs.size(1), device)
+            dec_out = self.layer_norm(
+                self.transformer_decoder(tgt=inputs, memory=memory, tgt_mask=mask)
+            )
+            last   = dec_out[:, -1:]
+            if step < 900:
+                logits = self.grid_output(last)
+                pred   = torch.argmax(logits, dim=-1)
+                emb    = self.output_grid_embedding(pred)
+                r, c   = divmod(step, 30)
+                emb   += self.get_position_embedding(r, c, device)
+            else:
+                logits = self.shape_output(last)
+                pred   = torch.argmax(logits, dim=-1)
+                emb    = self.output_shape_embedding(pred)
 
-                inputs = torch.cat([inputs, emb], dim=1)
-                logits_seq.append(logits)
+            inputs = torch.cat([inputs, emb], dim=1)
+            logits_list.append(logits)
 
-            logits_seq = torch.cat(logits_seq, dim=1)
-            grid_logits = logits_seq[:, :900]
-            shape_logits = logits_seq[:, 900:]
-            return shape_logits, grid_logits
+        logits_seq   = torch.cat(logits_list, dim=1)
+        grid_logits  = logits_seq[:, :900]
+        shape_logits = logits_seq[:, 900:]
+        return shape_logits, grid_logits
+
 
 
 # -------------------------------------------------

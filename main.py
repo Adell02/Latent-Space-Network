@@ -12,6 +12,7 @@ from utils.model_utils import (
 from utils.visualizers import visualize_stored_results
 from utils.settings_manager import init_settings
 from utils.wandb_logger import init_wandb_for_mode, get_wandb_logger
+import datetime
 
 # Import latent validation functions (with graceful fallback)
 try:
@@ -54,6 +55,14 @@ def main_args():
     print(f"Loading settings from: {args.settings}")
     settings = init_settings(args.settings)
     
+    # Get project name and create unique run name
+    project_name = settings.get_project_name()
+    timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    unique_run_name = f"{project_name}_{timestamp}"
+    
+    # Set WANDB project env var for this session
+    os.environ['WANDB_PROJECT_NAME'] = project_name
+    
     # Get settings from settings manager
     data_settings = settings.get_data_settings()
     evaluation_settings = settings.get_evaluation_settings()
@@ -76,11 +85,15 @@ def main_args():
     if not args.file_name:
         raise ValueError("--file_name must be specified")
 
-    run_dir = os.path.join(BASE_DIR, args.file_name)
+    # Compose unique run directory using project name and timestamp
+    run_dir = os.path.join(BASE_DIR, f"{args.file_name}_{unique_run_name}")
+    if not os.path.exists(run_dir):
+        os.makedirs(run_dir, exist_ok=True)
+    print(f"Run directory: {run_dir}")
     
     # Ensure run directory exists before initializing wandb
     from utils.model_utils import create_run_directory
-    run_dir = create_run_directory(args.file_name)
+    run_dir = create_run_directory(os.path.basename(run_dir))
 
     # Initialize wandb logging if enabled
     wandb_logger = None

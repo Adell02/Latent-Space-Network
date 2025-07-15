@@ -89,6 +89,17 @@ class SettingsManager:
             self.load_settings()
         return self._settings['specialist_training']
 
+    def get_project_name(self) -> str:
+        """Get the WANDB project name from settings, or a default if not present."""
+        if self._settings is None:
+            self.load_settings()
+        # Try wandb_settings, then top-level, then fallback
+        if 'wandb_settings' in self._settings and 'project_name' in self._settings['wandb_settings']:
+            return self._settings['wandb_settings']['project_name']
+        if 'project_name' in self._settings:
+            return self._settings['project_name']
+        return 'latent-space-network'
+
     def save_settings(self, run_dir: str) -> None:
         """Save current settings to a run directory."""
         if self._settings is None:

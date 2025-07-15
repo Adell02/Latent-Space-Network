@@ -335,29 +335,27 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed
                     for mu, logvar in zip(mus, logvars)
                 ]).mean()
                 
-                # Pairwise repulsive KL (closed form for Gaussians)
-                repulsion_loss = torch.tensor(0.0, device=target_seq.device)
-                if K > 1:
-                    kl_matrix = []
-                    z_dim = mus[0].size(1)  # latent dimension
-                    for j in range(K):
-                        for k in range(j+1, K):
-                            mu_j, lv_j = mus[j], logvars[j]
-                            mu_k, lv_k = mus[k], logvars[k]
-                            var_j, var_k = lv_j.exp(), lv_k.exp()
-                            
-                            kl_jk = 0.5 * (
-                                (var_j / var_k).sum(1)
-                              + ((mu_k - mu_j).pow(2) / var_k).sum(1)
-                              - z_dim
-                              + (lv_k - lv_j).sum(1)
-                            )
-                            kl_matrix.append(kl_jk)
-                    
-                    repulsion_loss = torch.stack(kl_matrix).mean() if kl_matrix else torch.tensor(0.0, device=input_seq.device)
-                
-                # Total loss with repulsion term
-                loss = rec_loss + BETA * kl_prior - λ_rep * repulsion_loss
+                # 1) compute all pairwise KLs with per-encoder clamped logvars
+                kl_terms = []
+                for j in range(K):
+                    for k in range(j+1, K):
+                        μj, lj = mus[j], logvars[j].clamp(min=LOGVAR_MIN)
+                        μk, lk = mus[k], logvars[k].clamp(min=LOGVAR_MIN)
+                        vj, vk = lj.exp(), lk.exp()
+                        kl_jk = 0.5 * (
+                        (vj/vk).sum(1) +
+                        ((μk-μj).pow(2)/vk).sum(1) -
+                        z_dim +
+                        (lk-lj).sum(1)
+                        )
+                        kl_terms.append(kl_jk)
+
+                # 2) hinge per-pair, then average
+                hinged = torch.stack([F.relu(margin - kl_jk) for kl_jk in kl_terms])  # [num_pairs, B]
+                repulsion_loss = hinged.mean()
+
+                # 3) final loss: *add* your repulsion term
+                loss = rec_loss + β * kl_prior + λ_rep * repulsion_loss
                 loss = loss / gradient_accumulation_steps
                 
                 # Store components for logging

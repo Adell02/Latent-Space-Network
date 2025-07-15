@@ -13,7 +13,7 @@
     ],
     "training_seed": 42,
     "eval_seed": 42,
-    "n": 100,
+    "n": 200,
     "run_base_dir": "runs_specialist"
   },
   "evaluation_settings": {
@@ -24,7 +24,7 @@
     "eval_epoch": "phase_b_final",
     "visualize_n_values": 4,
     "_comment_trajectory_decoder": "trajectory_decoder_type: 'shared' uses shared decoder for all reconstructions (good for PoE analysis), 'independent' uses each encoder's independent decoder (good for specialization analysis)",
-    "trajectory_decoder_type": "shared"
+    "trajectory_decoder_type": "independent"
   },
   "latent_optimization": {
     "training": {
@@ -52,13 +52,13 @@
   },
   "model_architecture": {
     "num_encoders": 4,
-    "encoder_layers": 6,
-    "decoder_layers": 1,
+    "encoder_layers": 2,
+    "decoder_layers": 2,
     "encoder_heads": 6,
     "decoder_heads": 6,
-    "encoder_hidden_dim": 96,
-    "decoder_hidden_dim": 12,
-    "latent_dim": 16,
+    "encoder_hidden_dim": 120,
+    "decoder_hidden_dim": 48,
+    "latent_dim": 64,
     "dropout": 0.2,
     "max_length": 902,
     "encoder_max_length": 1805,
@@ -79,11 +79,11 @@
   },
   "training_settings": {
     "num_epochs": 50,
-    "batch_size": 128,
+    "batch_size": 8,
     "gradient_accumulation_steps": 2,
     "learning_rate": 0.0004,
     "optimizer_weight_decay": 5e-03,
-    "beta": 1e-4,
+    "beta": 5e-4,
     "use_mixed_precision": true,
     "save_checkpoint_interval": 1,
     "learning_rate_scheduler": {
@@ -96,6 +96,16 @@
       "lambda_solo": 0.2,
       "isolate_decoder_gradients": true,
       "log_frequency": 100
+    }
+  },
+  "repulsion_loss_settings": {
+    "enabled": false,
+    "lambda": 0,
+    "schedule": {
+      "type": "exponential",         
+      "start": 0,             
+      "end": 1e-4,
+      "warmup_epochs": 0
     }
   },
   "wandb_settings": {
@@ -113,7 +123,7 @@
   },
   "specialist_training": {
     "phase_a": {
-      "epochs": 80,
+      "epochs": 100,
       "description": "Encoder pre-training phase",
       "anti_batch_size": 0,
       "anti_batch_description": "Proportion (0-1) of anti-samples (from other encoders) mixed into each encoder's training batch to encourage specialization",
@@ -126,9 +136,9 @@
         "description": "Cross-pair reconstruction loss: L_cross = (1/|P|) * sum_{i≠j} ||g_θ(x_j, z_i) - y_j||_1. Forces latent codes to be reusable across different inputs."
       },
       "enhanced_training": {
-        "use_cyclical_beta": false,
+        "use_cyclical_beta": true,
         "beta_cycle_length": 6,
-        "use_free_bits": false,
+        "use_free_bits": true,
         "free_bits_delta": 0.07,
         "use_dynamic_lambda": false,
         "lambda_high_multiplier": 6.0,
@@ -138,7 +148,7 @@
         }
     },
     "phase_b": {
-      "epochs": 50,
+      "epochs": 60,
       "description": "Decoder training phase"
     },
     "evaluation_between_phases": true,
