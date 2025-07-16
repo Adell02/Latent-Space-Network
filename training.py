@@ -394,6 +394,18 @@ def main_training(file_store_name):
     wandb_logger = None
 
     TRAINING_KEYS = data_settings.get('training_keys', [data_settings.get('key', None)])
+    n_max_keys = data_settings.get('n_max_keys', None)
+    if isinstance(TRAINING_KEYS, str) and TRAINING_KEYS.lower() == 'all':
+        tasks_dir = os.path.join(os.path.dirname(__file__), 're_arc', 're_arc', 'tasks')
+        all_keys = [fname[:-5] for fname in os.listdir(tasks_dir) if fname.endswith('.json')]
+        all_keys.sort()
+        if n_max_keys is not None:
+            try:
+                n_max_keys = int(n_max_keys)
+                all_keys = all_keys[:n_max_keys]
+            except Exception:
+                pass
+        TRAINING_KEYS = all_keys
     if TRAINING_KEYS is None or not TRAINING_KEYS[0]:
         raise ValueError("No training keys specified in data_settings after reload.")
     N_EXAMPLES_PER_TASK = data_settings['n']

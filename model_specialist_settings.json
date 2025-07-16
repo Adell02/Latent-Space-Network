@@ -1,11 +1,7 @@
 {
   "data_settings": {
-    "training_keys": [
-      "00d62c1b",
-      "1cf80156",
-      "25d8a9c8",
-      "0a938d79"],
-      "other_keys":[
+    "training_keys": ["all"],
+    "other_keys":[
         "0b148d64",
         "ff805c23",
         "ff28f65a",
@@ -14,6 +10,7 @@
     "training_seed": 42,
     "eval_seed": 42,
     "n": 200,
+    "n_max_keys": 100,
     "run_base_dir": "runs_specialist"
   },
   "evaluation_settings": {
@@ -52,14 +49,15 @@
   },
   "model_architecture": {
     "num_encoders": 4,
-    "encoder_layers": 2,
-    "decoder_layers": 2,
+    "encoder_layers": 4,
+    "decoder_layers": 4,
     "encoder_heads": 6,
     "decoder_heads": 6,
     "encoder_hidden_dim": 120,
     "decoder_hidden_dim": 48,
     "latent_dim": 64,
     "dropout": 0.2,
+    "decoder_input_dropout": 0.2,
     "max_length": 902,
     "encoder_max_length": 1805,
     "decoder_max_length": 902,
@@ -83,7 +81,7 @@
     "gradient_accumulation_steps": 2,
     "learning_rate": 0.0004,
     "optimizer_weight_decay": 5e-03,
-    "beta": 5e-4,
+    "beta": 1e-2,
     "use_mixed_precision": true,
     "save_checkpoint_interval": 1,
     "learning_rate_scheduler": {
@@ -123,7 +121,7 @@
   },
   "specialist_training": {
     "phase_a": {
-      "epochs": 100,
+      "epochs": 150,
       "description": "Encoder pre-training phase",
       "anti_batch_size": 0,
       "anti_batch_description": "Proportion (0-1) of anti-samples (from other encoders) mixed into each encoder's training batch to encourage specialization",
@@ -136,9 +134,9 @@
         "description": "Cross-pair reconstruction loss: L_cross = (1/|P|) * sum_{i≠j} ||g_θ(x_j, z_i) - y_j||_1. Forces latent codes to be reusable across different inputs."
       },
       "enhanced_training": {
-        "use_cyclical_beta": true,
+        "use_cyclical_beta": false,
         "beta_cycle_length": 6,
-        "use_free_bits": true,
+        "use_free_bits": false,
         "free_bits_delta": 0.07,
         "use_dynamic_lambda": false,
         "lambda_high_multiplier": 6.0,
@@ -148,7 +146,7 @@
         }
     },
     "phase_b": {
-      "epochs": 60,
+      "epochs": 100,
       "description": "Decoder training phase"
     },
     "evaluation_between_phases": true,
