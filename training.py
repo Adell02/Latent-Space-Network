@@ -434,7 +434,7 @@ def main_training(file_store_name):
 
     run_dir = create_run_directory(file_store_name)
     logger = setup_logging(run_dir)
-    logger.info(f"Starting training for ARC problems: {TRAINING_KEYS}")
+    logger.info(f"Starting training for ARC problems {len(TRAINING_KEYS)} keys.")
     logger.info(f"Full settings dump: {json.dumps(settings.get_settings(), indent=2)}")
     print("Run directory created:", run_dir)
 
@@ -485,7 +485,7 @@ def main_training(file_store_name):
                     print(f"Encoder {i}: {len(enc_inputs)} samples from keys {encoder_keys}")
                 else:
                     # Create empty dataloader for consistency
-                    encoder_dataloaders.append(prepare_dataloader([], [], BATCH_SIZE))
+                    encoder_dataloaders.append(None)
                     logger.info(f"Encoder {i}: No data assigned")
                     print(f"Encoder {i}: No data assigned")
         else:
@@ -626,7 +626,10 @@ def main_training(file_store_name):
         all_inputs = []
         all_outputs = []
         for encoder_idx in range(NUM_ENCODERS):
-            for batch_input, batch_output in encoder_dataloaders[encoder_idx]:
+            dataloader = encoder_dataloaders[encoder_idx]
+            if dataloader is None:
+                continue # Skip encoders with no data
+            for batch_input, batch_output in dataloader:
                 all_inputs.extend(batch_input.tolist())
                 all_outputs.extend(batch_output.tolist())
         
@@ -666,6 +669,8 @@ def main_training(file_store_name):
                     combined_input_sequences = []
                     combined_output_sequences = []
                     for encoder_dataloader in encoder_dataloaders:
+                        if encoder_dataloader is None:
+                            continue # Skip encoders with no data
                         for batch_input, batch_output in encoder_dataloader:
                             combined_input_sequences.extend(batch_input.tolist())
                             combined_output_sequences.extend(batch_output.tolist())
@@ -716,11 +721,14 @@ def main_training(file_store_name):
                 epoch_metrics_list = []
                 
                 for encoder_idx in range(NUM_ENCODERS):
+                    dataloader = encoder_dataloaders[encoder_idx]
+                    if dataloader is None:
+                        continue # Skip encoders with no data
                     logger.info(f"\n--- Training Encoder {encoder_idx} ---")
                     print(f"Training Encoder {encoder_idx}...")
                     
                     avg_loss, avg_shape_loss, avg_grid_loss, avg_kl_loss, avg_repulsion_loss, current_lambda_rep = train_model(
-                        model, encoder_dataloaders[encoder_idx], optimizer, run_dir, logger, 
+                        model, dataloader, optimizer, run_dir, logger, 
                         scaler, use_mixed_precision, gradient_accumulation_steps,
                         current_epoch_num=epoch+1, total_epochs=NUM_EPOCHS, encoder_idx=encoder_idx
                     )
@@ -746,6 +754,12 @@ def main_training(file_store_name):
                 })
         else:
             # Single encoder training
+            dataloader = encoder_dataloaders[0] # Assuming single encoder training uses the first dataloader
+            if dataloader is None:
+                logger.warning("Skipping single encoder training as no data is assigned.")
+                print("Skipping single encoder training as no data is assigned.")
+                continue # Skip this epoch if no data
+
             avg_loss, avg_shape_loss, avg_grid_loss, avg_kl_loss, avg_repulsion_loss, current_lambda_rep = train_model(
                 model, dataloader, optimizer, run_dir, logger, 
                 scaler, use_mixed_precision, gradient_accumulation_steps,
@@ -791,13 +805,15 @@ def main_training(file_store_name):
             
             # Evaluate each encoder individually on its own data
             for eval_encoder_idx in range(NUM_ENCODERS):
+                dataloader = encoder_dataloaders[eval_encoder_idx]
+                if dataloader is None:
+                    continue # Skip encoders with no data
                 logger.info(f"\n--- Evaluating Encoder {eval_encoder_idx} ---")
                 print(f"Evaluating Encoder {eval_encoder_idx}...")
                 
                 # Use the specific encoder's dataloader for individual evaluation
-                encoder_dataloader = encoder_dataloaders[eval_encoder_idx]
                 encoder_accuracy = evaluate_accuracy(
-                    model, encoder_dataloader, device, 
+                    model, dataloader, device, 
                     is_multi_encoder=True, encoder_idx=eval_encoder_idx, 
                     optimize_z=OPTIMIZE_Z, logger=logger
                 )
