@@ -54,15 +54,21 @@ def main_args():
     # Initialize settings with the specified file (sets global settings)
     print(f"Loading settings from: {args.settings}")
     settings = init_settings(args.settings)
-    
-    # Get project name and create unique run name
     project_name = settings.get_project_name()
-    timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-    unique_run_name = f"{project_name}_{timestamp}"
     
+    if "train" in args.mode or "all" in args.mode: 
+        # Get project name and create unique run name
+        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        unique_run_name = f"{project_name}_{timestamp}"
+        # Set args.file_name to the unique run name (for consistency)
+        args.file_name = unique_run_name
+    else:
+        if not args.file_name:
+            raise ValueError("--file_name must be specified for eval/visualize")
+
     # Set WANDB project env var for this session
     os.environ['WANDB_PROJECT_NAME'] = project_name
-    
+
     # Get settings from settings manager
     data_settings = settings.get_data_settings()
     evaluation_settings = settings.get_evaluation_settings()
@@ -86,7 +92,7 @@ def main_args():
         raise ValueError("--file_name must be specified")
 
     # Compose unique run directory using project name and timestamp
-    run_dir = os.path.join(BASE_DIR, f"{args.file_name}_{unique_run_name}")
+    run_dir = os.path.join(BASE_DIR, args.file_name)
     if not os.path.exists(run_dir):
         os.makedirs(run_dir, exist_ok=True)
     print(f"Run directory: {run_dir}")

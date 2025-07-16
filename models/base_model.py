@@ -397,6 +397,9 @@ class TransformerDecoder(nn.Module):
         num_layers = num_layers or get_decoder_layers()
         num_heads  = num_heads  or get_decoder_heads()
         dropout    = dropout    or get_dropout()
+
+        model_arc_set = get_current_settings()['model_architecture']
+        self.input_dropout_prob = model_arc_set.get('decoder_input_dropout', 0.0)
         self.hidden_dim = hidden_dim
 
         # Embeddings for outputs
@@ -472,28 +475,36 @@ class TransformerDecoder(nn.Module):
             grid_emb  = self.output_grid_embedding(tgt_grid)
             shape_emb = self.output_shape_embedding(tgt_shape)
 
-            # Positional embeddings for grid
+            # apply input-dropout on grid embeddings
+            if self.input_dropout_prob > 0:
+                mask = (torch.rand(batch_size, grid_emb.size(1), device=device)
+                        > self.input_dropout_prob).unsqueeze(-1)
+                grid_emb = grid_emb * mask
+
+            # add positional embeddings (unchanged)
             pos_i = torch.arange(30, device=device).view(1, -1, 1).repeat(batch_size, 1, 30)
             pos_j = torch.arange(30, device=device).view(1, 1, -1).repeat(batch_size, 30, 1)
             grid_emb = grid_emb + (self.row_embedding(pos_i) + self.col_embedding(pos_j)).view(batch_size, 900, -1)
 
-            seq_emb = torch.cat([grid_emb, shape_emb], dim=1)      # [B, 902, hidden_dim]
+            seq_emb = torch.cat([grid_emb, shape_emb], dim=1)      # [B, 902, H]
             teacher_inputs = torch.cat([self.start_token_embedding.expand(batch_size, 1, -1),
-                                        seq_emb], dim=1)          # [B, 903, hidden_dim]
+                                        seq_emb], dim=1)          # [B, 903, H]
 
             mask   = self.create_causal_mask(teacher_inputs.size(1), device)
             output = self.layer_norm(
                 self.transformer_decoder(tgt=teacher_inputs, memory=memory, tgt_mask=mask)
-            )[:, 1:]  # remove start token output
+            )[:, 1:]  # remove start token
 
             grid_logits  = self.grid_output(output[:, :900])
             shape_logits = self.shape_output(output[:, 900:902])
             return shape_logits, grid_logits
 
+
         # Autoregressive inference
         seq_len = 902
         inputs = self.start_token_embedding.expand(batch_size, 1, -1)
-        logits_list = []
+        grid_logits_list = []
+        shape_logits_list = []
         for step in range(seq_len):
             mask   = self.create_causal_mask(inputs.size(1), device)
             dec_out = self.layer_norm(
@@ -501,22 +512,29 @@ class TransformerDecoder(nn.Module):
             )
             last   = dec_out[:, -1:]
             if step < 900:
-                logits = self.grid_output(last)
+                logits = self.grid_output(last)  # [B, 1, 10]
+                grid_logits_list.append(logits)
                 pred   = torch.argmax(logits, dim=-1)
                 emb    = self.output_grid_embedding(pred)
                 r, c   = divmod(step, 30)
                 emb   += self.get_position_embedding(r, c, device)
             else:
-                logits = self.shape_output(last)
+                logits = self.shape_output(last)  # [B, 1, 31]
+                shape_logits_list.append(logits)
                 pred   = torch.argmax(logits, dim=-1)
                 emb    = self.output_shape_embedding(pred)
 
             inputs = torch.cat([inputs, emb], dim=1)
-            logits_list.append(logits)
 
-        logits_seq   = torch.cat(logits_list, dim=1)
-        grid_logits  = logits_seq[:, :900]
-        shape_logits = logits_seq[:, 900:]
+        if grid_logits_list:
+            grid_logits = torch.cat(grid_logits_list, dim=1)  # [B, 900, 10]
+        else:
+            grid_logits = None
+        if shape_logits_list:
+            shape_logits = torch.cat(shape_logits_list, dim=1)  # [B, 2, 31]
+        else:
+            shape_logits = None
+
         return shape_logits, grid_logits
 
 

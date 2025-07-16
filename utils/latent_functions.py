@@ -33,7 +33,7 @@ def optimize_latent_z(lpn, input_seq, target_seq, num_steps=None, lr=None, retur
                 mu, log_var,_ = lpn.multi_encoder.encoders[encoder_idx](input_seq, target_seq)
             else:
                 # For multi-encoder, use PoE inference mode
-                reconstruction, mu, log_var = lpn(input_seq, target_seq)
+                reconstruction, mu, log_var,_ = lpn(input_seq, target_seq)
         else:
             # For single encoder
             mu, log_var,_ = lpn.encoder(input_seq, target_seq)
@@ -208,7 +208,7 @@ def evolutionary_optimize_latent_z(lpn, input_seq, target_seq, population_size=N
     with torch.no_grad():
         if hasattr(lpn, 'is_multi_encoder') and lpn.is_multi_encoder:
             # For multi-encoder, use PoE inference mode
-            reconstruction, mu, log_var = lpn(input_seq, target_seq)
+            reconstruction, mu, log_var,_ = lpn(input_seq, target_seq)
             initial_z = lpn.reparameterize(mu, log_var).detach()
         else:
             # For single encoder
@@ -361,7 +361,7 @@ def voronoi_optimize_latent_z(lpn, input_seq, target_seq, population_size=None,
     with torch.no_grad():
         if hasattr(lpn, 'is_multi_encoder') and lpn.is_multi_encoder:
             # For multi-encoder, use PoE inference mode
-            reconstruction, mu, log_var = lpn(input_seq, target_seq)
+            reconstruction, mu, log_var,_ = lpn(input_seq, target_seq)
             initial_z = lpn.reparameterize(mu, log_var).detach()
         else:
             # For single encoder
@@ -572,7 +572,7 @@ def get_optimized_z(lpn, input_seq, target_seq, num_steps=None, lr=None, context
                         mu, log_var,_ = lpn.multi_encoder.encoders[encoder_idx](input_seq, target_seq)
                     else:
                         # Use PoE inference mode
-                        reconstruction, mu, log_var = lpn(input_seq, target_seq)
+                        reconstruction, mu, log_var,_ = lpn(input_seq, target_seq)
                     z = lpn.reparameterize(mu, log_var)
                 else:
                     # For single encoder
@@ -591,7 +591,7 @@ def get_optimized_z(lpn, input_seq, target_seq, num_steps=None, lr=None, context
                     mu, log_var,_ = lpn.multi_encoder.encoders[encoder_idx](input_seq, target_seq)
                 else:
                     # Use PoE inference mode
-                    reconstruction, mu, log_var = lpn(input_seq, target_seq)
+                    reconstruction, mu, log_var,_ = lpn(input_seq, target_seq)
                 z = lpn.reparameterize(mu, log_var)
             else:
                 # For single encoder

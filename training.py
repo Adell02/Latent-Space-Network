@@ -227,252 +227,147 @@ def evaluate_accuracy(model, dataloader, device, is_multi_encoder=False, encoder
     
     return accuracy_metrics
 
-def train_model(model, dataloader, optimizer, run_dir, logger, scaler, use_mixed_precision, gradient_accumulation_steps, current_epoch_num, total_epochs, encoder_idx=None, joint_training=False):
+def train_model(model, dataloader, optimizer, run_dir, logger, scaler,
+                use_mixed_precision, gradient_accumulation_steps,
+                current_epoch_num, total_epochs,
+                encoder_idx=None, joint_training=False):
+    """
+    Training loop with corrected repulsion loss implementation.
+    """
+    # Put model in train mode
     model.train()
-    epoch_total_loss = 0
-    epoch_shape_loss_sum = 0
-    epoch_grid_loss_sum = 0
-    epoch_kl_loss_sum = 0
-    epoch_repulsion_loss_sum = 0  # New: track repulsion loss
-    
-    # Track the repulsion lambda used in this epoch (joint training)
-    current_lambda_rep = 0.0  # default in case repulsion not used
+    device = next(model.parameters()).device
 
-    optimizer.zero_grad() # Ensure gradients are zeroed at the start of accumulation cycle / epoch
+    # Repulsion parameters
+    repulsion_loss_set = settings.get_repulsion_loss_settings()
+    LOGVAR_MIN = repulsion_loss_set.get('logvar_min', -8.0)   # clamp log variance
+    MARGIN = repulsion_loss_set.get('margin', 0.5)        # hinge margin τ
 
-    logger.info("-" * 60)
-    if joint_training:
-        logger.info(f"Starting joint training batch loop with repulsion loss - Epoch {current_epoch_num}/{total_epochs}...")
-    elif encoder_idx is not None:
-        logger.info(f"Starting training batch loop for Encoder {encoder_idx} - Epoch {current_epoch_num}/{total_epochs}...")
-    else:
-        logger.info(f"Starting training batch loop for Epoch {current_epoch_num}/{total_epochs}...")
+    # Accumulators
+    epoch_total_loss = 0.0
+    epoch_shape = epoch_grid = epoch_kl = epoch_repulsion = 0.0
+
+    # Zero gradients before epoch
+    optimizer.zero_grad()
+
     total_batches = len(dataloader)
+    BETA = settings.get_training_settings()['beta']
 
-    for batch_idx, (input_seq, target_seq) in enumerate(dataloader):
-        # --- PATCH: Ensure model and all submodules are in train mode ---
-        model.train()
-        # --- END PATCH ---
-
-        device = next(model.parameters()).device
-        input_seq = input_seq.to(device)
+    for batch_idx, (input_seq, target_seq) in enumerate(dataloader, start=1):
+        input_seq  = input_seq.to(device)
         target_seq = target_seq.to(device)
-        λ_rep = 0.0
 
         with torch.amp.autocast(device_type=device.type, enabled=use_mixed_precision):
-            # Joint training mode with repulsion loss
             if joint_training:
-                # Get repulsion loss settings and optional schedule
-                rep_cfg = settings.get_repulsion_loss_settings()
+                # ---- schedule repulsion weight λ_rep ----
+                rep_cfg     = settings.get_repulsion_loss_settings()
                 base_lambda = rep_cfg.get('lambda', 0.1)
-                schedule_cfg = rep_cfg.get('schedule', None)
-                
-                if schedule_cfg:
-                    sched_type = schedule_cfg.get('type', 'linear').lower()
-                    warmup_epochs = schedule_cfg.get('warmup_epochs', 0)
-                    if current_epoch_num <= warmup_epochs:
-                        λ_rep = 0.0  # No repulsion during warm-up
+                sched_cfg   = rep_cfg.get('schedule', None)
+                λ_rep = base_lambda
+                if sched_cfg:
+                    warmup = sched_cfg.get('warmup_epochs', 0)
+                    if current_epoch_num <= warmup:
+                        λ_rep = 0.0
                     else:
-                        epoch_idx = current_epoch_num - warmup_epochs  # 1-indexed inside schedule window
-                        effective_total = max(total_epochs - warmup_epochs, 1)
-                        if sched_type == 'linear':
-                            lam_start = schedule_cfg.get('start', 0.0)
-                            lam_end = schedule_cfg.get('end', base_lambda)
-                            denom = max(effective_total - 1, 1)
-                            progress = (epoch_idx - 1) / denom
-                            λ_rep = lam_start + progress * (lam_end - lam_start)
-                        elif sched_type == 'exponential':
-                            lam_start = schedule_cfg.get('start', 0.01)
-                            rate = schedule_cfg.get('rate', 1.05)
-                            λ_rep = lam_start * (rate ** (epoch_idx - 1))
+                        epoch_idx   = current_epoch_num - warmup
+                        T_eff       = max(total_epochs - warmup, 1)
+                        typ         = sched_cfg.get('type','linear').lower()
+                        start, end  = sched_cfg.get('start',0.0), sched_cfg.get('end',base_lambda)
+                        frac        = min(max((epoch_idx-1)/(T_eff-1),0.0),1.0)
+                        if typ == 'linear':
+                            λ_rep = start + frac*(end-start)
+                        elif typ == 'exponential':
+                            λ_rep = start * ((end/start)**frac) if start>0 else end
                         else:
-                            λ_rep = base_lambda  # unknown schedule
-                else:
-                    λ_rep = base_lambda
-                
-                # Collect latent distributions from all encoders
+                            λ_rep = base_lambda
+
+                # ---- collect each encoder's posterior ----
                 K = model.num_encoders
                 mus, logvars = [], []
-                for enc_idx in range(K):
-                    mu, logvar,_ = model.multi_encoder.encoders[enc_idx](input_seq, target_seq)
-                    mus.append(mu)
-                    logvars.append(logvar)
-                
-                # Compute PoE fusion
-                mu_stack = torch.stack(mus)                 # [K, B, D]
-                logvar_stack = torch.stack(logvars)         # [K, B, D]
-                mu_star, logvar_star = gaussian_poe(mu_stack, logvar_stack)
-                
-                # 1) Stabilise variance (exp(logvar) stays in a safe range)
-                logvar_star = logvar_star.clamp(min=-8.0, max=4.0)
+                for enc in model.multi_encoder.encoders:
+                    μ, ℓ, _ = enc(input_seq, target_seq)
+                    ℓ = ℓ.clamp(min=LOGVAR_MIN)
+                    mus.append(μ)
+                    logvars.append(ℓ)
 
-                # 2) Sample latent with re-parameterisation so σ² receives gradient
-                eps = torch.randn_like(mu_star)
-                z = mu_star + eps * torch.exp(0.5 * logvar_star)
-                
-                # Decode
+                # ---- PoE fusion & decoding ----
+                μ_star, ℓ_star = gaussian_poe(torch.stack(mus), torch.stack(logvars))
+                ℓ_star = ℓ_star.clamp(min=LOGVAR_MIN)
+                eps    = torch.randn_like(μ_star)
+                z      = μ_star + eps * torch.exp(0.5*ℓ_star)
                 shape_logits, grid_logits = model.multi_encoder.decoder(z, input_seq, target_seq=target_seq)
-                
-                # Compute reconstruction loss
-                shape_targets = target_seq[:, 900:902].long()
-                shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
-                
-                batch_size = target_seq.size(0)
-                grid_loss_sum = torch.tensor(0.0, device=target_seq.device)
-                active = 0
-                for i in range(batch_size):
-                    r, c = map(int, target_seq[i, 900:902])
-                    n_pix = r * c
-                    if n_pix > 0:
-                        grid_loss_sum += F.cross_entropy(grid_logits[i, :n_pix], target_seq[i, :n_pix].long(), reduction='sum')
-                        active += n_pix
-                grid_loss = grid_loss_sum / active if active > 0 else torch.tensor(0.0, device=target_seq.device)
-                rec_loss = shape_loss + grid_loss
-                
-                # KL to prior for every encoder
-                kl_prior = 0.5 * torch.stack([
-                    (mu.pow(2) + logvar.exp() - 1 - logvar).sum(1)
-                    for mu, logvar in zip(mus, logvars)
-                ]).mean()
-                
-                # 1) compute all pairwise KLs with per-encoder clamped logvars
-                kl_terms = []
+
+                # ---- reconstruction loss ----
+                shape_t = target_seq[:,900:902].long().view(-1)
+                L_shape = F.cross_entropy(shape_logits.view(-1,31), shape_t)
+                grid_sum, pix = 0.0, 0
+                for i in range(target_seq.size(0)):
+                    r,c = map(int, target_seq[i,900:902])
+                    n   = r*c
+                    if n>0:
+                        grid_sum += F.cross_entropy(grid_logits[i,:n], target_seq[i,:n].long(), reduction='sum')
+                        pix += n
+                L_grid = grid_sum/pix if pix>0 else torch.tensor(0.0, device=device)
+                L_rec  = L_shape + L_grid
+
+                # ---- KL to prior ----
+                kl_terms = [(μ.pow(2) + ℓ.exp() - 1 - ℓ).sum(1) for μ,ℓ in zip(mus, logvars)]
+                L_kl_prior = 0.5 * torch.stack(kl_terms).mean()
+
+                # ---- pairwise hinge repulsion ----
+                pairs = []
+                D = mus[0].size(1)
                 for j in range(K):
-                    for k in range(j+1, K):
-                        μj, lj = mus[j], logvars[j].clamp(min=LOGVAR_MIN)
-                        μk, lk = mus[k], logvars[k].clamp(min=LOGVAR_MIN)
-                        vj, vk = lj.exp(), lk.exp()
-                        kl_jk = 0.5 * (
-                        (vj/vk).sum(1) +
-                        ((μk-μj).pow(2)/vk).sum(1) -
-                        z_dim +
-                        (lk-lj).sum(1)
-                        )
-                        kl_terms.append(kl_jk)
-
-                # 2) hinge per-pair, then average
-                hinged = torch.stack([F.relu(margin - kl_jk) for kl_jk in kl_terms])  # [num_pairs, B]
-                repulsion_loss = hinged.mean()
-
-                # 3) final loss: *add* your repulsion term
-                loss = rec_loss + β * kl_prior + λ_rep * repulsion_loss
-                loss = loss / gradient_accumulation_steps
-                
-                # Store components for logging
-                shape_loss_comp = shape_loss
-                grid_loss_comp = grid_loss
-                kl_loss_comp = kl_prior
-                repulsion_comp = repulsion_loss
-                current_lambda_rep = λ_rep
-            else:
-                # Original training modes (single encoder or individual encoder training)
-                if encoder_idx is not None:
-                    # Multi-encoder: train specific encoder
-                    loss_result = compute_loss(
-                        model, input_seq, target_seq, beta=BETA, return_components=True, encoder_idx=encoder_idx,
-                        # Enhanced mechanisms (use defaults)
-                        use_cyclical_beta=False, use_free_bits=True, use_dynamic_lambda=False,
-                        use_contrastive_margin=False, debug_kl_metrics=False
-                    )
-                    
-                    # Extract components from the result dictionary
-                    if isinstance(loss_result, dict):
-                        loss = loss_result['total_loss']
-                        shape_loss_comp = loss_result.get('shape_loss', torch.tensor(0.0, device=input_seq.device))
-                        grid_loss_comp = loss_result.get('grid_loss', torch.tensor(0.0, device=input_seq.device))
-                        kl_loss_comp = loss_result.get('kl_loss', torch.tensor(0.0, device=input_seq.device))
-                    else:
-                        # Fallback for backward compatibility (shouldn't happen with enhanced function)
-                        loss = loss_result
-                        shape_loss_comp = torch.tensor(0.0, device=input_seq.device)
-                        grid_loss_comp = torch.tensor(0.0, device=input_seq.device)
-                        kl_loss_comp = torch.tensor(0.0, device=input_seq.device)
+                    for k in range(j+1,K):
+                        μj, ℓj = mus[j], logvars[j]
+                        μk, ℓk = mus[k], logvars[k]
+                        vj, vk = ℓj.exp(), ℓk.exp()
+                        kl_jk = 0.5*((vj/vk).sum(1) + ((μk-μj).pow(2)/vk).sum(1) - D + (ℓk-ℓj).sum(1))
+                        pairs.append(kl_jk)
+                if pairs:
+                    hinge = torch.stack([F.relu(MARGIN - p) for p in pairs])
+                    L_rep = hinge.mean()
                 else:
-                    # Single encoder or inference mode
-                    loss_result = compute_loss(
-                        model, input_seq, target_seq, beta=BETA, return_components=True,
-                        # Enhanced mechanisms (use defaults for regular training)
-                        use_cyclical_beta=False, use_free_bits=True, use_dynamic_lambda=False,
-                        use_contrastive_margin=False, debug_kl_metrics=False
-                    )
-                    
-                    # Extract components from the result dictionary
-                    if isinstance(loss_result, dict):
-                        loss = loss_result['total_loss']
-                        shape_loss_comp = loss_result.get('shape_loss', torch.tensor(0.0, device=input_seq.device))
-                        grid_loss_comp = loss_result.get('grid_loss', torch.tensor(0.0, device=input_seq.device))
-                        kl_loss_comp = loss_result.get('kl_loss', torch.tensor(0.0, device=input_seq.device))
-                    else:
-                        # Fallback for backward compatibility (shouldn't happen with enhanced function)
-                        loss = loss_result
-                        shape_loss_comp = torch.tensor(0.0, device=input_seq.device)
-                        grid_loss_comp = torch.tensor(0.0, device=input_seq.device)
-                        kl_loss_comp = torch.tensor(0.0, device=input_seq.device)
-                loss = loss / gradient_accumulation_steps
-                repulsion_comp = torch.tensor(0.0, device=input_seq.device)  # No repulsion in original modes
-        
-        scaler.scale(loss).backward()
+                    L_rep = torch.tensor(0.0, device=device)
 
-        if (batch_idx + 1) % gradient_accumulation_steps == 0 or (batch_idx + 1) == total_batches:
+                # ---- total loss ----
+                loss = L_rec + BETA * L_kl_prior + λ_rep * L_rep
+                # for logging
+                shape_comp   = L_shape
+                grid_comp    = L_grid
+                kl_comp      = L_kl_prior
+                repulsion_comp = L_rep
+
+            else:
+                # single/encoder-specific training
+                comp = compute_loss(model, input_seq, target_seq,
+                                   beta=BETA, return_components=True,
+                                   encoder_idx=encoder_idx)
+                loss = comp['total_loss']
+                shape_comp = comp.get('shape_loss', torch.tensor(0.0, device=device))
+                grid_comp  = comp.get('grid_loss' , torch.tensor(0.0, device=device))
+                kl_comp    = comp.get('kl_loss'   , torch.tensor(0.0, device=device))
+                repulsion_comp = torch.tensor(0.0, device=device)
+
+            # normalize for accumulation
+            loss = loss / gradient_accumulation_steps
+
+        # backward + step
+        scaler.scale(loss).backward()
+        if batch_idx % gradient_accumulation_steps == 0 or batch_idx==total_batches:
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
-        
-        epoch_total_loss += loss.item() * gradient_accumulation_steps # Unscale for logging
-        epoch_shape_loss_sum += shape_loss_comp.item()
-        epoch_grid_loss_sum += grid_loss_comp.item()
-        epoch_kl_loss_sum += kl_loss_comp.item()
-        epoch_repulsion_loss_sum += repulsion_comp.item()
-        
-        progress = (batch_idx + 1) / total_batches * 100
-        # Log less frequently if accumulating gradients
-        log_frequency = gradient_accumulation_steps * 5 
-        if (batch_idx + 1) % log_frequency == 0 or (batch_idx + 1) == total_batches:
-            # Log individual unscaled losses for the current batch/step
-            if joint_training:
-                logger.info(f"Joint Training - Epoch [{current_epoch_num}/{total_epochs}] Batch [{batch_idx + 1}/{total_batches}] ({progress:.1f}%)")
-                logger.info(
-                    f"  Step Loss: {loss.item() * gradient_accumulation_steps:.4f} "
-                    f"(Shape: {shape_loss_comp.item():.4f}, Grid: {grid_loss_comp.item():.4f}, "
-                    f"KL: {kl_loss_comp.item():.4f}, Repulsion: {repulsion_comp.item():.4f}, λ: {current_lambda_rep:.4f})"
-                )
-            elif encoder_idx is not None:
-                logger.info(f"Encoder {encoder_idx} - Epoch [{current_epoch_num}/{total_batches}] Batch [{batch_idx + 1}/{total_batches}] ({progress:.1f}%)")
-                logger.info(f"  Step Loss: {loss.item() * gradient_accumulation_steps:.4f} (Shape: {shape_loss_comp.item():.4f}, Grid: {grid_loss_comp.item():.4f}, KL: {kl_loss_comp.item():.4f})")
-            else:
-                logger.info(f"Epoch [{current_epoch_num}/{total_batches}] Batch [{batch_idx + 1}/{total_batches}] ({progress:.1f}%)")
-                logger.info(f"  Step Loss: {loss.item() * gradient_accumulation_steps:.4f} (Shape: {shape_loss_comp.item():.4f}, Grid: {grid_loss_comp.item():.4f}, KL: {kl_loss_comp.item():.4f})")
 
-    avg_loss_for_epoch = epoch_total_loss / total_batches
-    avg_shape_loss = epoch_shape_loss_sum / total_batches
-    avg_grid_loss = epoch_grid_loss_sum / total_batches
-    avg_kl_loss = epoch_kl_loss_sum / total_batches
-    avg_repulsion_loss = epoch_repulsion_loss_sum / total_batches
-    
-    logger.info("=" * 60)
-    if joint_training:
-        logger.info(f"Joint Training - Epoch {current_epoch_num} Summary:")
-        logger.info(f"  Final Avg Shape Loss: {avg_shape_loss:.4f}")
-        logger.info(f"  Final Avg Grid Loss: {avg_grid_loss:.4f}")
-        logger.info(f"  Final Avg KL Loss: {avg_kl_loss:.4f}")
-        logger.info(f"  Final Avg Repulsion Loss: {avg_repulsion_loss:.4f}")
-        logger.info(f"  Final Avg Total Loss: {avg_loss_for_epoch:.4f}")
-        logger.info(f"  Repulsion λ (epoch): {current_lambda_rep:.4f}")
-    elif encoder_idx is not None:
-        logger.info(f"Encoder {encoder_idx} - Epoch {current_epoch_num} Summary:")
-        logger.info(f"  Final Avg Shape Loss: {avg_shape_loss:.4f}")
-        logger.info(f"  Final Avg Grid Loss: {avg_grid_loss:.4f}")
-        logger.info(f"  Final Avg KL Loss: {avg_kl_loss:.4f}")
-        logger.info(f"  Final Avg Total Loss: {avg_loss_for_epoch:.4f}")
-    else:
-        logger.info(f"Epoch {current_epoch_num} Summary:")
-        logger.info(f"  Final Avg Shape Loss: {avg_shape_loss:.4f}")
-        logger.info(f"  Final Avg Grid Loss: {avg_grid_loss:.4f}")
-        logger.info(f"  Final Avg KL Loss: {avg_kl_loss:.4f}")
-        logger.info(f"  Final Avg Total Loss: {avg_loss_for_epoch:.4f}")
-    logger.info("=" * 60)
+        epoch_total_loss += loss.item() * gradient_accumulation_steps
+        epoch_shape += shape_comp.item()
+        epoch_grid  += grid_comp.item()
+        epoch_kl    += kl_comp.item()
+        epoch_repulsion += repulsion_comp.item()
 
-    return avg_loss_for_epoch, avg_shape_loss, avg_grid_loss, avg_kl_loss, avg_repulsion_loss, current_lambda_rep
+    # return averages
+    avg_loss = epoch_total_loss/total_batches
+    return avg_loss, epoch_shape/total_batches, epoch_grid/total_batches,epoch_kl/total_batches, epoch_repulsion/total_batches, λ_rep
 
 
 def main_training(file_store_name):

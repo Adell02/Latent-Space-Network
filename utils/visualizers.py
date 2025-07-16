@@ -1596,10 +1596,10 @@ def plot_training_reconstruction_analysis(training_results, save_dir=None, max_e
                     # Get model reconstruction
                     if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
                         # Multi-encoder: use PoE
-                        (shape_logits, grid_logits), mu, logvar = model(input_tensor, target_tensor)
+                        (shape_logits, grid_logits), mu, logvar, _ = model(input_tensor, target_tensor)
                     else:
                         # Single encoder
-                        (shape_logits, grid_logits), mu, logvar = model(input_tensor, target_tensor)
+                        (shape_logits, grid_logits), mu, logvar, _ = model(input_tensor, target_tensor)
                     
                     # Store reconstruction data
                     training_reconstructions.append({
