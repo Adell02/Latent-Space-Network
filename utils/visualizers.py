@@ -777,7 +777,6 @@ def plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir=None, e
     """
     # Import required functions from LPN_reproduction/evaluate_trajectory.py
     import sys
-    import os
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     
     try:
@@ -1220,7 +1219,7 @@ def plot_reconstruction_analysis(data_results, save_dir=None, max_examples=2, da
                 reconstructions = reconstruction_results['reconstructions']
                 reconstruction_type = "Training Model"
         
-        if not reconstructions:
+        if reconstructions is None or len(reconstructions) == 0:
             print(f"No {data_type} reconstructions found for key {key}")
             continue
         
@@ -1295,9 +1294,7 @@ def plot_reconstruction_analysis(data_results, save_dir=None, max_examples=2, da
         
         # Create a fallback informational plot
         try:
-            import matplotlib.pyplot as plt
-            import os
-            
+                       
             fig, ax = plt.subplots(1, 1, figsize=(10, 6))
             ax.text(0.5, 0.5, f'{dataset_name} Reconstruction Analysis\n\nNo valid reconstructions found.\n\nThis can happen if:\n• Evaluation reconstruction data is missing\n• Reconstruction format is incompatible\n• No evaluation keys have reconstruction results\n\nCheck evaluation logs for details.', 
                    ha='center', va='center', transform=ax.transAxes, fontsize=12,
@@ -1556,8 +1553,6 @@ def plot_training_reconstruction_analysis(training_results, save_dir=None, max_e
         
     # Generate reconstruction results from training data and saved model
     try:
-        import matplotlib.pyplot as plt
-        import os
         from utils.model_utils import load_model
         from utils.data_preparation import extract_grid_from_sequence
         import torch
@@ -1662,10 +1657,6 @@ def plot_encoder_influence_analysis(eval_results, save_dir=None):
     if not eval_results:
         print("No evaluation results provided for influence analysis")
         return
-    
-    import matplotlib.pyplot as plt
-    import numpy as np
-    import os
     
     # Handle different result structures
     key_results_dict = {}
@@ -1892,13 +1883,7 @@ def generate_per_dimension_kl_plot(model, dataloader, device, epoch, encoder_idx
         encoder_idx: Encoder index (None for PoE)
         wandb_logger: WandB logger instance
         global_step: Global training step
-    """
-    import matplotlib.pyplot as plt
-    import numpy as np
-    import tempfile
-    import os
-    import torch
-    
+    """    
     model.eval()
     
     # Collect latent statistics from multiple batches

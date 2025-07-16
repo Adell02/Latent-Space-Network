@@ -157,7 +157,7 @@ class WandbLogger:
             print(f"⚠ Error logging visualizations: {e}")
     
     def upload_all_plots(self, run_dir: str, epoch: int = None):
-        """Upload all existing plots to wandb when running visualize command."""
+        """Upload all existing plots to wandb when running visualize command. Only upload plots for the latest epoch to avoid WandB step warnings."""
         if not self.is_initialized:
             print("⚠ Wandb not initialized, cannot upload plots")
             return
@@ -178,17 +178,17 @@ class WandbLogger:
             ('encoder_influence_analysis.png', 'encoder_influence_analysis'),
         ]
         
-        # Also look for trajectory reconstruction plots (pattern-based)
+        # Only upload the latest epoch's plots
         import glob
+        import re
         trajectory_plots = glob.glob(os.path.join(run_dir, 'multi_encoder_trajectory_reconstruction_sample_*.png'))
-        # Look for new trajectory plots from training epochs
         epoch_trajectory_plots = glob.glob(os.path.join(run_dir, 'trajectory_epoch*_*.png'))
         
         uploaded_count = 0
         # Use a valid step or let WandB auto-increment to avoid step=0 warnings
         step = epoch if epoch and epoch > 0 else None
         
-        # Upload standard plots
+        # Upload standard plots (not epoch-specific)
         for filename, wandb_key in plot_files:
             plot_path = os.path.join(run_dir, filename)
             if os.path.exists(plot_path):
@@ -199,55 +199,47 @@ class WandbLogger:
                 except Exception as e:
                     print(f"  ⚠ Failed to upload {filename}: {e}")
         
-        # Upload trajectory reconstruction plots
-        for i, traj_plot in enumerate(trajectory_plots):
+        # Upload only the latest trajectory reconstruction plots
+        def extract_epoch_from_filename(filename):
+            match = re.search(r'epoch(\d+)', filename)
+            return int(match.group(1)) if match else -1
+        
+        # For multi_encoder_trajectory_reconstruction_sample_*.png, just upload all (no epoch info)
+        for traj_plot in trajectory_plots:
             if os.path.exists(traj_plot):
                 try:
-                    wandb_key = f'trajectory_reconstruction_sample_{i}'
+                    wandb_key = f'trajectory_reconstruction_{os.path.basename(traj_plot)}'
                     self._safe_log({wandb_key: wandb.Image(traj_plot)}, step_hint=step)
                     print(f"  ✓ Uploaded {os.path.basename(traj_plot)}")
                     uploaded_count += 1
                 except Exception as e:
                     print(f"  ⚠ Failed to upload {os.path.basename(traj_plot)}: {e}")
         
-        # Upload epoch trajectory plots with epoch-based steps for slider visualization
-        # Group by key_sample pattern for consistent keys across epochs
+        # For epoch_trajectory_plots, only upload the latest epoch for each key_sample
         epoch_trajectory_dict = {}
-        
         for epoch_traj_plot in epoch_trajectory_plots:
             if os.path.exists(epoch_traj_plot):
-                try:
-                    # Extract epoch and key_sample from filename
-                    filename = os.path.basename(epoch_traj_plot)
-                    # Format: trajectory_epoch{epoch}_{key}_sample{sample_idx}.png
-                    parts = filename.replace('.png', '').split('_')
-                    if len(parts) >= 4 and parts[0] == 'trajectory' and parts[1].startswith('epoch'):
-                        epoch_num = int(parts[1].replace('epoch', ''))
-                        key = parts[2]
-                        sample_idx = parts[3].replace('sample', '')
-                        
-                        # Create consistent key for slider visualization
-                        plot_key = f'{key}_sample{sample_idx}'
-                        
-                        # Group by key_sample
-                        if plot_key not in epoch_trajectory_dict:
-                            epoch_trajectory_dict[plot_key] = []
-                        
-                        # Store epoch and path
-                        epoch_trajectory_dict[plot_key].append((epoch_num, epoch_traj_plot))
-                except Exception as e:
-                    print(f"  ⚠ Failed to process {os.path.basename(epoch_traj_plot)}: {e}")
-        
-        # Upload each trajectory plot with its corresponding epoch as step
+                filename = os.path.basename(epoch_traj_plot)
+                match = re.match(r'trajectory_epoch(\d+)_(.+)_sample(\d+)\.png', filename)
+                if match:
+                    epoch_num = int(match.group(1))
+                    key = match.group(2)
+                    sample_idx = match.group(3)
+                    plot_key = f'{key}_sample{sample_idx}'
+                    if plot_key not in epoch_trajectory_dict:
+                        epoch_trajectory_dict[plot_key] = []
+                    epoch_trajectory_dict[plot_key].append((epoch_num, epoch_traj_plot))
+        # Only upload the latest epoch for each key_sample
         for plot_key, epoch_paths in epoch_trajectory_dict.items():
-            for epoch_num, plot_path in epoch_paths:
-                try:
-                    wandb_key = f'trajectory_{plot_key}'
-                    self._safe_log({wandb_key: wandb.Image(plot_path)}, step_hint=epoch_num)
-                    print(f"  ✓ Uploaded {os.path.basename(plot_path)} (epoch {epoch_num})")
-                    uploaded_count += 1
-                except Exception as e:
-                    print(f"  ⚠ Failed to upload {os.path.basename(plot_path)}: {e}")
+            # Find the latest epoch
+            latest_epoch, latest_path = max(epoch_paths, key=lambda x: x[0])
+            try:
+                wandb_key = f'trajectory_{plot_key}'
+                self._safe_log({wandb_key: wandb.Image(latest_path)}, step_hint=step)
+                print(f"  ✓ Uploaded {os.path.basename(latest_path)} (latest epoch {latest_epoch})")
+                uploaded_count += 1
+            except Exception as e:
+                print(f"  ⚠ Failed to upload {os.path.basename(latest_path)}: {e}")
         
         print(f"  📊 Total plots uploaded: {uploaded_count}")
         
