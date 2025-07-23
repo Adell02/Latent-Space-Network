@@ -10,6 +10,7 @@ import tempfile
 import shutil
 from typing import Dict, Any, Optional, Tuple, List
 from utils.settings_manager import settings
+import re
 
 def generate_trajectory_plots(eval_results: Dict[str, Any], run_dir: str, epoch: int, max_samples: int = 3, current_model=None) -> Dict[str, str]:
     """
@@ -217,6 +218,18 @@ def log_evaluation_to_wandb(eval_results: Dict[str, Any], run_dir: str, epoch: i
         return
     
     try:
+        # Determine numeric step from epoch string or run
+        if isinstance(epoch, (int, float)):
+            step = int(epoch)
+        else:
+            match = re.search(r"(\d+)", str(epoch))
+            if match:
+                step = int(match.group(1))
+            elif wandb_logger and getattr(wandb_logger, 'run', None):
+                step = wandb_logger.run.step + 1
+            else:
+                step = 1
+
         # Log evaluation metrics
         if 'aggregated_metrics' in eval_results:
             agg_metrics = eval_results['aggregated_metrics']
@@ -232,7 +245,7 @@ def log_evaluation_to_wandb(eval_results: Dict[str, Any], run_dir: str, epoch: i
                 f'{prefix}support_loss': avg_metrics.get('avg_support_loss', 0.0),
                 f'{prefix}query_loss': avg_metrics.get('avg_query_loss', 0.0),
             }
-            wandb_logger.log_training_metrics(epoch, eval_metrics)
+            wandb_logger.log_training_metrics(step, eval_metrics)
             print(f"✓ Logged evaluation metrics to wandb")
         else:
             print("⚠ No aggregated metrics found in evaluation results")
@@ -249,11 +262,11 @@ def log_evaluation_to_wandb(eval_results: Dict[str, Any], run_dir: str, epoch: i
         # Generate and log trajectory plots
         wandb_settings = settings.get_wandb_settings()
         max_samples = wandb_settings.get('trajectory_max_samples', 3)
-        trajectory_plots = generate_trajectory_plots(eval_results, run_dir, epoch, max_samples, current_model=current_model)
+        trajectory_plots = generate_trajectory_plots(eval_results, run_dir, step, max_samples, current_model=current_model)
         
         # Log all visualizations – ensure epoch is int for modulo check
         epoch_step = epoch if isinstance(epoch, int) else 0
-        wandb_logger.log_visualizations(run_dir, epoch_step, eval_results, trajectory_plots)
+        wandb_logger.log_visualizations(run_dir, step, eval_results, trajectory_plots)
         
     except Exception as e:
         print(f"⚠ Error logging evaluation to wandb: {e}")

@@ -1,12 +1,15 @@
 import torch
 import torch.nn as nn
 from torch.optim import Adam
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, IterableDataset
 import os
 import numpy as np
+import random
+import json
 from typing import List, Tuple, Dict, Any
-
 from utils.model_utils import prepare_dataloader
+from utils.data_preparation import transform_grid_to_sequence
+
 
 
 class MixedDomainsDataset(Dataset):
@@ -63,7 +66,7 @@ class MixedDomainsDataset(Dataset):
         return input_seq, output_seq, encoder_idx
 
 
-def create_mixed_domains_dataloader(encoder_datasets: List[Tuple[List, List]], 
+def create_mixed_domains_dataloader(encoder_datasets: List[Tuple[List, List]],
                                   num_encoders: int, batch_size: int, shuffle: bool = True) -> DataLoader:
     """
     Create a DataLoader that mixes data from multiple encoders in round-robin fashion.
@@ -91,6 +94,60 @@ def create_mixed_domains_dataloader(encoder_datasets: List[Tuple[List, List]],
         return input_batch, output_batch, encoder_indices_batch
     
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn)
+
+class InfiniteARCDataset(IterableDataset):
+    """Iterable dataset that generates or loads ARC examples on-the-fly."""
+
+    def __init__(self, task_keys: List[str], batch_size: int, batches_per_epoch: int,
+                 seed: int = 42, data_dir: str = None):
+        self.task_keys = task_keys
+        self.batch_size = batch_size
+        self.batches_per_epoch = batches_per_epoch
+        self.seed = seed
+        self.data_dir = data_dir
+
+        # Load pre-generated examples if available
+        self.pre_generated = {}
+        if data_dir:
+            for key in task_keys:
+                path = os.path.join(data_dir, f"{key}.json")
+                if os.path.exists(path):
+                    with open(path, "r") as fp:
+                        try:
+                            self.pre_generated[key] = json.load(fp)
+                        except Exception:
+                            self.pre_generated[key] = []
+
+        # Retrieve generator functions
+        self.generators = {k: getattr(__import__('re_arc.generators', fromlist=['']),'generate_' + k) for k in task_keys}
+        self._epoch = 0
+
+    def __len__(self) -> int:
+        return self.batches_per_epoch * self.batch_size
+
+    def _sample_example(self, key: str, rng: random.Random) -> dict:
+        examples = self.pre_generated.get(key)
+        if examples:
+            return rng.choice(examples)
+        generator = self.generators[key]
+        return generator(0, 1)
+
+    def __iter__(self):
+        rng = random.Random(self.seed + self._epoch)
+        self._epoch += 1
+        for _ in range(len(self)):
+            key = rng.choice(self.task_keys)
+            example = self._sample_example(key, rng)
+            input_seq = transform_grid_to_sequence(np.array(example['input']))
+            output_seq = transform_grid_to_sequence(np.array(example['output']))
+            yield torch.tensor(input_seq, dtype=torch.float32), torch.tensor(output_seq, dtype=torch.float32)
+
+
+def create_infinite_dataloader(task_keys: List[str], batch_size: int, batches_per_epoch: int,
+                               seed: int = 42, data_dir: str = None) -> DataLoader:
+    """Helper to create a DataLoader backed by ``InfiniteARCDataset``."""
+    dataset = InfiniteARCDataset(task_keys, batch_size, batches_per_epoch, seed=seed, data_dir=data_dir)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
 
 def freeze_all_parameters(model: nn.Module) -> None:

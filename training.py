@@ -10,6 +10,7 @@ from utils.settings_manager import settings
 from re_arc.main import generate_and_process_tasks
 from utils.latent_functions import get_optimized_z
 from utils.data_preparation import split_dataset_by_keys_for_multi_encoder
+from utils.training_helpers import create_mixed_domains_dataloader, create_infinite_dataloader
 
 from utils.model_utils import (
     set_seed,
@@ -25,6 +26,7 @@ from utils.model_utils import (
 
 from utils.wandb_logger import init_wandb_for_mode, get_wandb_logger
 from utils.evaluation_utils import run_quick_evaluation, should_run_evaluation, log_evaluation_to_wandb
+from utils.visualizers import plot_training_latent_space_per_epoch
 
 
 def build_model(device, wandb_logger=None, global_step=None):
@@ -242,6 +244,7 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler,
     repulsion_loss_set = settings.get_repulsion_loss_settings()
     LOGVAR_MIN = repulsion_loss_set.get('logvar_min', -8.0)   # clamp log variance
     MARGIN = repulsion_loss_set.get('margin', 0.5)        # hinge margin τ
+    λ_rep = 0.0
 
     # Accumulators
     epoch_total_loss = 0.0
@@ -263,8 +266,9 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler,
                 rep_cfg     = settings.get_repulsion_loss_settings()
                 base_lambda = rep_cfg.get('lambda', 0.1)
                 sched_cfg   = rep_cfg.get('schedule', None)
+                sched_type = sched_cfg.get('type', 'none')
                 λ_rep = base_lambda
-                if sched_cfg:
+                if sched_cfg and sched_type != 'none':
                     warmup = sched_cfg.get('warmup_epochs', 0)
                     if current_epoch_num <= warmup:
                         λ_rep = 0.0
@@ -417,6 +421,9 @@ def main_training(file_store_name):
     NUM_EPOCHS = training_settings['num_epochs']
     LEARNING_RATE = training_settings['learning_rate']
     BETA = training_settings['beta']
+    INFINITE_DATALOADER = training_settings.get('infinite_dataloader', False)
+    BATCHES_PER_EPOCH = training_settings.get(
+        'batches_per_epoch', max(1, (N_EXAMPLES_PER_TASK * len(TRAINING_KEYS)) // BATCH_SIZE))
 
     OPTIMIZE_Z = latent_optimization['training']['enabled']
     OPTIMIZE_Z_NUM_STEPS = latent_optimization['training']['num_steps']
@@ -450,6 +457,15 @@ def main_training(file_store_name):
     logger.info("Generating and preparing data...")
     print("Generating and preparing data...")
 
+    if INFINITE_DATALOADER:
+        logger.info("INFINITE_DATALOADER = True")
+        print("INFINITE_DATALOADER = True")
+    else:
+        logger.info("INFINITE_DATALOADER = False")
+        print("INFINITE_DATALOADER = False")
+
+    dataloader = None
+
     if is_multi_encoder:
         logger.info(f"Multi-encoder training enabled with {NUM_ENCODERS} encoders")
         print(f"Multi-encoder training enabled with {NUM_ENCODERS} encoders")
@@ -458,106 +474,155 @@ def main_training(file_store_name):
             # ---------------------- KEY-BASED SPLITTING ----------------------
             logger.info("Using key-based dataset splitting for multi-encoder training (split_across_encoders = True)")
             print("Using key-based dataset splitting for multi-encoder training (split_across_encoders = True)")
+            if INFINITE_DATALOADER:
+                encoder_dataloaders = []
+                key_to_encoder_mapping = {}
+                tasks_dir = os.path.join(os.path.dirname(__file__), 're_arc', 're_arc', 'tasks')
+                for idx, key in enumerate(TRAINING_KEYS):
+                    enc_idx = idx % NUM_ENCODERS
+                    key_to_encoder_mapping.setdefault(enc_idx, []).append(key)
+                for enc_idx in range(NUM_ENCODERS):
+                    enc_keys = key_to_encoder_mapping.get(enc_idx, [])
+                    if enc_keys:
+                        dl = create_infinite_dataloader(enc_keys, BATCH_SIZE, BATCHES_PER_EPOCH,
+                                                        seed=data_settings['training_seed'], data_dir=tasks_dir)
+                        encoder_dataloaders.append(dl)
+                        logger.info(f"Encoder {enc_idx}: infinite loader for keys {enc_keys}")
+                    else:
+                        encoder_dataloaders.append(None)
+                        logger.info(f"Encoder {enc_idx}: No keys assigned")
+
+                training_metadata = {
+                    'training_keys': TRAINING_KEYS,
+                    'num_encoders': NUM_ENCODERS,
+                    'split_across_encoders': True,
+                    'infinite_dataloader': True,
+                    'key_to_encoder_mapping': key_to_encoder_mapping
+                }
+            else:
+                dataset_splits, key_to_encoder_mapping, splitting_statistics = split_dataset_by_keys_for_multi_encoder(
+                    TRAINING_KEYS, NUM_ENCODERS, N_EXAMPLES_PER_TASK, generate_and_process_tasks
+                )
+
+                training_metadata = {
+                    'key_to_encoder_mapping': key_to_encoder_mapping,
+                    'splitting_statistics': splitting_statistics,
+                    'training_keys': TRAINING_KEYS,
+                    'num_encoders': NUM_ENCODERS,
+                    'split_across_encoders': True
+                }
+
+                encoder_dataloaders = []
+                for i, (enc_inputs, enc_outputs) in enumerate(dataset_splits):
+                    if enc_inputs and enc_outputs:
+                        dataloader = prepare_dataloader(enc_inputs, enc_outputs, BATCH_SIZE)
+                        encoder_dataloaders.append(dataloader)
+
+                        encoder_keys = splitting_statistics['keys_per_encoder'][i]
+                        logger.info(f"Encoder {i}: {len(enc_inputs)} samples from keys {encoder_keys}")
+                        print(f"Encoder {i}: {len(enc_inputs)} samples from keys {encoder_keys}")
+                    else:
+                        encoder_dataloaders.append(None)
+                        logger.info(f"Encoder {i}: No data assigned")
+                        print(f"Encoder {i}: No data assigned")
             
-            dataset_splits, key_to_encoder_mapping, splitting_statistics = split_dataset_by_keys_for_multi_encoder(
-                TRAINING_KEYS, NUM_ENCODERS, N_EXAMPLES_PER_TASK, generate_and_process_tasks
-            )
-            
-            # Store splitting information for later use
-            training_metadata = {
-                'key_to_encoder_mapping': key_to_encoder_mapping,
-                'splitting_statistics': splitting_statistics,
-                'training_keys': TRAINING_KEYS,
-                'num_encoders': NUM_ENCODERS,
-                'split_across_encoders': True
-            }
-            
-            # Create dataloaders for each encoder
-            encoder_dataloaders = []
-            for i, (enc_inputs, enc_outputs) in enumerate(dataset_splits):
-                if enc_inputs and enc_outputs:
-                    dataloader = prepare_dataloader(enc_inputs, enc_outputs, BATCH_SIZE)
-                    encoder_dataloaders.append(dataloader)
-                    
-                    # Log which keys are trained by this encoder
-                    encoder_keys = splitting_statistics['keys_per_encoder'][i]
-                    logger.info(f"Encoder {i}: {len(enc_inputs)} samples from keys {encoder_keys}")
-                    print(f"Encoder {i}: {len(enc_inputs)} samples from keys {encoder_keys}")
-                else:
-                    # Create empty dataloader for consistency
-                    encoder_dataloaders.append(None)
-                    logger.info(f"Encoder {i}: No data assigned")
-                    print(f"Encoder {i}: No data assigned")
         else:
             # ---------------------- MIXED DATASET (NO SPLIT) ------------------
             logger.info("split_across_encoders = False → using mixed dataset for all encoders")
             print("split_across_encoders = False → using mixed dataset for all encoders")
             
-            all_input_sequences = []
-            all_output_sequences = []
-            for task_key in TRAINING_KEYS:
-                try:
-                    _, _, _, task_input_sequences, task_output_sequences = generate_and_process_tasks(task_key, N_EXAMPLES_PER_TASK)
-                    all_input_sequences.extend(task_input_sequences)
-                    all_output_sequences.extend(task_output_sequences)
-                    logger.info(f"Generated {len(task_input_sequences)} pairs for task {task_key}")
-                except Exception as e:
-                    logger.error(f"Error generating data for task {task_key}: {e}")
-                    continue
-            if not all_input_sequences:
-                logger.error("No data generated for mixed dataset. Exiting training.")
-                print("No data generated for mixed dataset. Exiting training.")
-                return None, None
-            mixed_dataloader = prepare_dataloader(all_input_sequences, all_output_sequences, BATCH_SIZE)
-            # Use the same dataloader reference for each encoder to keep downstream code intact
-            encoder_dataloaders = [mixed_dataloader for _ in range(NUM_ENCODERS)]
-            
-            training_metadata = {
-                'training_keys': TRAINING_KEYS,
-                'num_encoders': NUM_ENCODERS,
-                'split_across_encoders': False,
-                'mixed_dataset_samples': len(all_input_sequences)
-            }
+            if INFINITE_DATALOADER:
+                tasks_dir = os.path.join(os.path.dirname(__file__), 're_arc', 're_arc', 'tasks')
+                mixed_dataloader = create_infinite_dataloader(
+                    TRAINING_KEYS, BATCH_SIZE, BATCHES_PER_EPOCH,
+                    seed=data_settings['training_seed'], data_dir=tasks_dir)
+                encoder_dataloaders = [mixed_dataloader for _ in range(NUM_ENCODERS)]
+
+                training_metadata = {
+                    'training_keys': TRAINING_KEYS,
+                    'num_encoders': NUM_ENCODERS,
+                    'split_across_encoders': False,
+                    'infinite_dataloader': True
+                }
+            else:
+                all_input_sequences = []
+                all_output_sequences = []
+                for task_key in TRAINING_KEYS:
+                    try:
+                        _, _, _, task_input_sequences, task_output_sequences = generate_and_process_tasks(task_key, N_EXAMPLES_PER_TASK)
+                        all_input_sequences.extend(task_input_sequences)
+                        all_output_sequences.extend(task_output_sequences)
+                        logger.info(f"Generated {len(task_input_sequences)} pairs for task {task_key}")
+                    except Exception as e:
+                        logger.error(f"Error generating data for task {task_key}: {e}")
+                        continue
+                if not all_input_sequences:
+                    logger.error("No data generated for mixed dataset. Exiting training.")
+                    print("No data generated for mixed dataset. Exiting training.")
+                    return None, None
+                mixed_dataloader = prepare_dataloader(all_input_sequences, all_output_sequences, BATCH_SIZE)
+                encoder_dataloaders = [mixed_dataloader for _ in range(NUM_ENCODERS)]
+
+                training_metadata = {
+                    'training_keys': TRAINING_KEYS,
+                    'num_encoders': NUM_ENCODERS,
+                    'split_across_encoders': False,
+                    'mixed_dataset_samples': len(all_input_sequences)
+                }
     else:
         # Single encoder training - generate data normally
         logger.info("Generating data for single encoder training...")
         print("Generating data for single encoder training...")
 
-        all_input_sequences = []
-        all_output_sequences = []
-        logger.info(f"Generating data for tasks: {TRAINING_KEYS}")
-        print(f"Generating data for tasks: {TRAINING_KEYS}")
+        if INFINITE_DATALOADER:
+            tasks_dir = os.path.join(os.path.dirname(__file__), 're_arc', 're_arc', 'tasks')
+            dataloader = create_infinite_dataloader(
+                TRAINING_KEYS, BATCH_SIZE, BATCHES_PER_EPOCH,
+                seed=data_settings['training_seed'], data_dir=tasks_dir)
+            training_metadata = {
+                'training_keys': TRAINING_KEYS,
+                'num_encoders': 1,
+                'single_encoder_training': True,
+                'infinite_dataloader': True
+            }
+            input_sequences = output_sequences = None
+            encoder_dataloaders = [dataloader]
+        else:
+            all_input_sequences = []
+            all_output_sequences = []
+            logger.info(f"Generating data for tasks: {TRAINING_KEYS}")
+            print(f"Generating data for tasks: {TRAINING_KEYS}")
+            for task_key in TRAINING_KEYS:
+                logger.info(f"Processing task: {task_key} with {N_EXAMPLES_PER_TASK} examples")
+                print(f"Processing task: {task_key} with {N_EXAMPLES_PER_TASK} examples")
+                try:
+                    _, _, _, task_input_sequences, task_output_sequences = generate_and_process_tasks(task_key, N_EXAMPLES_PER_TASK)
+                    all_input_sequences.extend(task_input_sequences)
+                    all_output_sequences.extend(task_output_sequences)
+                    logger.info(f"Generated {len(task_input_sequences)} pairs for task {task_key}")
+                    print(f"Generated {len(task_input_sequences)} pairs for task {task_key}")
+                except Exception as e:
+                    logger.error(f"Error generating data for task {task_key}: {e}")
+                    print(f"Error generating data for task {task_key}: {e}")
+                    continue
+            if not all_input_sequences:
+                logger.error("No data generated from any task. Exiting training.")
+                print("No data generated from any task. Exiting training.")
+                return None, None
 
-        for task_key in TRAINING_KEYS:
-            logger.info(f"Processing task: {task_key} with {N_EXAMPLES_PER_TASK} examples")
-            print(f"Processing task: {task_key} with {N_EXAMPLES_PER_TASK} examples")
-            try:
-                _, _, _, task_input_sequences, task_output_sequences = generate_and_process_tasks(task_key, N_EXAMPLES_PER_TASK)
-                all_input_sequences.extend(task_input_sequences)
-                all_output_sequences.extend(task_output_sequences)
-                logger.info(f"Generated {len(task_input_sequences)} pairs for task {task_key}")
-                print(f"Generated {len(task_input_sequences)} pairs for task {task_key}")
-            except Exception as e:
-                logger.error(f"Error generating data for task {task_key}: {e}")
-                print(f"Error generating data for task {task_key}: {e}")
-                continue 
-        
-        if not all_input_sequences:
-            logger.error("No data generated from any task. Exiting training.")
-            print("No data generated from any task. Exiting training.")
-            return None, None
+            input_sequences = all_input_sequences
+            output_sequences = all_output_sequences
+            logger.info(f"Total generated {len(input_sequences)} pairs of sequences from {len(TRAINING_KEYS)} tasks.")
+            print(f"Total generated {len(input_sequences)} pairs of sequences from {len(TRAINING_KEYS)} tasks.")
 
-        input_sequences = all_input_sequences
-        output_sequences = all_output_sequences
-        logger.info(f"Total generated {len(input_sequences)} pairs of sequences from {len(TRAINING_KEYS)} tasks.")
-        print(f"Total generated {len(input_sequences)} pairs of sequences from {len(TRAINING_KEYS)} tasks.")
-        
-        dataloader = prepare_dataloader(input_sequences, output_sequences, BATCH_SIZE)
-        training_metadata = {
-            'training_keys': TRAINING_KEYS,
-            'num_encoders': 1,
-            'single_encoder_training': True
-        }
+            dataloader = prepare_dataloader(input_sequences, output_sequences, BATCH_SIZE)
+
+            training_metadata = {
+                'training_keys': TRAINING_KEYS,
+                'num_encoders': 1,
+                'single_encoder_training': True
+            }
+            encoder_dataloaders = [dataloader]
 
     logger.info("Initializing model...")
     print("Initializing model...")
@@ -618,25 +683,43 @@ def main_training(file_store_name):
     }
     
     # Store training sequences for visualization (both single and multi-encoder)
-    if not is_multi_encoder:
+    if not is_multi_encoder and not INFINITE_DATALOADER:
+        # --- Track key for each sample ---
+        key_list = []
+        for task_key in TRAINING_KEYS:
+            # Count how many samples for this key
+            n_samples = sum(1 for seq in input_sequences if seq in input_sequences)  # fallback, will be overwritten below
+        # Build key_list efficiently
+        key_list = []
+        idx = 0
+        for task_key in TRAINING_KEYS:
+            # Count how many samples for this key
+            n_for_key = N_EXAMPLES_PER_TASK
+            key_list.extend([task_key] * n_for_key)
+            idx += n_for_key
+        # If there are leftover samples, assign to last key
+        key_list.extend([TRAINING_KEYS[-1]] * (len(input_sequences) - len(key_list)))
         results['input_sequences'] = [seq.tolist() for seq in input_sequences]
         results['output_sequences'] = [seq.tolist() for seq in output_sequences]
+        results['key_list'] = key_list
     else:
         # For multi-encoder, combine all training data for visualization
-        all_inputs = []
-        all_outputs = []
-        for encoder_idx in range(NUM_ENCODERS):
-            dataloader = encoder_dataloaders[encoder_idx]
-            if dataloader is None:
-                continue # Skip encoders with no data
-            for batch_input, batch_output in dataloader:
-                all_inputs.extend(batch_input.tolist())
-                all_outputs.extend(batch_output.tolist())
-        
-        results['input_sequences'] = all_inputs
-        results['output_sequences'] = all_outputs
-        print(f"Saved {len(all_inputs)} combined training sequences from {NUM_ENCODERS} encoders for visualization")
-
+        if not INFINITE_DATALOADER:
+            all_inputs = []
+            all_outputs = []
+            all_keys = []
+            for encoder_idx in range(NUM_ENCODERS):
+                dataloader = encoder_dataloaders[encoder_idx]
+                if dataloader is None:
+                    continue  # Skip encoders with no data
+                for batch_input, batch_output in dataloader:
+                    all_inputs.extend(batch_input.tolist())
+                    all_outputs.extend(batch_output.tolist())
+                    all_keys.extend([k for k in training_metadata['key_to_encoder_mapping'].get(encoder_idx, [])] * batch_input.size(0))
+            results['input_sequences'] = all_inputs
+            results['output_sequences'] = all_outputs
+            results['key_list'] = all_keys
+            print(f"Saved {len(all_inputs)} combined training sequences from {NUM_ENCODERS} encoders for visualization")
     # Save initial settings and model parameters
     logger.info("Saving initial model parameters and settings...")
     print("Saving initial model parameters and settings...")
@@ -774,6 +857,22 @@ def main_training(file_store_name):
                 'avg_total_loss': avg_loss,
                 'learning_rate': current_lr
             })
+        
+        # --- NEW: Plot training latent space after each epoch ---
+        if dataloader is not None:
+            # Pass input_sequences/output_sequences and TRAINING_KEYS if available
+            input_seqs = results.get('input_sequences', None)
+            output_seqs = results.get('output_sequences', None)
+            key_list = results.get('key_list', None)
+            plot_training_latent_space_per_epoch(
+                model, dataloader, device, epoch, run_dir, 
+                infinite_dataloader=INFINITE_DATALOADER, 
+                wandb_logger=wandb_logger,
+                input_sequences=input_seqs,
+                output_sequences=output_seqs,
+                training_keys=TRAINING_KEYS,
+                key_list=key_list
+            )
         
         if scheduler:
             scheduler.step() # Step the scheduler each epoch

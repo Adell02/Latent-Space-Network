@@ -16,7 +16,7 @@ def transform_grid_to_sequence(grid:np.ndarray):
     """
     # Get original shape
     rows, cols = grid.shape
-    
+
     # Validate dimensions (should be <= 30 for ARC)
     if rows > 30 or cols > 30:
         raise ValueError(f"Grid dimensions ({rows}, {cols}) exceed maximum of 30x30")

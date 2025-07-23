@@ -1398,48 +1398,55 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
             
     else:
         # Single encoder model - use Bonnet's standard approach with enhancements
-        reconstruction, mu, log_var, _ = model(input_seq, target_seq)
-        shape_logits, grid_logits = reconstruction
+        batch_size = input_seq.size(0)
+        use_cross_pair = cross_pair_enabled and batch_size >= 2
+        if use_cross_pair:
+            # Use cross-pair loss for single-encoder
+            # Use encoder_idx=0, and model.encoder/model.decoder
+            # Get latent optimization settings
+            latent_settings = get_current_settings().get('latent_optimization', {})
+            training_settings = latent_settings.get('training', {})
+            opt_steps = training_settings.get('num_steps', 0) if training_settings.get('enabled', False) else 0
+            opt_lr = training_settings.get('learning_rate', 0.1)
+            reconstruction_loss = compute_bonnet_cross_pair_loss(
+                model, 0, input_seq, target_seq, True, opt_steps, opt_lr
+            )
+        else:
+            reconstruction, mu, log_var, _ = model(input_seq, target_seq)
+            shape_logits, grid_logits = reconstruction
 
-        # Bonnet's reconstruction loss computation
-        shape_targets = target_seq[:, 900:902].long()
-        shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
-        
-        batch_size = target_seq.size(0)
-        grid_loss_sum = 0.0
-        active_samples_count = 0
-        
-        for i in range(batch_size):
-            # Retrieve the target dimensions (active region) from the last two tokens.
-            tgt_rows = int(target_seq[i, 900].item())
-            tgt_cols = int(target_seq[i, 901].item())
-            active_pixels = tgt_rows * tgt_cols
-
-            if active_pixels > 0:
-                # Compute cross-entropy only over the active region.
-                loss_i = F.cross_entropy(grid_logits[i, :active_pixels], target_seq[i, :active_pixels].long())
-                grid_loss_sum += loss_i
-                active_samples_count += 1  # Count samples for averaging
-
-        # Average grid loss over samples (not pixels)
-        grid_loss = grid_loss_sum / active_samples_count if active_samples_count > 0 else torch.tensor(0.0, device=input_seq.device)
-        reconstruction_loss = shape_loss + grid_loss
+            # Bonnet's reconstruction loss computation
+            shape_targets = target_seq[:, 900:902].long()
+            shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
+            
+            grid_loss_sum = 0.0
+            active_samples_count = 0
+            for i in range(batch_size):
+                tgt_rows = int(target_seq[i, 900].item())
+                tgt_cols = int(target_seq[i, 901].item())
+                active_pixels = tgt_rows * tgt_cols
+                if active_pixels > 0:
+                    loss_i = F.cross_entropy(grid_logits[i, :active_pixels], target_seq[i, :active_pixels].long())
+                    grid_loss_sum += loss_i
+                    active_samples_count += 1
+            grid_loss = grid_loss_sum / active_samples_count if active_samples_count > 0 else torch.tensor(0.0, device=input_seq.device)
+            reconstruction_loss = shape_loss + grid_loss
 
         # Latent regularization loss (KL or VQ)
         if is_vq_vae:
             # VQ-VAE: log_var contains VQ loss
-            vq_loss = torch.mean(log_var)
+            vq_loss = torch.mean(log_var) if not use_cross_pair else torch.tensor(0.0, device=input_seq.device)
             latent_loss = vq_loss
             raw_kl_loss = torch.tensor(0.0, device=input_seq.device)
             kl_per_dim_mean = torch.tensor(0.0, device=input_seq.device)
         else:
             # Standard VAE: KL divergence with free-bits
             if use_free_bits:
-                raw_kl_loss, latent_loss, kl_per_dim_mean = apply_free_bits_per_dimension(mu, log_var, free_bits_delta)
+                raw_kl_loss, latent_loss, kl_per_dim_mean = apply_free_bits_per_dimension(mu, log_var, free_bits_delta) if not use_cross_pair else (torch.tensor(0.0, device=input_seq.device), torch.tensor(0.0, device=input_seq.device), torch.tensor(0.0, device=input_seq.device))
             else:
-                latent_loss = 0.5 * torch.mean(torch.sum(mu.pow(2) + log_var.exp() - 1 - log_var, dim=1))
+                latent_loss = 0.5 * torch.mean(torch.sum(mu.pow(2) + log_var.exp() - 1 - log_var, dim=1)) if not use_cross_pair else torch.tensor(0.0, device=input_seq.device)
                 raw_kl_loss = latent_loss
-                kl_per_dim_mean = latent_loss / latent_dim
+                kl_per_dim_mean = latent_loss / latent_dim if not use_cross_pair else torch.tensor(0.0, device=input_seq.device)
 
         # Compute effective beta (cyclical annealing if enabled)
         if use_cyclical_beta and current_epoch is not None:
@@ -1453,11 +1460,10 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
             components = {
                 'total_loss': total_loss,
                 'reconstruction_loss': reconstruction_loss,
-                'shape_loss': shape_loss,
-                'grid_loss': grid_loss,
+                'shape_loss': shape_loss if not use_cross_pair else torch.tensor(0.0, device=input_seq.device),
+                'grid_loss': grid_loss if not use_cross_pair else torch.tensor(0.0, device=input_seq.device),
                 'effective_beta': effective_beta,
             }
-            
             if is_vq_vae:
                 components.update({
                     'vq_loss': vq_loss,
@@ -1472,7 +1478,6 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
                     'raw_kl_loss': raw_kl_loss,
                     'kl_per_dim': kl_per_dim_mean,
                 })
-            
             return components
         
         return total_loss

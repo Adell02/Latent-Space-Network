@@ -246,7 +246,7 @@ def log_model_summary(model, wandb_logger=None, global_step=0):
     """Log model parameter summary."""
     if not wandb_logger:
         return
-        
+    
     try:
         from utils.settings_manager import settings
         model_arch = settings.get_model_architecture()

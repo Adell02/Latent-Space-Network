@@ -18,49 +18,42 @@ from utils.settings_manager import settings
 ##############################
 # Count Model Parameters
 ##############################
-def count_model_parameters(model: nn.Module, logger=None) -> dict:
+def count_model_parameters(model: nn.Module, logger=None, exclude_independent_decoders=False) -> dict:
     """
     Count model parameters with detailed breakdown and return parameter information.
-    
-    Args:
-        model: PyTorch model to analyze
-        logger: Optional logger for detailed logging
-        
-    Returns:
-        dict: Parameter count information including totals and breakdowns
+    If exclude_independent_decoders is True, skip parameters in independent decoders (for joint training).
     """
     total_params = 0
     trainable_params = 0
     breakdown = {}
     detailed_breakdown = {}
-    
     # Count all parameters (trainable and non-trainable)
     for name, param in model.named_parameters():
+        # Exclude independent decoders if requested
+        if exclude_independent_decoders and 'multi_encoder.independent_decoders' in name:
+            continue
         num_params = param.numel()
         total_params += num_params
-        
         if param.requires_grad:
             trainable_params += num_params
-        
         # Component breakdown (first level)
         component = name.split('.')[0]
         breakdown[component] = breakdown.get(component, 0) + num_params
-        
         # Detailed breakdown (full parameter name)
         detailed_breakdown[name] = {
             'shape': list(param.shape),
             'parameters': num_params,
             'trainable': param.requires_grad
         }
-    
     # Calculate multi-encoder specific breakdown if applicable
     encoder_breakdown = {}
     decoder_params = 0
     shared_params = 0
-    
     if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
         # Multi-encoder model analysis
         for name, param in model.named_parameters():
+            if exclude_independent_decoders and 'multi_encoder.independent_decoders' in name:
+                continue
             num_params = param.numel()
             if 'multi_encoder.encoders' in name:
                 # Extract encoder index
@@ -71,7 +64,6 @@ def count_model_parameters(model: nn.Module, logger=None) -> dict:
                 decoder_params += num_params
             else:
                 shared_params += num_params
-    
     # Create parameter info dictionary
     param_info = {
         'total_params': total_params,
@@ -80,22 +72,20 @@ def count_model_parameters(model: nn.Module, logger=None) -> dict:
         'component_breakdown': breakdown,
         'detailed_breakdown': detailed_breakdown,
         'is_multi_encoder': hasattr(model, 'is_multi_encoder') and model.is_multi_encoder,
-        'num_encoders': getattr(model, 'num_encoders', 1) if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder else 1
+        'num_encoders': getattr(model, 'num_encoders', 1) if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder else 1,
+        'exclude_independent_decoders': exclude_independent_decoders
     }
-    
     # Add multi-encoder specific info
     if param_info['is_multi_encoder']:
         param_info['encoder_breakdown'] = encoder_breakdown
         param_info['decoder_params'] = decoder_params
         param_info['shared_params'] = shared_params
-        
         # Calculate per-encoder average
         if encoder_breakdown:
             total_encoder_params = sum(encoder_breakdown.values())
             avg_encoder_params = total_encoder_params / len(encoder_breakdown)
             param_info['avg_encoder_params'] = avg_encoder_params
             param_info['total_encoder_params'] = total_encoder_params
-    
     # Print detailed information
     print("=" * 60)
     print("MODEL PARAMETER ANALYSIS")
@@ -104,7 +94,8 @@ def count_model_parameters(model: nn.Module, logger=None) -> dict:
     print(f"Trainable parameters: {trainable_params:,}")
     print(f"Non-trainable parameters: {total_params - trainable_params:,}")
     print(f"Model type: {'Multi-encoder' if param_info['is_multi_encoder'] else 'Single encoder'}")
-    
+    if exclude_independent_decoders:
+        print("NOTE: Independent decoders are excluded from parameter count (joint training mode).")
     if param_info['is_multi_encoder']:
         print(f"Number of encoders: {param_info['num_encoders']}")
         print(f"Decoder parameters: {decoder_params:,}")
@@ -116,12 +107,10 @@ def count_model_parameters(model: nn.Module, logger=None) -> dict:
         if 'avg_encoder_params' in param_info:
             print(f"  Average per encoder: {param_info['avg_encoder_params']:,.0f} parameters")
         print()
-    
     print("Component breakdown:")
     for component, count in breakdown.items():
         percentage = (count / total_params) * 100
         print(f"  {component}: {count:,} parameters ({percentage:.1f}%)")
-    
     # Log detailed breakdown if logger is provided
     if logger:
         logger.info("=" * 60)
@@ -131,7 +120,8 @@ def count_model_parameters(model: nn.Module, logger=None) -> dict:
         logger.info(f"Trainable parameters: {trainable_params:,}")
         logger.info(f"Non-trainable parameters: {total_params - trainable_params:,}")
         logger.info(f"Model type: {'Multi-encoder' if param_info['is_multi_encoder'] else 'Single encoder'}")
-        
+        if exclude_independent_decoders:
+            logger.info("NOTE: Independent decoders are excluded from parameter count (joint training mode).")
         if param_info['is_multi_encoder']:
             logger.info(f"Number of encoders: {param_info['num_encoders']}")
             logger.info(f"Decoder parameters: {decoder_params:,}")
@@ -141,20 +131,16 @@ def count_model_parameters(model: nn.Module, logger=None) -> dict:
                 logger.info(f"  {encoder_name}: {count:,} parameters")
             if 'avg_encoder_params' in param_info:
                 logger.info(f"  Average per encoder: {param_info['avg_encoder_params']:,.0f} parameters")
-        
         logger.info("Component breakdown:")
         for component, count in breakdown.items():
             percentage = (count / total_params) * 100
             logger.info(f"  {component}: {count:,} parameters ({percentage:.1f}%)")
-        
         # Log top 10 largest parameter groups
         sorted_detailed = sorted(detailed_breakdown.items(), key=lambda x: x[1]['parameters'], reverse=True)
         logger.info("Top 10 largest parameter groups:")
         for name, info in sorted_detailed[:10]:
             logger.info(f"  {name}: {info['parameters']:,} parameters {info['shape']}")
-    
     print("=" * 60)
-    
     return param_info
 
 
