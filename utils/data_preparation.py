@@ -140,6 +140,7 @@ def split_dataset_by_keys_for_multi_encoder(task_keys, num_encoders, n_examples_
         'splitting_strategy': '',
         'samples_per_encoder': {},
         'keys_per_encoder': {},
+        'key_lists_per_encoder': {},
         'task_distribution_details': {}  # NEW: Detailed per-task information
     }
     
@@ -166,7 +167,9 @@ def split_dataset_by_keys_for_multi_encoder(task_keys, num_encoders, n_examples_
             all_input_sequences, all_output_sequences = _generate_key_data(key, n_examples_per_task, generate_func)
             
             if all_input_sequences and all_output_sequences:
-                encoder_datasets[encoder_idx].extend(list(zip(all_input_sequences, all_output_sequences)))
+                encoder_datasets[encoder_idx].extend(
+                    [(inp, out, key) for inp, out in zip(all_input_sequences, all_output_sequences)]
+                )
                 key_to_encoder_mapping[key] = encoder_idx
                 
                 # Store detailed task information
@@ -176,7 +179,7 @@ def split_dataset_by_keys_for_multi_encoder(task_keys, num_encoders, n_examples_
                     'generation_successful': True
                 }
                 
-                print(f"    ✓ Task '{key}' → Encoder {encoder_idx} ({len(all_input_sequences)} samples generated)")
+                print(f"    [ OK ] Task '{key}' → Encoder {encoder_idx} ({len(all_input_sequences)} samples generated)")
             else:
                 print(f"    ❌ Task '{key}' → Failed to generate data")
                 data_statistics['task_distribution_details'][key] = {
@@ -218,7 +221,9 @@ def split_dataset_by_keys_for_multi_encoder(task_keys, num_encoders, n_examples_
                 all_input_sequences, all_output_sequences = _generate_key_data(key, n_examples_per_task, generate_func)
                 
                 if all_input_sequences and all_output_sequences:
-                    encoder_datasets[encoder_idx].extend(list(zip(all_input_sequences, all_output_sequences)))
+                    encoder_datasets[encoder_idx].extend(
+                        [(inp, out, key) for inp, out in zip(all_input_sequences, all_output_sequences)]
+                    )
                     key_to_encoder_mapping[key] = encoder_idx
                     encoder_total_samples += len(all_input_sequences)
                     
@@ -228,7 +233,7 @@ def split_dataset_by_keys_for_multi_encoder(task_keys, num_encoders, n_examples_
                         'generation_successful': True
                     }
                     
-                    print(f"      ✓ Task '{key}' → Encoder {encoder_idx} ({len(all_input_sequences)} samples)")
+                    print(f"      [ OK ] Task '{key}' → Encoder {encoder_idx} ({len(all_input_sequences)} samples)")
                 else:
                     print(f"      ❌ Task '{key}' → Failed to generate data")
                     data_statistics['task_distribution_details'][key] = {
@@ -247,18 +252,20 @@ def split_dataset_by_keys_for_multi_encoder(task_keys, num_encoders, n_examples_
     encoder_splits = []
     for encoder_idx, dataset in enumerate(encoder_datasets):
         if dataset:
-            inputs, outputs = zip(*dataset)
+            inputs, outputs, keys = zip(*dataset)
             encoder_splits.append((list(inputs), list(outputs)))
             data_statistics['samples_per_encoder'][encoder_idx] = len(inputs)
             
             encoder_keys = [key for key, enc_idx in key_to_encoder_mapping.items() if enc_idx == encoder_idx]
             data_statistics['keys_per_encoder'][encoder_idx] = encoder_keys
+            data_statistics['key_lists_per_encoder'][encoder_idx] = list(keys)
             
             print(f"  Encoder {encoder_idx}: {len(inputs)} samples from {len(encoder_keys)} tasks {encoder_keys}")
         else:
             encoder_splits.append(([], []))
             data_statistics['samples_per_encoder'][encoder_idx] = 0
             data_statistics['keys_per_encoder'][encoder_idx] = []
+            data_statistics['key_lists_per_encoder'][encoder_idx] = []
             print(f"  Encoder {encoder_idx}: 0 samples (no tasks assigned)")
     
     # Enhanced summary statistics
@@ -332,11 +339,47 @@ def _distribute_extra_samples(encoder_datasets, num_keys, num_encoders):
                 encoder_datasets[empty_idx].extend(moved_samples)
                 encoder_datasets[source_encoder] = encoder_datasets[source_encoder][samples_to_move:]
                 total_redistributed += samples_to_move
-                print(f"    ✓ Moved {samples_to_move} samples: Encoder {source_encoder} → Encoder {empty_idx}")
+                print(f"    [ OK ] Moved {samples_to_move} samples: Encoder {source_encoder} → Encoder {empty_idx}")
             else:
-                print(f"    ⚠ Cannot move samples from Encoder {source_encoder} (insufficient samples)")
+                print(f"    [ WARNING ] Cannot move samples from Encoder {source_encoder} (insufficient samples)")
     
     print(f"  Total samples redistributed: {total_redistributed}")
+
+def safe_extract_grid_from_sequence(sequence, max_rows=30, max_cols=30):
+    """Safely extract grid from sequence, handling different input formats."""
+    try:
+        sequence = np.array(sequence)
+        
+        # Handle 902-length ARC format
+        if len(sequence) >= 902:
+            rows = int(sequence[-2])
+            cols = int(sequence[-1])
+            grid_flat = sequence[:900]
+            grid_full = grid_flat.reshape(30, 30)
+            actual_grid = grid_full[:rows, :cols]
+            return actual_grid, (rows, cols)
+        
+        # Handle square grid format
+        grid_size = int(np.sqrt(len(sequence)))
+        if grid_size * grid_size == len(sequence):
+            grid = sequence.reshape(grid_size, grid_size)
+            return grid, (grid_size, grid_size)
+        
+        # Handle other formats - try to reshape to reasonable dimensions
+        if len(sequence) <= 900:
+            # Try to make it square
+            grid_size = int(np.sqrt(len(sequence)))
+            if grid_size * grid_size <= len(sequence):
+                grid = sequence[:grid_size*grid_size].reshape(grid_size, grid_size)
+                return grid, (grid_size, grid_size)
+        
+        # Fallback: return as 1D array
+        return sequence.reshape(1, -1), (1, len(sequence))
+        
+    except Exception as e:
+        print(f"Warning: Could not extract grid from sequence of length {len(sequence)}: {e}")
+        # Return a default grid
+        return np.zeros((max_rows, max_cols)), (max_rows, max_cols)
 
 def safe_extract_reconstruction_grid(shape_logits, grid_logits):
     """

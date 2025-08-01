@@ -199,7 +199,7 @@ graph TD
 
 def generate_architecture_visualizations(model, wandb_logger=None, device='cpu', global_step=0):
     """Generate clean model architecture visualizations."""
-    print(f"🏗️ Generating clean architecture visualization...")
+    print(f"[BUILDING] Generating clean architecture visualization...")
     
     try:
         # Create simple architecture diagram
@@ -232,12 +232,12 @@ def generate_architecture_visualizations(model, wandb_logger=None, device='cpu',
                 'model_architecture/step': global_step
             }, step_hint=global_step)
             
-            print(f"✓ Architecture diagram uploaded to WandB")
+            print(f"[OK] Architecture diagram uploaded to WandB")
         
-        print(f"✓ Clean architecture visualization generated successfully")
+        print(f"[OK] Clean architecture visualization generated successfully")
         
     except Exception as e:
-        print(f"⚠ Architecture visualization failed: {e}")
+        print(f"[WARNING] Architecture visualization failed: {e}")
         import traceback
         traceback.print_exc()
 
@@ -281,10 +281,10 @@ def log_model_summary(model, wandb_logger=None, global_step=0):
             'model_summary/step': global_step
         }, step_hint=global_step)
         
-        print(f"✓ Model summary logged: {total_params:,} parameters, {summary['model_type']} + {summary['latent_type']}")
+        print(f"[OK] Model summary logged: {total_params:,} parameters, {summary['model_type']} + {summary['latent_type']}")
         
     except Exception as e:
-        print(f"⚠ Model summary logging failed: {e}")
+        print(f"[WARNING] Model summary logging failed: {e}")
 
 
 # Remove the problematic import section

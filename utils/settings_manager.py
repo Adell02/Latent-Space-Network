@@ -89,6 +89,11 @@ class SettingsManager:
             self.load_settings()
         return self._settings['specialist_training']
 
+    def get_enhanced_training(self) -> Dict[str, Any]:
+        if self._settings is None:
+            self.load_settings()
+        return self._settings.get('enhanced_training', {})
+
     def get_project_name(self) -> str:
         """Get the WANDB project name from settings, or a default if not present."""
         if self._settings is None:

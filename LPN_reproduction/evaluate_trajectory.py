@@ -39,6 +39,7 @@ from sklearn.manifold import TSNE
 from sklearn.preprocessing import StandardScaler
 from tabulate import tabulate
 from sklearn.neighbors import NearestNeighbors
+from matplotlib.gridspec import GridSpec
 
 # Add the parent directory to the Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -48,6 +49,9 @@ from utils.settings_manager import settings
 from utils.model_utils import load_model, set_seed
 from utils.visualizers import load_evaluation_latent_data, get_comprehensive_latent_data_for_trajectory
 from utils.data_preparation import extract_grid_from_sequence, safe_extract_reconstruction_grid
+
+# Use safe extraction to avoid scalar conversion errors
+extract_reconstruction_grid = safe_extract_reconstruction_grid
 
 def print_trajectory_info(trajectory_info):
     """
@@ -109,42 +113,192 @@ def print_trajectory_info(trajectory_info):
     print("Note: Reconstructions are computed on-demand during visualization using the model decoder.")
     print("Note: Trajectory now includes initial step (step 0) with encoder output and initial loss.")
 
-
-def load_training_latent_data(run_dir):
+def load_task_level_latent_data(task_latent_data, task_trajectories=None):
     """
-    Load comprehensive latent data (encoders + PoE) for trajectory visualization background.
-    This reuses the comprehensive latent space that combines all encoder and PoE latents.
-    Returns both high-dimensional data and precomputed t-SNE coordinates for consistency.
-    """
-    print("Loading comprehensive latent data (encoders + PoE) for background visualization...")
+    Load task-level latent data for visualization.
+    This creates one point per task instead of per-sample or per-trajectory-step.
     
-    # Import the comprehensive latent data function from visualizers
-    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    try:
-        from utils.visualizers import get_comprehensive_latent_data_for_trajectory
+    Args:
+        task_latent_data: Dict containing task latents from evaluate_model_with_task_optimization
+        task_trajectories: Optional dict containing trajectory information
         
-        combined_latents, tsne_2d, labels, colors = get_comprehensive_latent_data_for_trajectory(run_dir)
+    Returns:
+        tuple: (all_latents, all_labels, all_colors, task_metadata)
+    """
+    print("Loading task-level latent data...")
+    
+    all_latents = []
+    all_labels = []
+    all_colors = []
+    task_metadata = {}
+    
+    if 'task_latents' not in task_latent_data:
+        print("WARNING: No task_latents found in task_latent_data!")
+        return all_latents, all_labels, all_colors, task_metadata
+    
+    # Define colors for different tasks
+    import matplotlib.pyplot as plt
+    import numpy as np
+    
+    task_keys = list(task_latent_data['task_latents'].keys())
+    colors = plt.cm.Set1(np.linspace(0, 1, min(len(task_keys), 9)))  # Use Set1 colormap
+    
+    print(f"Processing {len(task_keys)} tasks...")
+    
+    for i, (task_key, task_data) in enumerate(task_latent_data['task_latents'].items()):
+        # Get the final optimized latent for this task
+        task_latent = task_data['latent_z']
+        final_loss = task_data['final_loss']
+        num_support_samples = task_data['num_support_samples']
         
-        if combined_latents is not None:
-            print(f"✓ Successfully loaded comprehensive latent data:")
-            print(f"  - Total samples: {len(combined_latents)}")
-            print(f"  - Latent dimensionality: {combined_latents.shape[1]}")
-            print(f"  - t-SNE 2D coordinates: {tsne_2d.shape}")
-            print(f"  - Data types: {len(set(labels))}")
-            print(f"  - Includes: Individual encoders + PoE latents")
+        # Ensure latent is flattened
+        if len(task_latent.shape) > 1:
+            task_latent = task_latent.flatten()
+        
+        all_latents.append(task_latent)
+        all_labels.append(f"task_{task_key}")
+        
+        # Use different colors for different tasks
+        color = colors[i % len(colors)] if i < len(colors) else plt.cm.Set1(i % 9)
+        all_colors.append(color)
+        
+        # Store metadata for this task
+        task_metadata[task_key] = {
+            'final_loss': final_loss,
+            'num_support_samples': num_support_samples,
+            'latent_vector': task_latent,
+            'color': color
+        }
+        
+        print(f"  Task '{task_key}': {num_support_samples} support samples, final loss: {final_loss:.4f}")
+    
+    print(f"Loaded {len(all_latents)} task-level latent vectors")
+    
+    return all_latents, all_labels, all_colors, task_metadata
+
+def visualize_task_level_latents(task_latent_data, task_trajectories=None, save_path=None):
+    """
+    Create a visualization of task-level latents showing clustering by task.
+    This should show clear task clustering as described in the LPN paper.
+    
+    Args:
+        task_latent_data: Dict containing task latents from evaluate_model_with_task_optimization
+        task_trajectories: Optional dict containing trajectory information
+        save_path: Where to save the visualization
+    """
+    print("Creating task-level latent visualization...")
+    
+    # Load task-level latent data
+    all_latents, all_labels, all_colors, task_metadata = load_task_level_latent_data(
+        task_latent_data, task_trajectories
+    )
+    
+    if not all_latents:
+        print("ERROR: No task latents to visualize!")
+        return
+    
+    # Convert to numpy array for t-SNE
+    import numpy as np
+    from sklearn.manifold import TSNE
+    import matplotlib.pyplot as plt
+    
+    latents_array = np.array(all_latents)
+    print(f"Latent array shape: {latents_array.shape}")
+    
+    # Apply t-SNE for 2D visualization
+    print("Applying t-SNE to task latents...")
+    tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(all_latents)//3))
+    tsne_2d = tsne.fit_transform(latents_array)
+    
+    # Create visualization
+    fig, axes = plt.subplots(1, 2, figsize=(20, 8))
+    
+    # Plot 1: Task clustering
+    ax1 = axes[0]
+    
+    # Plot each task as a different color
+    unique_tasks = set(label.split('_', 1)[1] for label in all_labels)
+    for i, task_key in enumerate(unique_tasks):
+        # Find points for this task
+        task_indices = [j for j, label in enumerate(all_labels) if label.endswith(task_key)]
+        
+        if task_indices:
+            task_x = [tsne_2d[j, 0] for j in task_indices]
+            task_y = [tsne_2d[j, 1] for j in task_indices]
+            color = all_colors[task_indices[0]]
             
-            # Return both high-dimensional data and precomputed t-SNE coordinates
-            return combined_latents, tsne_2d, labels, colors
-        else:
-            print("⚠ Warning: No comprehensive latent data available")
-            return None, None, None, None
+            ax1.scatter(task_x, task_y, c=[color], s=100, alpha=0.8, 
+                       label=f"Task {task_key}", edgecolors='black', linewidth=1)
             
-    except ImportError as e:
-        print(f"⚠ Warning: Could not import comprehensive latent data function: {e}")
-        return None, None, None, None
-    except Exception as e:
-        print(f"⚠ Warning: Could not load comprehensive latent data: {e}")
-        return None, None, None, None
+            # Add task key as text annotation
+            for j, idx in enumerate(task_indices):
+                ax1.annotate(task_key, (tsne_2d[idx, 0], tsne_2d[idx, 1]), 
+                           xytext=(5, 5), textcoords='offset points', 
+                           fontsize=8, ha='left')
+    
+    ax1.set_title('Task-Level Latent Space Clustering\n(One point per task)', fontsize=14, fontweight='bold')
+    ax1.set_xlabel('t-SNE Dimension 1')
+    ax1.set_ylabel('t-SNE Dimension 2')
+    ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    ax1.grid(True, alpha=0.3)
+    
+    # Plot 2: Loss landscape
+    ax2 = axes[1]
+    
+    # Color points by final loss
+    final_losses = [task_metadata[label.split('_', 1)[1]]['final_loss'] 
+                   for label in all_labels]
+    
+    scatter = ax2.scatter(tsne_2d[:, 0], tsne_2d[:, 1], 
+                         c=final_losses, cmap='viridis_r', s=100, 
+                         alpha=0.8, edgecolors='black', linewidth=1)
+    
+    # Add colorbar
+    cbar = plt.colorbar(scatter, ax=ax2)
+    cbar.set_label('Final Reconstruction Loss', rotation=270, labelpad=20)
+    
+    # Add task key annotations
+    for i, label in enumerate(all_labels):
+        task_key = label.split('_', 1)[1]
+        ax2.annotate(task_key, (tsne_2d[i, 0], tsne_2d[i, 1]), 
+                    xytext=(5, 5), textcoords='offset points', 
+                    fontsize=8, ha='left')
+    
+    ax2.set_title('Task Latents Colored by Reconstruction Loss\n(Lower loss = better task representation)', 
+                 fontsize=14, fontweight='bold')
+    ax2.set_xlabel('t-SNE Dimension 1')
+    ax2.set_ylabel('t-SNE Dimension 2')
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    
+    # Add overall title
+    fig.suptitle('LPN Task-Level Latent Space Analysis\n(Should show clear task clustering)', 
+                fontsize=16, fontweight='bold', y=0.98)
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Task-level visualization saved to: {save_path}")
+    
+    plt.show()
+    
+    # Print summary statistics
+    print("\n=== TASK-LEVEL CLUSTERING ANALYSIS ===")
+    print(f"Total tasks: {len(unique_tasks)}")
+    print(f"Average final loss: {np.mean(final_losses):.4f}")
+    print(f"Loss std deviation: {np.std(final_losses):.4f}")
+    print(f"Best task (lowest loss): {min(final_losses):.4f}")
+    print(f"Worst task (highest loss): {max(final_losses):.4f}")
+    
+    print("\nTask Summary:")
+    for task_key, metadata in task_metadata.items():
+        print(f"  {task_key}: {metadata['num_support_samples']} samples, loss: {metadata['final_loss']:.4f}")
+    
+    return fig
+
+
+# REMOVED: load_training_latent_data_for_trajectory - replaced by load_unified_latent_data_with_trajectory
+# REMOVED: load_training_latent_data - replaced by load_unified_latent_data_with_trajectory
 
 def visualize_input_target(trajectory_info, save_path):
     """
@@ -170,10 +324,13 @@ def visualize_input_target(trajectory_info, save_path):
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
 
+# DEPRECATED: find_trajectory_points_in_tsne_space - replaced by unified t-SNE approach
+# This function is kept for backward compatibility with visualize_all_samples_comprehensive
 def find_trajectory_points_in_tsne_space(z_vectors, training_latent_data, training_tsne_2d, training_labels):
     """
     Map trajectory z vectors to existing t-SNE space by finding nearest neighbors
     in the high-dimensional space and using their 2D coordinates.
+    DEPRECATED: Use load_unified_latent_data_with_trajectory for consistent t-SNE.
     """
     if training_latent_data is None or training_tsne_2d is None or not z_vectors:
         return None
@@ -211,134 +368,354 @@ def find_trajectory_points_in_tsne_space(z_vectors, training_latent_data, traini
 
 def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_dir, device='cuda'):
     """
-    Create a comprehensive trajectory visualization.
-    Automatically detects single-encoder vs multi-encoder and calls appropriate function.
+    Create a comprehensive trajectory visualization with training samples in background.
+    Shows input/target, trajectory in latent space with training background, and reconstructions.
     """
-    # Check if this is a multi-encoder model
-    is_multi_encoder = trajectory_info.get('is_multi_encoder', False)
+    print("Creating multi-encoder visualization for", getattr(model, 'num_encoders', 1), "encoders...")
+    print("Trajectory used:", trajectory_info.get('trajectory_type', 'Unknown'))
     
-    # Get trajectory decoder type setting (using global settings import)
-    eval_settings = settings.get_evaluation_settings()
-    decoder_type = eval_settings.get('trajectory_decoder_type', 'shared')
-    print(f"Using trajectory decoder type: {decoder_type}")
+    # Use safe extraction to avoid scalar conversion errors
+    extract_reconstruction_grid = safe_extract_reconstruction_grid
     
-    if is_multi_encoder:
-        print("Multi-encoder model detected - using enhanced visualization")
-        return visualize_multi_encoder_comprehensive_trajectory(trajectory_info, model, save_path, run_dir, device)
+    # Load unified latent data (training + support + query + trajectory)
+    print("Loading unified latent data (training + support + query + trajectory)...")
+    training_latent_data, training_tsne_2d, training_labels, training_colors, trajectory_tsne_2d, all_labels, all_tsne_2d = load_unified_latent_data_with_trajectory(
+        run_dir, model, device, trajectory_info
+    )
     
-    print("Single-encoder model detected - using standard visualization")
+    # Create figure with GridSpec for the correct layout
+    fig = plt.figure(figsize=(24, 16))
+    gs = GridSpec(5, 8, figure=fig)  # 5 rows, 8 columns for the specified layout
     
-    # Load training latent data for background with precomputed t-SNE
-    print("Loading training latent data for background visualization...")
-    training_latent_data, training_tsne_2d, training_labels, training_colors = load_training_latent_data(run_dir)
-    
-    # Create figure
-    fig, axs = plt.subplots(2, 4, figsize=(20, 10))
-    
-    # Extract data from trajectory_info
+    # ROW 0: INPUT SAMPLE | LATENT SPACE | LOSS PROGRESSION
     input_seq = trajectory_info['input_sample']
+    input_grid, input_shape = extract_grid_from_sequence(input_seq)
+    ax_input = fig.add_subplot(gs[0, 0])
+    ax_input.imshow(input_grid, cmap='viridis')
+    ax_input.set_title(f'Input Sample\n{input_shape[0]}×{input_shape[1]}')
+    ax_input.axis('off')
+    
+    # Latent space (spans columns 1-4)
+    ax_trajectory = fig.add_subplot(gs[0, 1:5])
+    
+    # Loss progression (spans columns 5-7)
+    ax_loss = fig.add_subplot(gs[0, 5:8])
+    
+    # ROW 1: TARGET SAMPLE | RECONSTRUCTIONS FOR EACH ENCODER | POE INITIAL/MID/FINAL OPTIMISATION
     target_seq = trajectory_info['target_sample']
+    target_grid, target_shape = extract_grid_from_sequence(target_seq)
+    ax_target = fig.add_subplot(gs[1, 0])
+    ax_target.imshow(target_grid, cmap='viridis')
+    ax_target.set_title(f'Target Sample\n{target_shape[0]}×{target_shape[1]}')
+    ax_target.axis('off')
+    
+    # Individual encoder reconstructions (columns 1-3)
+    ax_enc_recon_0 = fig.add_subplot(gs[1, 1])
+    ax_enc_recon_1 = fig.add_subplot(gs[1, 2]) if getattr(model, 'num_encoders', 1) > 1 else None
+    ax_enc_recon_2 = fig.add_subplot(gs[1, 3]) if getattr(model, 'num_encoders', 1) > 2 else None
+    
+    # POE reconstructions (columns 4-6)
+    ax_poe_initial = fig.add_subplot(gs[1, 4])
+    ax_poe_mid = fig.add_subplot(gs[1, 5])
+    ax_poe_final = fig.add_subplot(gs[1, 6])
+    
+    # ROW 2: ERROR MAPS
+    ax_error_maps = fig.add_subplot(gs[2, :])
+    
+    # ROW 3: INPUT QUERY | TARGET QUERY | RECONSTRUCTIONS QUERY FOR EACH ENCODER | INITIAL/FINAL POE RECONSTRUCTION
+    # Input query
+    ax_query_input = fig.add_subplot(gs[3, 0])
+    query_input = trajectory_info.get('query_input')
+    print(f"DEBUG: query_input available: {query_input is not None}")
+    if query_input is not None:
+        query_input_grid, query_input_shape = extract_grid_from_sequence(query_input)
+        ax_query_input.imshow(query_input_grid, cmap='viridis')
+        ax_query_input.set_title(f'Input Query\n{query_input_shape[0]}×{query_input_shape[1]}')
+    else:
+        ax_query_input.text(0.5, 0.5, 'Input Query\n(No Data)', ha='center', va='center', transform=ax_query_input.transAxes)
+        ax_query_input.set_title('Input Query')
+    ax_query_input.axis('off')
+    
+    # Target query
+    ax_query_target = fig.add_subplot(gs[3, 1])
+    query_target = trajectory_info.get('query_target')
+    print(f"DEBUG: query_target available: {query_target is not None}")
+    if query_target is not None:
+        query_target_grid, query_target_shape = extract_grid_from_sequence(query_target)
+        ax_query_target.imshow(query_target_grid, cmap='viridis')
+        ax_query_target.set_title(f'Target Query\n{query_target_shape[0]}×{query_target_shape[1]}')
+    else:
+        ax_query_target.text(0.5, 0.5, 'Target Query\n(No Data)', ha='center', va='center', transform=ax_query_target.transAxes)
+        ax_query_target.set_title('Target Query')
+    ax_query_target.axis('off')
+    
+    # Query reconstructions for each encoder (columns 2-4)
+    ax_query_recon_0 = fig.add_subplot(gs[3, 2])
+    ax_query_recon_1 = fig.add_subplot(gs[3, 3]) if getattr(model, 'num_encoders', 1) > 1 else None
+    ax_query_recon_2 = fig.add_subplot(gs[3, 4]) if getattr(model, 'num_encoders', 1) > 2 else None
+    
+    # Initial and final POE reconstructions (columns 5-6)
+    ax_query_poe_initial = fig.add_subplot(gs[3, 5])
+    ax_query_poe_final = fig.add_subplot(gs[3, 6])
+    
+    # ROW 4: ERROR MAPS
+    ax_query_error_maps = fig.add_subplot(gs[4, :])
+    
+    # Get trajectory data
     z_vectors = trajectory_info['z_vectors']
     losses = trajectory_info['losses']
     
-    # Input and Target grids
-    input_grid, input_shape = extract_grid_from_sequence(input_seq)
-    target_grid, target_shape = extract_grid_from_sequence(target_seq)
-    
-    axs[0, 0].imshow(input_grid, cmap='viridis')
-    axs[0, 0].set_title(f'Input\n{input_shape[0]}×{input_shape[1]}')
-    axs[0, 0].axis('off')
-    
-    axs[1, 0].imshow(target_grid, cmap='viridis')
-    axs[1, 0].set_title(f'Target\n{target_shape[0]}×{target_shape[1]}')
-    axs[1, 0].axis('off')
-    
     # Plot trajectory in latent space using precomputed t-SNE coordinates
-    if z_vectors and len(z_vectors) >= 2:
+    if z_vectors is not None and len(z_vectors) >= 2:
         # Use precomputed t-SNE coordinates for consistency
         if training_latent_data is not None and training_tsne_2d is not None:
-            # Plot training background using precomputed coordinates
+            # Plot training background using precomputed coordinates - COLOR BY ENCODER + HIGHLIGHT SAME KEY
             if training_colors is not None and training_labels is not None:
-                # Use the existing colors from comprehensive latent data
-                unique_labels = list(set(training_labels))
-                for label in unique_labels:
-                    indices = [i for i, l in enumerate(training_labels) if l == label]
+                # Extract keys and encoders from training labels (assuming format like "training_enc_0_key_1234")
+                training_keys = []
+                training_encoders = []
+                for label in training_labels:
+                    if '_key_' in label and 'training_enc_' in label:
+                        # Extract encoder and key
+                        encoder_part = label.split('_key_')[0]
+                        encoder = encoder_part.split('training_enc_')[-1]
+                        key = label.split('_key_')[-1]
+                        training_keys.append(key)
+                        training_encoders.append(int(encoder))
+                    else:
+                        training_keys.append(label)
+                        training_encoders.append(0)  # Default encoder
+                
+                # Get the key of the sample being evaluated
+                evaluated_key = trajectory_info.get('evaluated_key', 'unknown')
+                print(f"DEBUG: Using evaluated_key: '{evaluated_key}'")
+                
+                # Create light colors for encoders (different light colors for each encoder)
+                unique_encoders = sorted(list(set(training_encoders)))
+                encoder_colors = {
+                    enc: plt.cm.tab10(enc % 10) for enc in unique_encoders  # More visible colors from tab10
+                }
+                
+                # Create bright colors for the evaluated key (replaced yellow with more visible colors)
+                bright_colors = ['red', 'orange', 'darkorange', 'lime', 'cyan', 'magenta', 'pink', 'brown']
+                evaluated_color = bright_colors[hash(evaluated_key) % len(bright_colors)]
+                
+                # Plot background points colored by encoder (light colors)
+                for encoder in unique_encoders:
+                    indices = [i for i, enc in enumerate(training_encoders) if enc == encoder]
                     if indices:
                         x_coords = training_tsne_2d[indices, 0]
                         y_coords = training_tsne_2d[indices, 1]
-                        color = training_colors[indices[0]]  # Get color for this class
+                        color = encoder_colors[encoder]
                         
                         # Use alpha for background effect
-                        axs[0, 1].scatter(x_coords, y_coords, c=color, alpha=0.3, s=12, 
-                                       edgecolors='none', label=f'Training {label.replace("training_enc_", "Enc ")}')
+                        ax_trajectory.scatter(x_coords, y_coords, color=color, alpha=0.6, s=12, 
+                                       edgecolors='none', label=f'Encoder {encoder} (Light)')
+                
+                # Highlight samples with the same key as evaluated sample (bright colors)
+                same_key_indices = [i for i, key in enumerate(training_keys) if key == evaluated_key]
+                if same_key_indices:
+                    x_coords = training_tsne_2d[same_key_indices, 0]
+                    y_coords = training_tsne_2d[same_key_indices, 1]
+                    
+                    # Use bright color for same key samples
+                    ax_trajectory.scatter(x_coords, y_coords, color=evaluated_color, alpha=0.9, s=25, 
+                                   edgecolors='black', linewidth=1.5, 
+                                   label=f'Same Key: {evaluated_key[:8]} (Bright)')
+                
+                # Plot support and query samples for the evaluated key only
+                if all_labels is not None:
+                    print(f"DEBUG: Checking for support/query samples in {len(all_labels)} total labels")
+                    print(f"DEBUG: First few all_labels: {all_labels[:5]}")
+                    print(f"DEBUG: Looking for key: '{evaluated_key}'")
+                    print(f"DEBUG: all_tsne_2d available: {all_tsne_2d is not None}")
+                    if all_tsne_2d is not None:
+                        print(f"DEBUG: all_tsne_2d shape: {all_tsne_2d.shape}")
+                    
+                    # Filter support samples for the evaluated key
+                    support_indices = []
+                    for i, label in enumerate(all_labels):
+                        if 'support' in label and evaluated_key in label:
+                            support_indices.append(i)
+                    
+                    print(f"DEBUG: Found {len(support_indices)} support samples for key '{evaluated_key}'")
+                    if support_indices and all_tsne_2d is not None:
+                        x_coords = all_tsne_2d[support_indices, 0]
+                        y_coords = all_tsne_2d[support_indices, 1]
+                        ax_trajectory.scatter(x_coords, y_coords, color='blue', alpha=0.8, s=15, 
+                                    marker='s', edgecolors='black', linewidth=1.0)
+                    
+                    # Filter query samples for the evaluated key
+                    query_indices = []
+                    for i, label in enumerate(all_labels):
+                        if 'query' in label and evaluated_key in label:
+                            query_indices.append(i)
+                    
+                    print(f"DEBUG: Found {len(query_indices)} query samples for key '{evaluated_key}'")
+                    if query_indices and all_tsne_2d is not None:
+                        x_coords = all_tsne_2d[query_indices, 0]
+                        y_coords = all_tsne_2d[query_indices, 1]
+                        ax_trajectory.scatter(x_coords, y_coords, color='red', alpha=0.8, s=15, 
+                                    marker='^', edgecolors='black', linewidth=1.0)
+                    
+                    # Also check all labels for support/query patterns
+                    all_support_labels = [l for l in all_labels if 'support' in l]
+                    all_query_labels = [l for l in all_labels if 'query' in l]
+                    print(f"DEBUG: All support labels: {all_support_labels}")
+                    print(f"DEBUG: All query labels: {all_query_labels}")
+                else:
+                    print(f"DEBUG: No all_labels available for support/query plotting")
             else:
-                # Fallback to gray
-                axs[0, 1].scatter(training_tsne_2d[:, 0], training_tsne_2d[:, 1],
-                                   c='lightgray', alpha=0.4, s=15, edgecolors='none', 
-                                   label='Training Data')
-            
-            # Map trajectory points to the same t-SNE space
-            z_2d = find_trajectory_points_in_tsne_space(z_vectors, training_latent_data, training_tsne_2d, training_labels)
-            
-            if z_2d is not None:
-                # Plot trajectory
-                trajectory_scatter = axs[0, 1].scatter(z_2d[:, 0], z_2d[:, 1], c=losses, cmap='plasma', 
-                                                     s=80, alpha=0.9, edgecolors='black', linewidth=1)
-                
-                # Draw arrows between consecutive trajectory points
-                for i in range(len(z_2d) - 1):
-                    axs[0, 1].annotate('', xy=z_2d[i+1], xytext=z_2d[i],
-                                     arrowprops=dict(arrowstyle='->', color='red', alpha=0.8, lw=2))
-                
-                # Mark start and end points
-                axs[0, 1].scatter(z_2d[0, 0], z_2d[0, 1], c='green', s=150, marker='o', 
-                                label='Start', edgecolors='black', linewidth=2, zorder=10)
-                axs[0, 1].scatter(z_2d[-1, 0], z_2d[-1, 1], c='red', s=150, marker='s', 
-                                label='End', edgecolors='black', linewidth=2, zorder=10)
-                
-                # Add colorbar
-                cbar = plt.colorbar(trajectory_scatter, ax=axs[0, 1], shrink=0.8)
-                cbar.set_label('Loss', rotation=270, labelpad=20)
-                
-                axs[0, 1].set_title('Latent Trajectory (Consistent t-SNE)')
-                axs[0, 1].legend()
-                axs[0, 1].grid(True, alpha=0.3)
-            else:
-                axs[0, 1].text(0.5, 0.5, 'Could not map\ntrajectory to t-SNE', 
-                              ha='center', va='center', transform=axs[0, 1].transAxes)
-                axs[0, 1].set_title('Latent Trajectory (Error)')
+                print(f"DEBUG: Missing training_colors or training_labels for background plotting")
+                print(f"DEBUG: training_colors available: {training_colors is not None}")
+                print(f"DEBUG: training_labels available: {training_labels is not None}")
         else:
-            # Fallback: use independent t-SNE (will be inconsistent)
-            z_array = np.array(z_vectors)
-            scaler = StandardScaler()
-            z_array_normalized = scaler.fit_transform(z_array)
-            tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(z_array)-1), n_iter=1000)
-            z_2d = tsne.fit_transform(z_array_normalized)
+            print(f"DEBUG: Missing training_latent_data or training_tsne_2d for background plotting")
+            print(f"DEBUG: training_latent_data available: {training_latent_data is not None}")
+            print(f"DEBUG: training_tsne_2d available: {training_tsne_2d is not None}")
+        
+        # Use unified trajectory coordinates (already computed in unified t-SNE)
+        z_2d = trajectory_tsne_2d
+        
+        if z_2d is not None:
+            # Fix: Ensure losses array matches trajectory length
+            if len(losses) != len(z_2d):
+                print(f"Warning: losses length ({len(losses)}) != trajectory length ({len(z_2d)})")
+                # Use the shorter length to avoid mismatch
+                min_length = min(len(losses), len(z_2d))
+                z_2d = z_2d[:min_length]
+                losses = losses[:min_length]
+                print(f"Adjusted to length: {min_length}")
             
-            trajectory_scatter = axs[0, 1].scatter(z_2d[:, 0], z_2d[:, 1], c=losses, cmap='plasma', 
-                                                 s=80, alpha=0.9, edgecolors='black', linewidth=1)
-            axs[0, 1].set_title('Latent Trajectory (Independent t-SNE)')
+            # Plot trajectory
+            trajectory_scatter = ax_trajectory.scatter(z_2d[:, 0], z_2d[:, 1], c=losses, cmap='plasma', 
+                                                 s=100, alpha=1.0, edgecolors='black', linewidth=2)
+            
+            # Draw arrows between consecutive trajectory points
+            for i in range(len(z_2d) - 1):
+                ax_trajectory.annotate('', xy=z_2d[i+1], xytext=z_2d[i],
+                                 arrowprops=dict(arrowstyle='->', color='red', alpha=0.8, lw=2))
+            
+            # Mark start and end points
+            ax_trajectory.scatter(z_2d[0, 0], z_2d[0, 1], color='green', s=200, marker='o', 
+                            label='Start', edgecolors='black', linewidth=3, zorder=10, alpha=1.0)
+            ax_trajectory.scatter(z_2d[-1, 0], z_2d[-1, 1], color='red', s=200, marker='s', 
+                            label='End', edgecolors='black', linewidth=3, zorder=10, alpha=1.0)
+            
+            # Add colorbar
+            cbar = plt.colorbar(trajectory_scatter, ax=ax_trajectory, shrink=0.8)
+            cbar.set_label('Loss', rotation=270, labelpad=20)
+            
+            ax_trajectory.set_title('Latent Trajectory (Light=Encoder, Bright=Same Key)')
+            
+            # Create comprehensive legend with all data types
+            legend_elements = []
+            
+            # Add training samples to legend
+            for encoder in unique_encoders:
+                legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', 
+                                               markerfacecolor=encoder_colors[encoder], 
+                                               markersize=8, label=f'Training Encoder {encoder}'))
+            
+            # Add support and query samples to legend for the evaluated key only
+            if all_labels is not None:
+                support_labels = [l for l in all_labels if 'support' in l and evaluated_key in l]
+                query_labels = [l for l in all_labels if 'query' in l and evaluated_key in l]
+                
+                if support_labels:
+                    legend_elements.append(plt.Line2D([0], [0], marker='s', color='w', 
+                                                   markerfacecolor='blue', 
+                                                   markersize=8, label=f'Support Samples ({len(support_labels)})'))
+                
+                if query_labels:
+                    legend_elements.append(plt.Line2D([0], [0], marker='^', color='w', 
+                                                   markerfacecolor='red', 
+                                                   markersize=8, label=f'Query Samples ({len(query_labels)})'))
+            
+            # Add trajectory elements
+            legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', 
+                                           markerfacecolor='green', 
+                                           markersize=10, label='Trajectory Start'))
+            legend_elements.append(plt.Line2D([0], [0], marker='s', color='w', 
+                                           markerfacecolor='red', 
+                                           markersize=10, label='Trajectory End'))
+            
+            ax_trajectory.legend(handles=legend_elements, loc='upper right')
+            ax_trajectory.grid(True, alpha=0.3)
+        else:
+            print(f"DEBUG: No trajectory_tsne_2d available for trajectory plotting")
+            ax_trajectory.text(0.5, 0.5, 'No trajectory data', 
+                          ha='center', va='center', transform=ax_trajectory.transAxes)
+            ax_trajectory.set_title('Latent Trajectory')
     else:
-        axs[0, 1].text(0.5, 0.5, 'No trajectory data', 
-                      ha='center', va='center', transform=axs[0, 1].transAxes)
-        axs[0, 1].set_title('Latent Trajectory')
+        print(f"DEBUG: No z_vectors available for trajectory plotting")
+        print(f"DEBUG: z_vectors available: {z_vectors is not None}")
+        print(f"DEBUG: z_vectors length: {len(z_vectors) if z_vectors else 0}")
+        ax_trajectory.text(0.5, 0.5, 'No trajectory data', 
+                      ha='center', va='center', transform=ax_trajectory.transAxes)
+        ax_trajectory.set_title('Latent Trajectory')
+    
+    # Plot loss progression
+    if losses and len(losses) > 1:
+        ax_loss.plot(losses, 'b-o', linewidth=2, markersize=4)
+        ax_loss.set_title('Loss Progression')
+        ax_loss.set_xlabel('Step')
+        ax_loss.set_ylabel('Loss')
+        ax_loss.grid(True, alpha=0.3)
+    else:
+        ax_loss.text(0.5, 0.5, 'No loss data', 
+                    ha='center', va='center', transform=ax_loss.transAxes)
+        ax_loss.set_title('Loss Progression')
     
     # Use safe extraction to avoid scalar conversion errors
     extract_reconstruction_grid = safe_extract_reconstruction_grid
 
+    # Helper function to generate reconstruction from latent vector with proper input sequences
+    def generate_reconstruction_from_latent(z_vector, model, device, input_seq=None, target_seq=None):
+        """Generate reconstruction from latent vector using model decoder with proper input sequences"""
+        try:
+            with torch.no_grad():
+                if not isinstance(z_vector, torch.Tensor):
+                    z_vector = torch.tensor(z_vector, dtype=torch.float32, device=device).unsqueeze(0)
+                else:
+                    z_vector = z_vector.unsqueeze(0) if z_vector.dim() == 1 else z_vector
+                
+                # Use the actual input and target sequences if available
+                if input_seq is not None and target_seq is not None:
+                    input_tensor = torch.tensor(input_seq, dtype=torch.float32).unsqueeze(0).to(device)
+                    target_tensor = torch.tensor(target_seq, dtype=torch.float32).unsqueeze(0).to(device)
+                    shape_logits, grid_logits = model.decoder(z_vector, input_tensor, target_seq=target_tensor)
+                else:
+                    # Fallback to just latent vector (may not work for all decoders)
+                    shape_logits, grid_logits = model.decoder(z_vector)
+                
+                recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
+                return recon_grid, recon_rows, recon_cols
+        except Exception as e:
+            print(f"DEBUG: Error generating reconstruction: {e}")
+            return None, None, None
+
     # Use stored reconstructions for different trajectory steps
     trajectory_reconstructions = trajectory_info.get('poe_trajectory_reconstructions', {})
-    if trajectory_reconstructions:
-        reconstruction_labels = ['initial', 'middle', 'final']
-        display_labels = ['Start', 'Mid', 'End']
-        
-        for i, (recon_label, display_label) in enumerate(zip(reconstruction_labels, display_labels)):
-            if i < 3:  # Only 3 slots available
-                row = 0 if i < 2 else 1
-                col = 2 + (i % 2)
+    
+    # Plot individual encoder reconstructions (ROW 1, columns 1-3)
+    num_encoders = getattr(model, 'num_encoders', 1)
+    encoder_axes = [ax_enc_recon_0, ax_enc_recon_1, ax_enc_recon_2]
+    
+    for enc_idx in range(num_encoders):
+        if enc_idx < len(encoder_axes) and encoder_axes[enc_idx] is not None:
+            ax_enc = encoder_axes[enc_idx]
+            
+            # Try to get individual encoder reconstruction data
+            encoder_reconstructions = trajectory_info.get('individual_encoder_reconstructions', {})
+            print(f"DEBUG: encoder_reconstructions keys: {list(encoder_reconstructions.keys())}")
+            
+            if encoder_reconstructions and f'encoder_{enc_idx}' in encoder_reconstructions:
+                # Use stored encoder reconstruction
+                recon_data = encoder_reconstructions[f'encoder_{enc_idx}']
+                print(f"DEBUG: encoder_{enc_idx} recon_data keys: {list(recon_data.keys()) if recon_data else 'None'}")
                 
-                if recon_label in trajectory_reconstructions and trajectory_reconstructions[recon_label] is not None:
-                    recon_data = trajectory_reconstructions[recon_label]
+                if recon_data is not None and 'shape_logits' in recon_data and 'grid_logits' in recon_data:
                     shape_logits = recon_data['shape_logits']
                     grid_logits = recon_data['grid_logits']
                     
@@ -346,39 +723,239 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
                     recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
                     
                     if recon_grid is not None:
-                        axs[row, col].imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
-                        axs[row, col].set_title(f'Reconstruction {display_label}\n{recon_rows}×{recon_cols}')
+                        ax_enc.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
+                        ax_enc.set_title(f'Encoder {enc_idx}\n{recon_rows}×{recon_cols}')
                     else:
-                        axs[row, col].text(0.5, 0.5, f'Invalid\nDims', ha='center', va='center', 
-                                         transform=axs[row, col].transAxes, fontsize=8)
-                        axs[row, col].set_title(f'Reconstruction {display_label}')
+                        print(f"DEBUG: encoder_{enc_idx} reconstruction grid extraction failed")
+                        ax_enc.text(0.5, 0.5, f'Invalid\nDims', ha='center', va='center', 
+                                   transform=ax_enc.transAxes, fontsize=8)
+                        ax_enc.set_title(f'Encoder {enc_idx}')
                 else:
-                    axs[row, col].text(0.5, 0.5, f'No Data\n{display_label}', ha='center', va='center', 
-                                     transform=axs[row, col].transAxes, fontsize=8)
-                    axs[row, col].set_title(f'Reconstruction {display_label}')
-                
-                axs[row, col].axis('off')
-    else:
-        # Fallback message for missing reconstruction data
-        for i in range(3):
-            row = 0 if i < 2 else 1
-            col = 2 + (i % 2)
-            axs[row, col].text(0.5, 0.5, 'No Stored\nReconstruction\nData', 
-                             ha='center', va='center', transform=axs[row, col].transAxes)
-            axs[row, col].set_title(f'Reconstruction {i}')
-            axs[row, col].axis('off')
+                    print(f"DEBUG: encoder_{enc_idx} missing shape_logits or grid_logits")
+                    ax_enc.text(0.5, 0.5, f'Encoder {enc_idx}\nReconstruction\n(No Data)', 
+                               ha='center', va='center', transform=ax_enc.transAxes, fontsize=8)
+                    ax_enc.set_title(f'Encoder {enc_idx}')
+            else:
+                print(f"DEBUG: encoder_{enc_idx} not found in individual_encoder_reconstructions")
+                # Try to generate reconstruction from latent vectors
+                if z_vectors and len(z_vectors) > 0:
+                    # Use the final z vector for encoder reconstruction
+                    final_z = z_vectors[-1]
+                    recon_grid, recon_rows, recon_cols = generate_reconstruction_from_latent(
+                        final_z, model, device, input_seq, target_seq
+                    )
+                    if recon_grid is not None:
+                        ax_enc.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
+                        ax_enc.set_title(f'Encoder {enc_idx}\n{recon_rows}×{recon_cols}')
+                    else:
+                        ax_enc.text(0.5, 0.5, f'Encoder {enc_idx}\nReconstruction\n(Generated)', 
+                                   ha='center', va='center', transform=ax_enc.transAxes, fontsize=8)
+                        ax_enc.set_title(f'Encoder {enc_idx}')
+                else:
+                    ax_enc.text(0.5, 0.5, f'Encoder {enc_idx}\nReconstruction\n(Not Available)', 
+                               ha='center', va='center', transform=ax_enc.transAxes, fontsize=8)
+                    ax_enc.set_title(f'Encoder {enc_idx}')
+            
+            ax_enc.axis('off')
     
-    # Loss progression plot
-    if losses and len(losses) > 1:
-        axs[1, 1].plot(losses, 'b-o', linewidth=2, markersize=4)
-        axs[1, 1].set_title('Loss Progression')
-        axs[1, 1].set_xlabel('Step')
-        axs[1, 1].set_ylabel('Loss')
-        axs[1, 1].grid(True, alpha=0.3)
+    # Plot POE reconstructions (ROW 1, columns 4-6)
+    poe_axes = [ax_poe_initial, ax_poe_mid, ax_poe_final]
+    poe_labels = ['Initial', 'Mid', 'Final']
+    
+    for i, (ax_poe, label) in enumerate(zip(poe_axes, poe_labels)):
+        if trajectory_reconstructions and f'{label.lower()}' in trajectory_reconstructions and trajectory_reconstructions[f'{label.lower()}'] is not None:
+            recon_data = trajectory_reconstructions[f'{label.lower()}']
+            print(f"DEBUG: POE {label.lower()} recon_data keys: {list(recon_data.keys()) if recon_data else 'None'}")
+            
+            shape_logits = recon_data['shape_logits']
+            grid_logits = recon_data['grid_logits']
+            
+            # Extract reconstruction grid from stored data
+            recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
+            
+            if recon_grid is not None:
+                ax_poe.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
+                ax_poe.set_title(f'POE {label}\n{recon_rows}×{recon_cols}')
+            else:
+                print(f"DEBUG: POE {label.lower()} reconstruction grid extraction failed")
+                ax_poe.text(0.5, 0.5, f'Invalid\nDims', ha='center', va='center', 
+                           transform=ax_poe.transAxes, fontsize=8)
+                ax_poe.set_title(f'POE {label}')
+        else:
+            print(f"DEBUG: POE {label.lower()} not found in trajectory_reconstructions")
+            # Try to generate reconstruction from latent vectors
+            if z_vectors and len(z_vectors) > 0:
+                # Select appropriate z vector based on label
+                if label == 'Initial':
+                    z_vector = z_vectors[0]
+                elif label == 'Mid':
+                    z_vector = z_vectors[len(z_vectors)//2]
+                else:  # Final
+                    z_vector = z_vectors[-1]
+                
+                recon_grid, recon_rows, recon_cols = generate_reconstruction_from_latent(
+                    z_vector, model, device, input_seq, target_seq
+                )
+                if recon_grid is not None:
+                    ax_poe.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
+                    ax_poe.set_title(f'POE {label}\n{recon_rows}×{recon_cols}')
+                else:
+                    ax_poe.text(0.5, 0.5, f'POE {label}\nReconstruction\n(Generated)', 
+                               ha='center', va='center', transform=ax_poe.transAxes, fontsize=8)
+                    ax_poe.set_title(f'POE {label}')
+            else:
+                ax_poe.text(0.5, 0.5, f'No Data\n{label}', ha='center', va='center', 
+                           transform=ax_poe.transAxes, fontsize=8)
+                ax_poe.set_title(f'POE {label}')
+        
+        ax_poe.axis('off')
+    
+    # Plot error maps (ROW 2)
+    plot_error_maps_row(ax_error_maps, trajectory_info, model, num_encoders)
+    
+    # Plot query reconstructions (ROW 3, columns 2-4)
+    query_encoder_axes = [ax_query_recon_0, ax_query_recon_1, ax_query_recon_2]
+    query_encoder_reconstructions = trajectory_info.get('query_encoder_reconstructions', {})
+    print(f"DEBUG: query_encoder_reconstructions keys: {list(query_encoder_reconstructions.keys())}")
+    
+    for enc_idx in range(num_encoders):
+        if enc_idx < len(query_encoder_axes) and query_encoder_axes[enc_idx] is not None:
+            ax_query_enc = query_encoder_axes[enc_idx]
+            
+            # Try to get query encoder reconstruction data
+            if query_encoder_reconstructions and f'encoder_{enc_idx}' in query_encoder_reconstructions:
+                recon_data = query_encoder_reconstructions[f'encoder_{enc_idx}']
+                print(f"DEBUG: query encoder_{enc_idx} recon_data keys: {list(recon_data.keys()) if recon_data else 'None'}")
+                
+                if recon_data is not None and 'shape_logits' in recon_data and 'grid_logits' in recon_data:
+                    shape_logits = recon_data['shape_logits']
+                    grid_logits = recon_data['grid_logits']
+                    
+                    # Extract reconstruction grid from stored data
+                    recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
+                    
+                    if recon_grid is not None:
+                        ax_query_enc.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
+                        ax_query_enc.set_title(f'Query Encoder {enc_idx}\n{recon_rows}×{recon_cols}')
+                    else:
+                        print(f"DEBUG: query encoder_{enc_idx} reconstruction grid extraction failed")
+                        ax_query_enc.text(0.5, 0.5, f'Invalid\nDims', ha='center', va='center', 
+                                       transform=ax_query_enc.transAxes, fontsize=8)
+                        ax_query_enc.set_title(f'Query Encoder {enc_idx}')
+                else:
+                    print(f"DEBUG: query encoder_{enc_idx} missing shape_logits or grid_logits")
+                    ax_query_enc.text(0.5, 0.5, f'Query Encoder {enc_idx}\nReconstruction\n(No Data)', 
+                                   ha='center', va='center', transform=ax_query_enc.transAxes, fontsize=8)
+                    ax_query_enc.set_title(f'Query Encoder {enc_idx}')
+            else:
+                print(f"DEBUG: query encoder_{enc_idx} not found in query_encoder_reconstructions")
+                # Try to generate reconstruction from latent vectors
+                if z_vectors and len(z_vectors) > 0:
+                    # Use the final z vector for query encoder reconstruction
+                    final_z = z_vectors[-1]
+                    recon_grid, recon_rows, recon_cols = generate_reconstruction_from_latent(
+                        final_z, model, device, input_seq, target_seq
+                    )
+                    if recon_grid is not None:
+                        ax_query_enc.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
+                        ax_query_enc.set_title(f'Query Encoder {enc_idx}\n{recon_rows}×{recon_cols}')
+                    else:
+                        ax_query_enc.text(0.5, 0.5, f'Query Encoder {enc_idx}\nReconstruction\n(Generated)', 
+                                       ha='center', va='center', transform=ax_query_enc.transAxes, fontsize=8)
+                        ax_query_enc.set_title(f'Query Encoder {enc_idx}')
+                else:
+                    ax_query_enc.text(0.5, 0.5, f'Query Encoder {enc_idx}\nReconstruction\n(Not Available)', 
+                                   ha='center', va='center', transform=ax_query_enc.transAxes, fontsize=8)
+                    ax_query_enc.set_title(f'Query Encoder {enc_idx}')
+            
+            ax_query_enc.axis('off')
+    
+    # Plot query POE reconstructions (ROW 3, columns 5-6)
+    query_poe_reconstructions = trajectory_info.get('query_poe_reconstructions', {})
+    print(f"DEBUG: query_poe_reconstructions keys: {list(query_poe_reconstructions.keys())}")
+    
+    # Initial POE reconstruction
+    if query_poe_reconstructions and 'initial' in query_poe_reconstructions:
+        recon_data = query_poe_reconstructions['initial']
+        print(f"DEBUG: query POE initial recon_data keys: {list(recon_data.keys()) if recon_data else 'None'}")
+        
+        shape_logits = recon_data['shape_logits']
+        grid_logits = recon_data['grid_logits']
+        
+        recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
+        
+        if recon_grid is not None:
+            ax_query_poe_initial.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
+            ax_query_poe_initial.set_title(f'Query POE Initial\n{recon_rows}×{recon_cols}')
+        else:
+            print(f"DEBUG: query POE initial reconstruction grid extraction failed")
+            ax_query_poe_initial.text(0.5, 0.5, 'Invalid\nDims', ha='center', va='center', 
+                                     transform=ax_query_poe_initial.transAxes, fontsize=8)
+            ax_query_poe_initial.set_title('Query POE Initial')
     else:
-        axs[1, 1].text(0.5, 0.5, 'No loss data', 
-                      ha='center', va='center', transform=axs[1, 1].transAxes)
-        axs[1, 1].set_title('Loss Progression')
+        print(f"DEBUG: query POE initial not found in query_poe_reconstructions")
+        # Try to generate reconstruction from latent vectors
+        if z_vectors and len(z_vectors) > 0:
+            # Use the initial z vector for query POE initial reconstruction
+            initial_z = z_vectors[0]
+            recon_grid, recon_rows, recon_cols = generate_reconstruction_from_latent(
+                initial_z, model, device, input_seq, target_seq
+            )
+            if recon_grid is not None:
+                ax_query_poe_initial.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
+                ax_query_poe_initial.set_title(f'Query POE Initial\n{recon_rows}×{recon_cols}')
+            else:
+                ax_query_poe_initial.text(0.5, 0.5, 'Query POE\nInitial\n(Generated)', 
+                                         ha='center', va='center', transform=ax_query_poe_initial.transAxes, fontsize=8)
+                ax_query_poe_initial.set_title('Query POE Initial')
+        else:
+            ax_query_poe_initial.text(0.5, 0.5, 'Query POE\nInitial\n(Not Available)', 
+                                     ha='center', va='center', transform=ax_query_poe_initial.transAxes, fontsize=8)
+            ax_query_poe_initial.set_title('Query POE Initial')
+    ax_query_poe_initial.axis('off')
+    
+    # Final POE reconstruction
+    if query_poe_reconstructions and 'final' in query_poe_reconstructions:
+        recon_data = query_poe_reconstructions['final']
+        print(f"DEBUG: query POE final recon_data keys: {list(recon_data.keys()) if recon_data else 'None'}")
+        
+        shape_logits = recon_data['shape_logits']
+        grid_logits = recon_data['grid_logits']
+        
+        recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
+        
+        if recon_grid is not None:
+            ax_query_poe_final.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
+            ax_query_poe_final.set_title(f'Query POE Final\n{recon_rows}×{recon_cols}')
+        else:
+            print(f"DEBUG: query POE final reconstruction grid extraction failed")
+            ax_query_poe_final.text(0.5, 0.5, 'Invalid\nDims', ha='center', va='center', 
+                                   transform=ax_query_poe_final.transAxes, fontsize=8)
+            ax_query_poe_final.set_title('Query POE Final')
+    else:
+        print(f"DEBUG: query POE final not found in query_poe_reconstructions")
+        # Try to generate reconstruction from latent vectors
+        if z_vectors and len(z_vectors) > 0:
+            # Use the final z vector for query POE final reconstruction
+            final_z = z_vectors[-1]
+            recon_grid, recon_rows, recon_cols = generate_reconstruction_from_latent(
+                final_z, model, device, input_seq, target_seq
+            )
+            if recon_grid is not None:
+                ax_query_poe_final.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
+                ax_query_poe_final.set_title(f'Query POE Final\n{recon_rows}×{recon_cols}')
+            else:
+                ax_query_poe_final.text(0.5, 0.5, 'Query POE\nFinal\n(Generated)', 
+                                       ha='center', va='center', transform=ax_query_poe_final.transAxes, fontsize=8)
+                ax_query_poe_final.set_title('Query POE Final')
+        else:
+            ax_query_poe_final.text(0.5, 0.5, 'Query POE\nFinal\n(Not Available)', 
+                                   ha='center', va='center', transform=ax_query_poe_final.transAxes, fontsize=8)
+            ax_query_poe_final.set_title('Query POE Final')
+    ax_query_poe_final.axis('off')
+    
+    # Plot query error maps (ROW 4)
+    plot_query_error_maps_row(ax_query_error_maps, trajectory_info, model, num_encoders)
     
     # Get decoder type for title (using global settings import)
     eval_settings = settings.get_evaluation_settings()
@@ -387,6 +964,11 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
     
     plt.suptitle(f'Single-Encoder Trajectory Analysis\nEVALUATION DATA - Trajectory Reconstructions: {decoder_display}', fontsize=16)
     plt.tight_layout()
+    
+    # Debug: Print the save path
+    print(f"DEBUG: visualize_comprehensive_trajectory saving to: {save_path}")
+    print(f"DEBUG: Directory exists: {os.path.exists(os.path.dirname(save_path))}")
+    
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
 
@@ -408,9 +990,13 @@ def visualize_all_samples_comprehensive(trajectory_info_list, model, save_path, 
     else:
         print("Single-encoder model detected")
     
-    # Load training latent data for background with precomputed t-SNE
-    print("Loading training latent data for background...")
-    training_latent_data, training_tsne_2d, training_labels, training_colors = load_training_latent_data(run_dir)
+    # Load unified latent data (training + support + query + trajectory)
+    print("Loading unified latent data (training + support + query + trajectory)...")
+    # For the first trajectory_info in the list (they should all be from the same run)
+    first_trajectory_info = trajectory_info_list[0] if trajectory_info_list else None
+    training_latent_data, training_tsne_2d, training_labels, training_colors, trajectory_tsne_2d, all_labels, all_tsne_2d = load_unified_latent_data_with_trajectory(
+        run_dir, model, device, first_trajectory_info
+    )
     
     # Create figure with expanded layout for multi-encoder
     if is_multi_encoder:
@@ -419,6 +1005,19 @@ def visualize_all_samples_comprehensive(trajectory_info_list, model, save_path, 
             individual_save_path = save_path.replace('.png', f'_sample_{sample_idx}.png')
             print(f"Creating individual visualization for sample {sample_idx + 1}")
             visualize_multi_encoder_comprehensive_trajectory(trajectory_info, model, individual_save_path, run_dir, device)
+            
+            # Create standalone latent space plot for this trajectory
+            from utils.visualizers import create_standalone_latent_space_plot
+            evaluated_key = trajectory_info.get('evaluated_key', None)
+            # Extract epoch from save_path or use default
+            epoch = 1  # Default epoch, could be extracted from path if needed
+            # Note: wandb_logger is not available in this context, so we pass None
+            latent_space_path = create_standalone_latent_space_plot(trajectory_info, model, run_dir, epoch, sample_idx, evaluated_key, device, wandb_logger=None)
+            if latent_space_path:
+                print(f"  [ OK ] Created standalone latent space plot: {latent_space_path}")
+            else:
+                print(f"  [ WARNING ] No latent space plot created for sample {sample_idx}")
+            
         print(f"Created {len(trajectory_info_list)} individual multi-encoder visualizations")
         return
         
@@ -455,27 +1054,76 @@ def visualize_all_samples_comprehensive(trajectory_info_list, model, save_path, 
         ax_target.axis('off')
         
         # Plot latent trajectory using consistent t-SNE
-        z_vectors = trajectory_info['z_vectors']
-        losses = trajectory_info['losses']
         
         if z_vectors and len(z_vectors) >= 2:
             if training_latent_data is not None and training_tsne_2d is not None:
-                # Plot training background using precomputed coordinates
-                ax_latent.scatter(training_tsne_2d[:, 0], training_tsne_2d[:, 1],
-                                c='lightgray', alpha=0.3, s=10, edgecolors='none')
+                # Plot training background using precomputed coordinates - COLOR BY ENCODER + HIGHLIGHT SAME KEY
+                if training_colors is not None and training_labels is not None:
+                    # Extract keys and encoders from training labels
+                    training_keys = []
+                    training_encoders = []
+                    for label in training_labels:
+                        if '_key_' in label and 'training_enc_' in label:
+                            # Extract encoder and key
+                            encoder_part = label.split('_key_')[0]
+                            encoder = encoder_part.split('training_enc_')[-1]
+                            key = label.split('_key_')[-1]
+                            training_keys.append(key)
+                            training_encoders.append(int(encoder))
+                        else:
+                            training_keys.append(label)
+                            training_encoders.append(0)  # Default encoder
+                    
+                    # Get the key of the sample being evaluated
+                    evaluated_key = None
+                    if 'query_input' in trajectory_info:
+                        evaluated_key = trajectory_info.get('evaluated_key', 'unknown')
+                    elif 'target_sample' in trajectory_info:
+                        evaluated_key = trajectory_info.get('evaluated_key', 'unknown')
+                    
+                    # Create light colors for encoders
+                    unique_encoders = sorted(list(set(training_encoders)))
+                    encoder_colors = {
+                        enc: plt.cm.tab10(enc % 10) for enc in unique_encoders
+                    }
+                    
+                    # Create bright colors for the evaluated key (replaced yellow with more visible colors)
+                    bright_colors = ['red', 'orange', 'darkorange', 'lime', 'cyan', 'magenta', 'pink', 'brown']
+                    evaluated_color = bright_colors[hash(evaluated_key) % len(bright_colors)]
+                    
+                    # Plot background points colored by encoder (light colors)
+                    for encoder in unique_encoders:
+                        indices = [i for i, enc in enumerate(training_encoders) if enc == encoder]
+                        if indices:
+                            x_coords = training_tsne_2d[indices, 0]
+                            y_coords = training_tsne_2d[indices, 1]
+                            color = encoder_colors[encoder]
+                            ax_latent.scatter(x_coords, y_coords, c=color, alpha=0.6, s=10, edgecolors='none')
+                    
+                    # Highlight samples with the same key as evaluated sample (bright colors)
+                    same_key_indices = [i for i, key in enumerate(training_keys) if key == evaluated_key]
+                    if same_key_indices:
+                        x_coords = training_tsne_2d[same_key_indices, 0]
+                        y_coords = training_tsne_2d[same_key_indices, 1]
+                        ax_latent.scatter(x_coords, y_coords, c=evaluated_color, alpha=0.9, s=20, 
+                                        edgecolors='black', linewidth=1.0)
+                else:
+                    # Fallback to more visible gray
+                    ax_latent.scatter(training_tsne_2d[:, 0], training_tsne_2d[:, 1],
+                                    c='gray', alpha=0.6, s=10, edgecolors='none')
                 
-                # Map trajectory to consistent t-SNE space
-                z_2d = find_trajectory_points_in_tsne_space(z_vectors, training_latent_data, training_tsne_2d, training_labels)
+                # Use unified trajectory coordinates (already computed in unified t-SNE)
+                z_2d = trajectory_tsne_2d
                 
                 if z_2d is not None:
                     ax_latent.scatter(z_2d[:, 0], z_2d[:, 1], c=losses, cmap='plasma', 
-                                    s=40, alpha=0.9, edgecolors='black', linewidth=0.5)
+                                    s=60, alpha=1.0, edgecolors='black', linewidth=1.5)
                     
                     for i in range(len(z_2d) - 1):
                         ax_latent.annotate('', xy=z_2d[i+1], xytext=z_2d[i],
                                          arrowprops=dict(arrowstyle='->', color='red', alpha=0.8, lw=1))
                     
-                    ax_latent.set_title('Latent Trajectory (Consistent)')
+                    ax_latent.set_title('Latent Trajectory (Light=Encoder, Bright=Same Key)')
                 else:
                     ax_latent.text(0.5, 0.5, 'Mapping Error', 
                                  ha='center', va='center', transform=ax_latent.transAxes)
@@ -546,468 +1194,1404 @@ def visualize_all_samples_comprehensive(trajectory_info_list, model, save_path, 
     plt.close()
     
     print(f"Comprehensive visualization saved to {save_path}")
-
-
+    
+    # Create standalone latent space plots for each trajectory
+    for sample_idx, trajectory_info in enumerate(trajectory_info_list):
+        from utils.visualizers import create_standalone_latent_space_plot
+        evaluated_key = trajectory_info.get('evaluated_key', None)
+        # Extract epoch from save_path or use default
+        epoch = 1  # Default epoch, could be extracted from path if needed
+        # Note: wandb_logger is not available in this context, so we pass None
+        latent_space_path = create_standalone_latent_space_plot(trajectory_info, model, run_dir, epoch, sample_idx, evaluated_key, device, wandb_logger=None)
+        if latent_space_path:
+            print(f"  [ OK ] Created standalone latent space plot: {latent_space_path}")
+        else:
+            print(f"  [ WARNING ] No latent space plot created for sample {sample_idx}")
 
 def visualize_multi_encoder_comprehensive_trajectory(trajectory_info, model, save_path, run_dir, device='cuda'):
     """
-    Create a comprehensive visualization for multi-encoder models showing:
-    - Input/Target grids
-    - Individual encoder latent trajectories
-    - PoE latent trajectory 
-    - Individual encoder reconstructions (from stored data)
-    - PoE reconstructions (from stored data)
-    All with training background in latent space using consistent t-SNE coordinates.
+    Create a comprehensive multi-encoder trajectory visualization with training samples in background.
+    Shows input/target, trajectory in latent space with training background, and reconstructions.
     """
-    if not trajectory_info.get('is_multi_encoder', False):
-        print("Warning: This function is for multi-encoder models only.")
-        return visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_dir, device)
-    
-    num_encoders = trajectory_info.get('num_encoders', 1)
-    print(f"Creating multi-encoder visualization for {num_encoders} encoders...")
-    
-    # Get trajectory decoder type setting (using global settings import)
-    eval_settings = settings.get_evaluation_settings()
-    decoder_type = eval_settings.get('trajectory_decoder_type', 'shared')
-    decoder_display = "Independent Decoders" if decoder_type == "independent" else "Shared Decoder"
-    print(f"Trajectory used: {decoder_display}")
-
-    # Load training latent data for background with precomputed t-SNE
-    print("Loading training latent data for background visualization...")
-    training_latent_data, training_tsne_2d, training_labels, training_colors = load_training_latent_data(run_dir)
-
-    # Create figure with optimized layout
-    fig = plt.figure(figsize=(20, 15))
-    
-    # Define grid layout: 3 rows, 8 columns
-    # Row 0: Input | Merged Latent Space (5 cols) | Loss Plot (2 cols)
-    # Row 1: Target | Individual Encoder Reconstructions (4 cols) | PoE Reconstructions (3 cols)
-    # Row 2: Error | Individual Encoder Error Maps (4 cols) | PoE Error Maps (3 cols)
-    gs = fig.add_gridspec(4, 8, width_ratios=[1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1], height_ratios=[1, 1.5, 1.5, 1.5])
-    
-    # Input and Target (left column)
-    ax_input = fig.add_subplot(gs[0, 0])
-    ax_target = fig.add_subplot(gs[1, 0])
-    ax_error_label = fig.add_subplot(gs[2, 0])
-    
-    input_grid, input_shape = extract_grid_from_sequence(trajectory_info['input_sample'])
-    ax_input.imshow(input_grid, cmap='viridis', interpolation='nearest', aspect='equal')
-    ax_input.set_title(f'Input\n{input_shape[0]}×{input_shape[1]}', fontsize=12, fontweight='bold')
-    ax_input.axis('off')
-    
-    target_grid, target_shape = extract_grid_from_sequence(trajectory_info['target_sample'])
-    ax_target.imshow(target_grid, cmap='viridis', interpolation='nearest', aspect='equal')
-    ax_target.set_title(f'Target\n{target_shape[0]}×{target_shape[1]}', fontsize=12, fontweight='bold')
-    ax_target.axis('off')
-    
-    ax_error_label.text(0.5, 0.5, 'Error Maps\n(Pred - Target)', ha='center', va='center', 
-                       transform=ax_error_label.transAxes, fontsize=10, fontweight='bold')
-    ax_error_label.axis('off')
-    
-    # Merged latent space visualization using consistent t-SNE
-    ax_merged_latent = fig.add_subplot(gs[0, 1:6])
-    ax_loss = fig.add_subplot(gs[0, 6:8])
-    
-    individual_trajectories = trajectory_info.get('individual_encoder_trajectories', {})
-    z_vectors = trajectory_info['z_vectors']
-    losses = trajectory_info['losses']
-    
-    if training_latent_data is not None and training_tsne_2d is not None:
-        # Plot training background using precomputed coordinates
-        if training_colors is not None and training_labels is not None:
-            # Use the existing colors from comprehensive latent data
-            unique_labels = list(set(training_labels))
-            for label in unique_labels:
-                indices = [i for i, l in enumerate(training_labels) if l == label]
-                if indices:
-                    x_coords = training_tsne_2d[indices, 0]
-                    y_coords = training_tsne_2d[indices, 1]
-                    color = training_colors[indices[0]]  # Get color for this class
-                    
-                    # Use alpha for background effect
-                    ax_merged_latent.scatter(x_coords, y_coords, c=color, alpha=0.3, s=12, 
-                                           edgecolors='none', label=f'Training {label.replace("training_enc_", "Enc ")}')
-        else:
-            # Fallback to gray
-            ax_merged_latent.scatter(training_tsne_2d[:, 0], training_tsne_2d[:, 1],
-                                   c='lightgray', alpha=0.4, s=15, edgecolors='none', 
-                                   label='Training Data')
-        
-        # Plot PoE trajectory using consistent mapping
-        if z_vectors and len(z_vectors) >= 2:
-            z_2d = find_trajectory_points_in_tsne_space(z_vectors, training_latent_data, training_tsne_2d, training_labels)
-            
-            if z_2d is not None:
-                # Draw trajectory path
-                ax_merged_latent.plot(z_2d[:, 0], z_2d[:, 1], 'k-', alpha=0.7, linewidth=2, 
-                                    label='PoE Trajectory Path')
-                
-                # Plot trajectory points colored by loss
-                trajectory_scatter = ax_merged_latent.scatter(z_2d[:, 0], z_2d[:, 1], 
-                                                            c=losses, cmap='plasma', 
-                                                            s=80, alpha=0.9, 
-                                                            edgecolors='black', linewidth=1,
-                                                            zorder=8)
-                
-                # Draw arrows between consecutive trajectory points
-                for i in range(len(z_2d) - 1):
-                    ax_merged_latent.annotate('', xy=z_2d[i+1], xytext=z_2d[i],
-                                            arrowprops=dict(arrowstyle='->', color='darkred', 
-                                                          alpha=0.8, lw=2, zorder=9))
-                
-                # Mark start and end points
-                ax_merged_latent.scatter(z_2d[0, 0], z_2d[0, 1], c='green', s=200, marker='*', 
-                                       label='PoE Start', edgecolors='black', linewidth=2, zorder=11)
-                ax_merged_latent.scatter(z_2d[-1, 0], z_2d[-1, 1], c='red', s=200, marker='X', 
-                                       label='PoE End', edgecolors='black', linewidth=2, zorder=11)
-        
-        ax_merged_latent.set_title('Consistent Latent Space:\nTraining Data + PoE Trajectory Only', fontsize=12)
-        ax_merged_latent.legend(loc='upper right', fontsize=8, frameon=True, fancybox=True, 
-                               shadow=True, framealpha=0.9, bbox_to_anchor=(0.98, 0.98))
-        ax_merged_latent.grid(True, alpha=0.3)
-    else:
-        ax_merged_latent.text(0.5, 0.5, 'No precomputed\nt-SNE data available', 
-                            ha='center', va='center', transform=ax_merged_latent.transAxes)
-        ax_merged_latent.set_title('Consistent Latent Space (No Data)')
-    
-    # Plot optimization losses
-    if losses and len(losses) > 1:
-        steps = list(range(len(losses)))
-        ax_loss.plot(steps, losses, 'b-', marker='o', linewidth=2, markersize=4)
-        ax_loss.set_title('Optimization Losses', fontsize=12)
-        ax_loss.set_xlabel('Step')
-        ax_loss.set_ylabel('Loss')
-        ax_loss.grid(True, alpha=0.3)
-        
-        # Add start/end annotations
-        ax_loss.annotate(f'Start: {losses[0]:.3f}', xy=(0, losses[0]), 
-                       xytext=(5, 5), textcoords='offset points', fontsize=8)
-        ax_loss.annotate(f'End: {losses[-1]:.3f}', xy=(len(losses)-1, losses[-1]), 
-                       xytext=(5, -15), textcoords='offset points', fontsize=8)
-    else:
-        ax_loss.text(0.5, 0.5, 'No Loss\nData', 
-                    ha='center', va='center', transform=ax_loss.transAxes)
-        ax_loss.set_title('Optimization Losses')
+    print("Creating multi-encoder visualization for", getattr(model, 'num_encoders', 1), "encoders...")
+    print("Trajectory used:", trajectory_info.get('trajectory_type', 'Unknown'))
     
     # Use safe extraction to avoid scalar conversion errors
     extract_reconstruction_grid = safe_extract_reconstruction_grid
     
-    # Individual encoder reconstructions (row 1, columns 1-4) - USE STORED DATA
-    individual_reconstructions = trajectory_info.get('individual_encoder_reconstructions', {})
-    for enc_idx in range(min(num_encoders, 4)):  # Limit to 4 encoders for layout
-        ax_enc_recon = fig.add_subplot(gs[1, enc_idx + 1])
-        ax_enc_error = fig.add_subplot(gs[2, enc_idx + 1])
-        
-        encoder_key = f'encoder_{enc_idx}'
-        if encoder_key in individual_reconstructions and individual_reconstructions[encoder_key] is not None:
-            enc_recon_data = individual_reconstructions[encoder_key]
-            shape_logits = enc_recon_data['shape_logits']
-            grid_logits = enc_recon_data['grid_logits']
-            
-            # Extract reconstruction grid from stored data
-            recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
-            
-            if recon_grid is not None:
-                # Plot reconstruction
-                ax_enc_recon.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
-                ax_enc_recon.set_title(f'Encoder {enc_idx}\n{recon_rows}×{recon_cols}', fontsize=10)
-                
-                # === NEW: print latent μ / σ averages under the image ===
-                enc_traj = individual_trajectories.get(encoder_key, {}) if 'individual_trajectories' in locals() else {}
-                enc_mu = enc_traj.get('mu')
-                enc_log_var = enc_traj.get('log_var')
-                if enc_mu is not None and enc_log_var is not None:
-                    enc_mu_mean = float(np.mean(enc_mu))
-                    enc_sigma_mean = float(np.mean(np.exp(0.5 * enc_log_var)))
-                    ax_enc_recon.text(0.5, -0.12, f"μ={enc_mu_mean:.2f} σ={enc_sigma_mean:.2f}",
-                                      transform=ax_enc_recon.transAxes, ha='center', va='top', fontsize=8)
-                
-                # Calculate and plot error map
-                if recon_rows == target_shape[0] and recon_cols == target_shape[1]:
-                    error_map = recon_grid.astype(float) - target_grid.astype(float)
-                    im_error = ax_enc_error.imshow(error_map, cmap='RdBu', vmin=-5, vmax=5, 
-                                                 interpolation='nearest', aspect='equal')
-                    ax_enc_error.set_title(f'Error {enc_idx}', fontsize=10)
-                else:
-                    ax_enc_error.text(0.5, 0.5, 'Size\nMismatch', ha='center', va='center', 
-                                    transform=ax_enc_error.transAxes, fontsize=8)
-                    ax_enc_error.set_title(f'Error {enc_idx}', fontsize=10)
-            else:
-                ax_enc_recon.text(0.5, 0.5, f'Invalid\nDims', ha='center', va='center', 
-                                transform=ax_enc_recon.transAxes, fontsize=8)
-                ax_enc_recon.set_title(f'Encoder {enc_idx}', fontsize=10)
-                ax_enc_error.text(0.5, 0.5, f'No Error', ha='center', va='center', 
-                                transform=ax_enc_error.transAxes, fontsize=8)
-                ax_enc_error.set_title(f'Error {enc_idx}', fontsize=10)
-            
-            ax_enc_recon.axis('off')
-            ax_enc_error.axis('off')
-        else:
-            ax_enc_recon.text(0.5, 0.5, f'Enc {enc_idx}\nNo Data', 
-                            ha='center', va='center', transform=ax_enc_recon.transAxes)
-            ax_enc_recon.set_title(f'Encoder {enc_idx}', fontsize=10)
-            ax_enc_recon.axis('off')
-            
-            ax_enc_error.text(0.5, 0.5, f'Enc {enc_idx}\nNo Error', 
-                            ha='center', va='center', transform=ax_enc_error.transAxes)
-            ax_enc_error.set_title(f'Error {enc_idx}', fontsize=10)
-            ax_enc_error.axis('off')
+    print("Loading unified latent data (training + support + query + trajectory)...")
+    training_latent_data, training_tsne_2d, training_labels, training_colors, trajectory_tsne_2d, all_labels, all_tsne_2d = load_unified_latent_data_with_trajectory(
+        run_dir, model, device, trajectory_info
+    )
+
+    # Create figure with GridSpec for complex multi-encoder layout
+    fig = plt.figure(figsize=(24, 16))
+    gs = GridSpec(5, 8, figure=fig)  # 5 rows, 8 columns for the specified layout
     
-    # PoE reconstructions at different trajectory steps (row 1, columns 5-7) - USE STORED DATA
-    poe_reconstructions = trajectory_info.get('poe_trajectory_reconstructions', {})
-    if poe_reconstructions:
-        reconstruction_labels = ['initial', 'middle', 'final']
-        display_labels = ['Start', 'Mid', 'End']
-        
-        for i, (recon_label, display_label) in enumerate(zip(reconstruction_labels, display_labels)):
-            if i < 3:  # Columns 5-7 (indices 5, 6, 7)
-                ax_poe_recon = fig.add_subplot(gs[1, 5 + i])
-                ax_poe_error = fig.add_subplot(gs[2, 5 + i])
+    # ROW 0: INPUT SAMPLE | LATENT SPACE | LOSS PROGRESSION
+    input_seq = trajectory_info['input_sample']
+    input_grid, input_shape = extract_grid_from_sequence(input_seq)
+    ax_input = fig.add_subplot(gs[0, 0])
+    ax_input.imshow(input_grid, cmap='viridis')
+    ax_input.set_title(f'Input Sample\n{input_shape[0]}×{input_shape[1]}')
+    ax_input.axis('off')
+    
+    # Latent space (spans columns 1-4)
+    ax_latent = fig.add_subplot(gs[0, 1:5])
+    
+    # Loss progression (spans columns 5-7)
+    ax_loss = fig.add_subplot(gs[0, 5:8])
+    
+    # ROW 1: TARGET SAMPLE | RECONSTRUCTIONS FOR EACH ENCODER | POE INITIAL/MID/FINAL OPTIMISATION
+    target_seq = trajectory_info['target_sample']
+    target_grid, target_shape = extract_grid_from_sequence(target_seq)
+    ax_target = fig.add_subplot(gs[1, 0])
+    ax_target.imshow(target_grid, cmap='viridis')
+    ax_target.set_title(f'Target Sample\n{target_shape[0]}×{target_shape[1]}')
+    ax_target.axis('off')
+    
+    # Individual encoder reconstructions (columns 1-3)
+    ax_enc_recon_0 = fig.add_subplot(gs[1, 1])
+    ax_enc_recon_1 = fig.add_subplot(gs[1, 2]) if getattr(model, 'num_encoders', 1) > 1 else None
+    ax_enc_recon_2 = fig.add_subplot(gs[1, 3]) if getattr(model, 'num_encoders', 1) > 2 else None
+    
+    # POE reconstructions (columns 4-6)
+    ax_poe_initial = fig.add_subplot(gs[1, 4])
+    ax_poe_mid = fig.add_subplot(gs[1, 5])
+    ax_poe_final = fig.add_subplot(gs[1, 6])
+    
+    # ROW 2: ERROR MAPS
+    ax_error_maps = fig.add_subplot(gs[2, :])
+    
+    # ROW 3: INPUT QUERY | TARGET QUERY | RECONSTRUCTIONS QUERY FOR EACH ENCODER | INITIAL/FINAL POE RECONSTRUCTION
+    # Input query
+    ax_query_input = fig.add_subplot(gs[3, 0])
+    query_input = trajectory_info.get('query_input')
+    print(f"DEBUG: query_input available: {query_input is not None}")
+    if query_input is not None:
+        query_input_grid, query_input_shape = extract_grid_from_sequence(query_input)
+        ax_query_input.imshow(query_input_grid, cmap='viridis')
+        ax_query_input.set_title(f'Input Query\n{query_input_shape[0]}×{query_input_shape[1]}')
+    else:
+        ax_query_input.text(0.5, 0.5, 'Input Query\n(No Data)', ha='center', va='center', transform=ax_query_input.transAxes)
+        ax_query_input.set_title('Input Query')
+    ax_query_input.axis('off')
+    
+    # Target query
+    ax_query_target = fig.add_subplot(gs[3, 1])
+    query_target = trajectory_info.get('query_target')
+    print(f"DEBUG: query_target available: {query_target is not None}")
+    if query_target is not None:
+        query_target_grid, query_target_shape = extract_grid_from_sequence(query_target)
+        ax_query_target.imshow(query_target_grid, cmap='viridis')
+        ax_query_target.set_title(f'Target Query\n{query_target_shape[0]}×{query_target_shape[1]}')
+    else:
+        ax_query_target.text(0.5, 0.5, 'Target Query\n(No Data)', ha='center', va='center', transform=ax_query_target.transAxes)
+        ax_query_target.set_title('Target Query')
+    ax_query_target.axis('off')
+    
+    # Query reconstructions for each encoder (columns 2-4)
+    ax_query_recon_0 = fig.add_subplot(gs[3, 2])
+    ax_query_recon_1 = fig.add_subplot(gs[3, 3]) if getattr(model, 'num_encoders', 1) > 1 else None
+    ax_query_recon_2 = fig.add_subplot(gs[3, 4]) if getattr(model, 'num_encoders', 1) > 2 else None
+    
+    # Initial and final POE reconstructions (columns 5-6)
+    ax_query_poe_initial = fig.add_subplot(gs[3, 5])
+    ax_query_poe_final = fig.add_subplot(gs[3, 6])
+    
+    # ROW 4: ERROR MAPS
+    ax_query_error_maps = fig.add_subplot(gs[4, :])
+    
+    # Get trajectory data early
+    z_vectors = trajectory_info['z_vectors']
+    losses = trajectory_info['losses']
+    
+    # Plot trajectory in latent space using precomputed t-SNE coordinates
+    if z_vectors is not None and len(z_vectors) >= 2:
+        # Use precomputed t-SNE coordinates for consistency
+        if training_latent_data is not None and training_tsne_2d is not None:
+            # Plot training background using precomputed coordinates - COLOR BY ENCODER + HIGHLIGHT SAME KEY
+            if training_colors is not None and training_labels is not None:
+                # Extract keys and encoders from training labels (assuming format like "training_enc_0_key_1234")
+                training_keys = []
+                training_encoders = []
+                for label in training_labels:
+                    if '_key_' in label and 'training_enc_' in label:
+                        # Extract encoder and key
+                        encoder_part = label.split('_key_')[0]
+                        encoder = encoder_part.split('training_enc_')[-1]
+                        key = label.split('_key_')[-1]
+                        training_keys.append(key)
+                        training_encoders.append(int(encoder))
+                    else:
+                        training_keys.append(label)
+                        training_encoders.append(0)  # Default encoder
                 
-                if recon_label in poe_reconstructions and poe_reconstructions[recon_label] is not None:
-                    poe_recon_data = poe_reconstructions[recon_label]
-                    shape_logits = poe_recon_data['shape_logits']
-                    grid_logits = poe_recon_data['grid_logits']
+                # Get the key of the sample being evaluated
+                evaluated_key = trajectory_info.get('evaluated_key', 'unknown')
+                print(f"DEBUG: Using evaluated_key: '{evaluated_key}'")
+                
+                # Create light colors for encoders (different light colors for each encoder)
+                unique_encoders = sorted(list(set(training_encoders)))
+                encoder_colors = {
+                    enc: plt.cm.tab10(enc % 10) for enc in unique_encoders  # More visible colors from tab10
+                }
+                
+                # Create bright colors for the evaluated key (replaced yellow with more visible colors)
+                bright_colors = ['red', 'orange', 'darkorange', 'lime', 'cyan', 'magenta', 'pink', 'brown']
+                evaluated_color = bright_colors[hash(evaluated_key) % len(bright_colors)]
+                
+                # Plot background points colored by encoder (light colors)
+                for encoder in unique_encoders:
+                    indices = [i for i, enc in enumerate(training_encoders) if enc == encoder]
+                    if indices:
+                        x_coords = training_tsne_2d[indices, 0]
+                        y_coords = training_tsne_2d[indices, 1]
+                        color = encoder_colors[encoder]
+                        
+                        # Use alpha for background effect
+                        ax_latent.scatter(x_coords, y_coords, color=color, alpha=0.6, s=12, 
+                                       edgecolors='none', label=f'Encoder {encoder} (Light)')
+                
+                # Highlight samples with the same key as evaluated sample (bright colors)
+                same_key_indices = [i for i, key in enumerate(training_keys) if key == evaluated_key]
+                if same_key_indices:
+                    x_coords = training_tsne_2d[same_key_indices, 0]
+                    y_coords = training_tsne_2d[same_key_indices, 1]
+                    
+                    # Use bright color for same key samples
+                    ax_latent.scatter(x_coords, y_coords, color=evaluated_color, alpha=0.9, s=25, 
+                                   edgecolors='black', linewidth=1.5, 
+                                   label=f'Same Key: {evaluated_key[:8]} (Bright)')
+                
+                # Plot support and query samples for the evaluated key only
+                if all_labels is not None:
+                    print(f"DEBUG: Checking for support/query samples in {len(all_labels)} total labels")
+                    print(f"DEBUG: First few all_labels: {all_labels[:5]}")
+                    print(f"DEBUG: Looking for key: '{evaluated_key}'")
+                    print(f"DEBUG: all_tsne_2d available: {all_tsne_2d is not None}")
+                    if all_tsne_2d is not None:
+                        print(f"DEBUG: all_tsne_2d shape: {all_tsne_2d.shape}")
+                    
+                    # Filter support samples for the evaluated key
+                    support_indices = []
+                    for i, label in enumerate(all_labels):
+                        if 'support' in label and evaluated_key in label:
+                            support_indices.append(i)
+                    
+                    print(f"DEBUG: Found {len(support_indices)} support samples for key '{evaluated_key}'")
+                    if support_indices and all_tsne_2d is not None:
+                        x_coords = all_tsne_2d[support_indices, 0]
+                        y_coords = all_tsne_2d[support_indices, 1]
+                        ax_latent.scatter(x_coords, y_coords, color='blue', alpha=0.8, s=15, 
+                                    marker='s', edgecolors='black', linewidth=1.0)
+                    
+                    # Filter query samples for the evaluated key
+                    query_indices = []
+                    for i, label in enumerate(all_labels):
+                        if 'query' in label and evaluated_key in label:
+                            query_indices.append(i)
+                    
+                    print(f"DEBUG: Found {len(query_indices)} query samples for key '{evaluated_key}'")
+                    if query_indices and all_tsne_2d is not None:
+                        x_coords = all_tsne_2d[query_indices, 0]
+                        y_coords = all_tsne_2d[query_indices, 1]
+                        ax_latent.scatter(x_coords, y_coords, color='red', alpha=0.8, s=15, 
+                                    marker='^', edgecolors='black', linewidth=1.0)
+                    
+                    # Also check all labels for support/query patterns
+                    all_support_labels = [l for l in all_labels if 'support' in l]
+                    all_query_labels = [l for l in all_labels if 'query' in l]
+                    print(f"DEBUG: All support labels: {all_support_labels}")
+                    print(f"DEBUG: All query labels: {all_query_labels}")
+                else:
+                    print(f"DEBUG: No all_labels available for support/query plotting")
+            else:
+                print(f"DEBUG: Missing training_colors or training_labels for background plotting")
+                print(f"DEBUG: training_colors available: {training_colors is not None}")
+                print(f"DEBUG: training_labels available: {training_labels is not None}")
+        else:
+            print(f"DEBUG: Missing training_latent_data or training_tsne_2d for background plotting")
+            print(f"DEBUG: training_latent_data available: {training_latent_data is not None}")
+            print(f"DEBUG: training_tsne_2d available: {training_tsne_2d is not None}")
+        
+        # Use unified trajectory coordinates (already computed in unified t-SNE)
+        z_2d = trajectory_tsne_2d
+        
+        if z_2d is not None:
+            # Fix: Ensure losses array matches trajectory length
+            if len(losses) != len(z_2d):
+                print(f"Warning: losses length ({len(losses)}) != trajectory length ({len(z_2d)})")
+                # Use the shorter length to avoid mismatch
+                min_length = min(len(losses), len(z_2d))
+                z_2d = z_2d[:min_length]
+                losses = losses[:min_length]
+                print(f"Adjusted to length: {min_length}")
+            
+            # Plot trajectory
+            trajectory_scatter = ax_latent.scatter(z_2d[:, 0], z_2d[:, 1], c=losses, cmap='plasma', 
+                                                 s=100, alpha=1.0, edgecolors='black', linewidth=2)
+            
+            # Draw arrows between consecutive trajectory points
+            for i in range(len(z_2d) - 1):
+                ax_latent.annotate('', xy=z_2d[i+1], xytext=z_2d[i],
+                                 arrowprops=dict(arrowstyle='->', color='red', alpha=0.8, lw=2))
+            
+            # Mark start and end points
+            ax_latent.scatter(z_2d[0, 0], z_2d[0, 1], color='green', s=200, marker='o', 
+                            label='Start', edgecolors='black', linewidth=3, zorder=10, alpha=1.0)
+            ax_latent.scatter(z_2d[-1, 0], z_2d[-1, 1], color='red', s=200, marker='s', 
+                            label='End', edgecolors='black', linewidth=3, zorder=10, alpha=1.0)
+            
+            # Add colorbar
+            cbar = plt.colorbar(trajectory_scatter, ax=ax_latent, shrink=0.8)
+            cbar.set_label('Loss', rotation=270, labelpad=20)
+            
+            ax_latent.set_title('Latent Trajectory (Light=Encoder, Bright=Same Key)')
+            
+            # Create comprehensive legend with all data types
+            legend_elements = []
+            
+            # Add training samples to legend
+            for encoder in unique_encoders:
+                legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', 
+                                               markerfacecolor=encoder_colors[encoder], 
+                                               markersize=8, label=f'Training Encoder {encoder}'))
+            
+            # Add support and query samples to legend for the evaluated key only
+            if all_labels is not None:
+                support_labels = [l for l in all_labels if 'support' in l and evaluated_key in l]
+                query_labels = [l for l in all_labels if 'query' in l and evaluated_key in l]
+                
+                if support_labels:
+                    legend_elements.append(plt.Line2D([0], [0], marker='s', color='w', 
+                                                   markerfacecolor='blue', 
+                                                   markersize=8, label=f'Support Samples ({len(support_labels)})'))
+                
+                if query_labels:
+                    legend_elements.append(plt.Line2D([0], [0], marker='^', color='w', 
+                                                   markerfacecolor='red', 
+                                                   markersize=8, label=f'Query Samples ({len(query_labels)})'))
+            
+            # Add trajectory elements
+            legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', 
+                                           markerfacecolor='green', 
+                                           markersize=10, label='Trajectory Start'))
+            legend_elements.append(plt.Line2D([0], [0], marker='s', color='w', 
+                                           markerfacecolor='red', 
+                                           markersize=10, label='Trajectory End'))
+            
+            ax_latent.legend(handles=legend_elements, loc='upper right')
+            ax_latent.grid(True, alpha=0.3)
+        else:
+            print(f"DEBUG: No trajectory_tsne_2d available for trajectory plotting")
+            ax_latent.text(0.5, 0.5, 'No trajectory data', 
+                          ha='center', va='center', transform=ax_latent.transAxes)
+            ax_latent.set_title('Latent Trajectory')
+    else:
+        print(f"DEBUG: No z_vectors available for trajectory plotting")
+        print(f"DEBUG: z_vectors available: {z_vectors is not None}")
+        print(f"DEBUG: z_vectors length: {len(z_vectors) if z_vectors else 0}")
+        ax_latent.text(0.5, 0.5, 'No trajectory data', 
+                      ha='center', va='center', transform=ax_latent.transAxes)
+        ax_latent.set_title('Latent Trajectory')
+    
+    # Plot loss progression
+    if losses and len(losses) > 1:
+        ax_loss.plot(losses, 'b-o', linewidth=2, markersize=4)
+        ax_loss.set_title('Loss Progression')
+        ax_loss.set_xlabel('Step')
+        ax_loss.set_ylabel('Loss')
+        ax_loss.grid(True, alpha=0.3)
+    else:
+        ax_loss.text(0.5, 0.5, 'No loss data', 
+                    ha='center', va='center', transform=ax_loss.transAxes)
+        ax_loss.set_title('Loss Progression')
+    
+    # Use safe extraction to avoid scalar conversion errors
+    extract_reconstruction_grid = safe_extract_reconstruction_grid
+    
+    # Use stored reconstructions for different trajectory steps
+    trajectory_reconstructions = trajectory_info.get('poe_trajectory_reconstructions', {})
+    
+    # Plot individual encoder reconstructions (ROW 1, columns 1-3)
+    num_encoders = getattr(model, 'num_encoders', 1)
+    encoder_axes = [ax_enc_recon_0, ax_enc_recon_1, ax_enc_recon_2]
+    
+    for enc_idx in range(num_encoders):
+        if enc_idx < len(encoder_axes) and encoder_axes[enc_idx] is not None:
+            ax_enc = encoder_axes[enc_idx]
+            
+            # Try to get individual encoder reconstruction data
+            encoder_reconstructions = trajectory_info.get('individual_encoder_reconstructions', {})
+            print(f"DEBUG: encoder_reconstructions keys: {list(encoder_reconstructions.keys())}")
+            
+            if encoder_reconstructions and f'encoder_{enc_idx}' in encoder_reconstructions:
+                # Use stored encoder reconstruction
+                recon_data = encoder_reconstructions[f'encoder_{enc_idx}']
+                print(f"DEBUG: encoder_{enc_idx} recon_data keys: {list(recon_data.keys()) if recon_data else 'None'}")
+                
+                if recon_data is not None and 'shape_logits' in recon_data and 'grid_logits' in recon_data:
+                    shape_logits = recon_data['shape_logits']
+                    grid_logits = recon_data['grid_logits']
                     
                     # Extract reconstruction grid from stored data
                     recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
                     
                     if recon_grid is not None:
-                        # Plot reconstruction
-                        ax_poe_recon.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
-                        ax_poe_recon.set_title(f'PoE {display_label}\n{recon_rows}×{recon_cols}', fontsize=10)
-                        
-                        # === NEW: μ/σ text for PoE ===
-                        if trajectory_info.get('z_vectors'):
-                            poe_z_vec = trajectory_info['z_vectors'][0]  # initial PoE z
-                            poe_mu_mean = float(np.mean(poe_z_vec))
-                            poe_sigma_mean = float(np.std(poe_z_vec))
-                            ax_poe_recon.text(0.5, -0.12, f"μ={poe_mu_mean:.2f} σ={poe_sigma_mean:.2f}",
-                                              transform=ax_poe_recon.transAxes, ha='center', va='top', fontsize=8)
-                        
-                        # Calculate and plot error map
-                        if recon_rows == target_shape[0] and recon_cols == target_shape[1]:
-                            error_map = recon_grid.astype(float) - target_grid.astype(float)
-                            im_error = ax_poe_error.imshow(error_map, cmap='RdBu', vmin=-5, vmax=5, 
-                                                         interpolation='nearest', aspect='equal')
-                            ax_poe_error.set_title(f'PoE Error {display_label}', fontsize=10)
-                        else:
-                            ax_poe_error.text(0.5, 0.5, 'Size\nMismatch', ha='center', va='center', 
-                                            transform=ax_poe_error.transAxes, fontsize=8)
-                            ax_poe_error.set_title(f'PoE Error {display_label}', fontsize=10)
+                        ax_enc.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
+                        ax_enc.set_title(f'Encoder {enc_idx}\n{recon_rows}×{recon_cols}')
                     else:
-                        ax_poe_recon.text(0.5, 0.5, f'Invalid\nDims', ha='center', va='center', 
-                                        transform=ax_poe_recon.transAxes, fontsize=8)
-                        ax_poe_recon.set_title(f'PoE {display_label}', fontsize=10)
-                        ax_poe_error.text(0.5, 0.5, f'No Error', ha='center', va='center', 
-                                        transform=ax_poe_error.transAxes, fontsize=8)
-                        ax_poe_error.set_title(f'PoE Error {display_label}', fontsize=10)
+                        print(f"DEBUG: encoder_{enc_idx} reconstruction grid extraction failed")
+                        ax_enc.text(0.5, 0.5, f'Invalid\nDims', ha='center', va='center', 
+                                   transform=ax_enc.transAxes, fontsize=8)
+                        ax_enc.set_title(f'Encoder {enc_idx}')
                 else:
-                    ax_poe_recon.text(0.5, 0.5, f'PoE {display_label}\nNo Data', 
-                                    ha='center', va='center', transform=ax_poe_recon.transAxes)
-                    ax_poe_recon.set_title(f'PoE {display_label}', fontsize=10)
-                    ax_poe_error.text(0.5, 0.5, f'PoE {display_label}\nNo Error', 
-                                    ha='center', va='center', transform=ax_poe_error.transAxes)
-                    ax_poe_error.set_title(f'PoE Error {display_label}', fontsize=10)
-                
-                ax_poe_recon.axis('off')
-                ax_poe_error.axis('off')
-    else:
-        # Fallback message for missing PoE reconstruction data
-        for i in range(3):
-            ax_poe_recon = fig.add_subplot(gs[1, 5 + i])
-            ax_poe_error = fig.add_subplot(gs[2, 5 + i])
-            ax_poe_recon.text(0.5, 0.5, 'No PoE\nReconstruction\nData', 
-                            ha='center', va='center', transform=ax_poe_recon.transAxes)
-            ax_poe_recon.set_title(f'PoE Step {i}', fontsize=10)
-            ax_poe_recon.axis('off')
-            ax_poe_error.text(0.5, 0.5, 'No PoE\nError\nData', 
-                            ha='center', va='center', transform=ax_poe_error.transAxes)
-            ax_poe_error.set_title(f'PoE Error {i}', fontsize=10)
-            ax_poe_error.axis('off')
+                    print(f"DEBUG: encoder_{enc_idx} missing shape_logits or grid_logits")
+                    ax_enc.text(0.5, 0.5, f'Encoder {enc_idx}\nReconstruction\n(No Data)', 
+                               ha='center', va='center', transform=ax_enc.transAxes, fontsize=8)
+                    ax_enc.set_title(f'Encoder {enc_idx}')
+            else:
+                print(f"DEBUG: encoder_{enc_idx} not found in individual_encoder_reconstructions")
+                # Try to generate reconstruction from latent vectors
+                if z_vectors and len(z_vectors) > 0:
+                    # Use the final z vector for encoder reconstruction
+                    final_z = z_vectors[-1]
+                    recon_grid, recon_rows, recon_cols = generate_reconstruction_from_latent(
+                        final_z, model, device, input_seq, target_seq
+                    )
+                    if recon_grid is not None:
+                        ax_enc.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
+                        ax_enc.set_title(f'Encoder {enc_idx}\n{recon_rows}×{recon_cols}')
+                    else:
+                        ax_enc.text(0.5, 0.5, f'Encoder {enc_idx}\nReconstruction\n(Generated)', 
+                                   ha='center', va='center', transform=ax_enc.transAxes, fontsize=8)
+                        ax_enc.set_title(f'Encoder {enc_idx}')
+                else:
+                    ax_enc.text(0.5, 0.5, f'Encoder {enc_idx}\nReconstruction\n(Not Available)', 
+                               ha='center', va='center', transform=ax_enc.transAxes, fontsize=8)
+                    ax_enc.set_title(f'Encoder {enc_idx}')
+            
+            ax_enc.axis('off')
     
-    # Encoder Covariance Trace Analysis - showing uncertainty of each encoder
-    # ------------------------------------------------------------------
-    ax_influence = fig.add_subplot(gs[3, 1:7])  # span the central columns
-    ax_influence.set_title('Encoder Latent Uncertainty (Covariance Trace)', fontsize=11)
-    ax_influence.grid(alpha=0.3)
-
-    # Collect encoder mu and log_var data
-    encoder_mus = []
-    encoder_log_vars = []
-    enc_colors = plt.cm.Set1(np.linspace(0, 1, num_encoders))
+    # Plot POE reconstructions (ROW 1, columns 4-6)
+    poe_axes = [ax_poe_initial, ax_poe_mid, ax_poe_final]
+    poe_labels = ['Initial', 'Mid', 'Final']
+    
+    for i, (ax_poe, label) in enumerate(zip(poe_axes, poe_labels)):
+        if trajectory_reconstructions and f'{label.lower()}' in trajectory_reconstructions and trajectory_reconstructions[f'{label.lower()}'] is not None:
+            recon_data = trajectory_reconstructions[f'{label.lower()}']
+            print(f"DEBUG: POE {label.lower()} recon_data keys: {list(recon_data.keys()) if recon_data else 'None'}")
+            
+            shape_logits = recon_data['shape_logits']
+            grid_logits = recon_data['grid_logits']
+            
+            # Extract reconstruction grid from stored data
+            recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
+            
+            if recon_grid is not None:
+                ax_poe.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
+                ax_poe.set_title(f'POE {label}\n{recon_rows}×{recon_cols}')
+            else:
+                print(f"DEBUG: POE {label.lower()} reconstruction grid extraction failed")
+                ax_poe.text(0.5, 0.5, f'Invalid\nDims', ha='center', va='center', 
+                           transform=ax_poe.transAxes, fontsize=8)
+                ax_poe.set_title(f'POE {label}')
+        else:
+            print(f"DEBUG: POE {label.lower()} not found in trajectory_reconstructions")
+            # Try to generate reconstruction from latent vectors
+            if z_vectors and len(z_vectors) > 0:
+                # Select appropriate z vector based on label
+                if label == 'Initial':
+                    z_vector = z_vectors[0]
+                elif label == 'Mid':
+                    z_vector = z_vectors[len(z_vectors)//2]
+                else:  # Final
+                    z_vector = z_vectors[-1]
+                
+                recon_grid, recon_rows, recon_cols = generate_reconstruction_from_latent(
+                    z_vector, model, device, input_seq, target_seq
+                )
+                if recon_grid is not None:
+                    ax_poe.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
+                    ax_poe.set_title(f'POE {label}\n{recon_rows}×{recon_cols}')
+                else:
+                    ax_poe.text(0.5, 0.5, f'POE {label}\nReconstruction\n(Generated)', 
+                               ha='center', va='center', transform=ax_poe.transAxes, fontsize=8)
+                    ax_poe.set_title(f'POE {label}')
+            else:
+                ax_poe.text(0.5, 0.5, f'No Data\n{label}', ha='center', va='center', 
+                           transform=ax_poe.transAxes, fontsize=8)
+                ax_poe.set_title(f'POE {label}')
+        
+        ax_poe.axis('off')
+    
+    # Plot error maps (ROW 2)
+    plot_error_maps_row(ax_error_maps, trajectory_info, model, num_encoders)
+    
+    # Plot query reconstructions (ROW 3, columns 2-4)
+    query_encoder_axes = [ax_query_recon_0, ax_query_recon_1, ax_query_recon_2]
+    query_encoder_reconstructions = trajectory_info.get('query_encoder_reconstructions', {})
+    print(f"DEBUG: query_encoder_reconstructions keys: {list(query_encoder_reconstructions.keys())}")
     
     for enc_idx in range(num_encoders):
-        enc_traj = individual_trajectories.get(f'encoder_{enc_idx}', {})
-        enc_mu = enc_traj.get('mu')
-        enc_log_var = enc_traj.get('log_var')
-        
-        if enc_mu is not None and enc_log_var is not None:
-            # Convert to tensors and add batch dimension if needed
-            if not isinstance(enc_mu, torch.Tensor):
-                enc_mu = torch.tensor(enc_mu, dtype=torch.float32)
-            if not isinstance(enc_log_var, torch.Tensor):
-                enc_log_var = torch.tensor(enc_log_var, dtype=torch.float32)
+        if enc_idx < len(query_encoder_axes) and query_encoder_axes[enc_idx] is not None:
+            ax_query_enc = query_encoder_axes[enc_idx]
             
-            # Ensure proper shape (batch_size, latent_dim)
-            if enc_mu.dim() == 1:
-                enc_mu = enc_mu.unsqueeze(0)
-            if enc_log_var.dim() == 1:
-                enc_log_var = enc_log_var.unsqueeze(0)
+            # Try to get query encoder reconstruction data
+            if query_encoder_reconstructions and f'encoder_{enc_idx}' in query_encoder_reconstructions:
+                recon_data = query_encoder_reconstructions[f'encoder_{enc_idx}']
+                print(f"DEBUG: query encoder_{enc_idx} recon_data keys: {list(recon_data.keys()) if recon_data else 'None'}")
+                
+                if recon_data is not None and 'shape_logits' in recon_data and 'grid_logits' in recon_data:
+                    shape_logits = recon_data['shape_logits']
+                    grid_logits = recon_data['grid_logits']
+                    
+                    # Extract reconstruction grid from stored data
+                    recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
+                    
+                    if recon_grid is not None:
+                        ax_query_enc.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
+                        ax_query_enc.set_title(f'Query Encoder {enc_idx}\n{recon_rows}×{recon_cols}')
+                    else:
+                        print(f"DEBUG: query encoder_{enc_idx} reconstruction grid extraction failed")
+                        ax_query_enc.text(0.5, 0.5, f'Invalid\nDims', ha='center', va='center', 
+                                       transform=ax_query_enc.transAxes, fontsize=8)
+                        ax_query_enc.set_title(f'Query Encoder {enc_idx}')
+                else:
+                    print(f"DEBUG: query encoder_{enc_idx} missing shape_logits or grid_logits")
+                    ax_query_enc.text(0.5, 0.5, f'Query Encoder {enc_idx}\nReconstruction\n(No Data)', 
+                                   ha='center', va='center', transform=ax_query_enc.transAxes, fontsize=8)
+                    ax_query_enc.set_title(f'Query Encoder {enc_idx}')
+            else:
+                print(f"DEBUG: query encoder_{enc_idx} not found in query_encoder_reconstructions")
+                # Try to generate reconstruction from latent vectors
+                if z_vectors and len(z_vectors) > 0:
+                    # Use the final z vector for query encoder reconstruction
+                    final_z = z_vectors[-1]
+                    recon_grid, recon_rows, recon_cols = generate_reconstruction_from_latent(
+                        final_z, model, device, input_seq, target_seq
+                    )
+                    if recon_grid is not None:
+                        ax_query_enc.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
+                        ax_query_enc.set_title(f'Query Encoder {enc_idx}\n{recon_rows}×{recon_cols}')
+                    else:
+                        ax_query_enc.text(0.5, 0.5, f'Query Encoder {enc_idx}\nReconstruction\n(Generated)', 
+                                       ha='center', va='center', transform=ax_query_enc.transAxes, fontsize=8)
+                        ax_query_enc.set_title(f'Query Encoder {enc_idx}')
+                else:
+                    ax_query_enc.text(0.5, 0.5, f'Query Encoder {enc_idx}\nReconstruction\n(Not Available)', 
+                                   ha='center', va='center', transform=ax_query_enc.transAxes, fontsize=8)
+                    ax_query_enc.set_title(f'Query Encoder {enc_idx}')
             
-            encoder_mus.append(enc_mu)
-            encoder_log_vars.append(enc_log_var)
+            ax_query_enc.axis('off')
     
-    if len(encoder_mus) >= 2:  # Need at least 2 encoders for influence analysis
-        # Stack tensors: (num_encoders, batch_size, latent_dim)
-        mu_stack = torch.stack(encoder_mus)
-        log_var_stack = torch.stack(encoder_log_vars)
+    # Plot query POE reconstructions (ROW 3, columns 5-6)
+    query_poe_reconstructions = trajectory_info.get('query_poe_reconstructions', {})
+    print(f"DEBUG: query_poe_reconstructions keys: {list(query_poe_reconstructions.keys())}")
+    
+    # Initial POE reconstruction
+    if query_poe_reconstructions and 'initial' in query_poe_reconstructions:
+        recon_data = query_poe_reconstructions['initial']
+        print(f"DEBUG: query POE initial recon_data keys: {list(recon_data.keys()) if recon_data else 'None'}")
         
-        # Compute covariance traces (sum of variances)
-        covariance_traces = compute_encoder_covariance_traces(mu_stack, log_var_stack)
-        mean_traces = covariance_traces.mean(dim=1).cpu().numpy()  # Average over batch
+        shape_logits = recon_data['shape_logits']
+        grid_logits = recon_data['grid_logits']
         
-        # Create bar plot
-        encoder_labels = [f'Enc {i}' for i in range(len(mean_traces))]
-        bars = ax_influence.bar(encoder_labels, mean_traces, 
-                               color=[enc_colors[i] for i in range(len(mean_traces))],
-                               alpha=0.7, edgecolor='black')
+        recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
         
-        # Add value labels on bars
-        for i, (bar, val) in enumerate(zip(bars, mean_traces)):
-            ax_influence.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
-                             f'{val:.2f}', ha='center', va='bottom', fontsize=9)
-        
-        # Add average trace line
-        avg_trace = mean_traces.mean()
-        ax_influence.axhline(avg_trace, color='red', linestyle='--', alpha=0.8,
-                            label=f'Average Trace ({avg_trace:.2f})')
-        
-        ax_influence.set_ylabel('Covariance Trace (Σσᵢ²)')
-        ax_influence.set_xlabel('Encoder')
-        ax_influence.legend(fontsize=8)
-        ax_influence.set_ylim(0, max(mean_traces) * 1.1)
+        if recon_grid is not None:
+            ax_query_poe_initial.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
+            ax_query_poe_initial.set_title(f'Query POE Initial\n{recon_rows}×{recon_cols}')
+        else:
+            print(f"DEBUG: query POE initial reconstruction grid extraction failed")
+            ax_query_poe_initial.text(0.5, 0.5, 'Invalid\nDims', ha='center', va='center', 
+                                     transform=ax_query_poe_initial.transAxes, fontsize=8)
+            ax_query_poe_initial.set_title('Query POE Initial')
     else:
-        ax_influence.text(0.5, 0.5, 'Insufficient encoder data\nfor covariance analysis', 
-                         ha='center', va='center', transform=ax_influence.transAxes)
-
-    # ------------------------------------------------------------------
-    # tighten layout / save as before
-    plt.suptitle(f'Multi-Encoder Analysis: Individual vs PoE ({num_encoders} Encoders)\nEVALUATION DATA - Trajectory Reconstructions: {decoder_display}', fontsize=16, y=0.98)
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    plt.subplots_adjust(hspace=0.4, wspace=0.3)
-    plt.savefig(save_path, dpi=200, bbox_inches='tight')
+        print(f"DEBUG: query POE initial not found in query_poe_reconstructions")
+        # Try to generate reconstruction from latent vectors
+        if z_vectors and len(z_vectors) > 0:
+            # Use the initial z vector for query POE initial reconstruction
+            initial_z = z_vectors[0]
+            recon_grid, recon_rows, recon_cols = generate_reconstruction_from_latent(
+                initial_z, model, device, input_seq, target_seq
+            )
+            if recon_grid is not None:
+                ax_query_poe_initial.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
+                ax_query_poe_initial.set_title(f'Query POE Initial\n{recon_rows}×{recon_cols}')
+            else:
+                ax_query_poe_initial.text(0.5, 0.5, 'Query POE\nInitial\n(Generated)', 
+                                         ha='center', va='center', transform=ax_query_poe_initial.transAxes, fontsize=8)
+                ax_query_poe_initial.set_title('Query POE Initial')
+        else:
+            ax_query_poe_initial.text(0.5, 0.5, 'Query POE\nInitial\n(Not Available)', 
+                                     ha='center', va='center', transform=ax_query_poe_initial.transAxes, fontsize=8)
+            ax_query_poe_initial.set_title('Query POE Initial')
+    ax_query_poe_initial.axis('off')
+    
+    # Final POE reconstruction
+    if query_poe_reconstructions and 'final' in query_poe_reconstructions:
+        recon_data = query_poe_reconstructions['final']
+        print(f"DEBUG: query POE final recon_data keys: {list(recon_data.keys()) if recon_data else 'None'}")
+        
+        shape_logits = recon_data['shape_logits']
+        grid_logits = recon_data['grid_logits']
+        
+        recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
+        
+        if recon_grid is not None:
+            ax_query_poe_final.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
+            ax_query_poe_final.set_title(f'Query POE Final\n{recon_rows}×{recon_cols}')
+        else:
+            print(f"DEBUG: query POE final reconstruction grid extraction failed")
+            ax_query_poe_final.text(0.5, 0.5, 'Invalid\nDims', ha='center', va='center', 
+                                   transform=ax_query_poe_final.transAxes, fontsize=8)
+            ax_query_poe_final.set_title('Query POE Final')
+    else:
+        print(f"DEBUG: query POE final not found in query_poe_reconstructions")
+        # Try to generate reconstruction from latent vectors
+        if z_vectors and len(z_vectors) > 0:
+            # Use the final z vector for query POE final reconstruction
+            final_z = z_vectors[-1]
+            recon_grid, recon_rows, recon_cols = generate_reconstruction_from_latent(
+                final_z, model, device, input_seq, target_seq
+            )
+            if recon_grid is not None:
+                ax_query_poe_final.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
+                ax_query_poe_final.set_title(f'Query POE Final\n{recon_rows}×{recon_cols}')
+            else:
+                ax_query_poe_final.text(0.5, 0.5, 'Query POE\nFinal\n(Generated)', 
+                                       ha='center', va='center', transform=ax_query_poe_final.transAxes, fontsize=8)
+                ax_query_poe_final.set_title('Query POE Final')
+        else:
+            ax_query_poe_final.text(0.5, 0.5, 'Query POE\nFinal\n(Not Available)', 
+                                   ha='center', va='center', transform=ax_query_poe_final.transAxes, fontsize=8)
+            ax_query_poe_final.set_title('Query POE Final')
+    ax_query_poe_final.axis('off')
+    
+    # Plot query error maps (ROW 4)
+    plot_query_error_maps_row(ax_query_error_maps, trajectory_info, model, num_encoders)
+    
+    # Get decoder type for title (using global settings import)
+    eval_settings = settings.get_evaluation_settings()
+    decoder_type = eval_settings.get('trajectory_decoder_type', 'shared')
+    decoder_display = "Independent Decoders" if decoder_type == "independent" else "Shared Decoder"
+    
+    # Add data summary to title (filtered by evaluated key)
+    training_count = len([l for l in training_labels if 'training' in l]) if training_labels else 0
+    support_count = len([l for l in all_labels if 'support' in l and evaluated_key in l]) if all_labels else 0
+    query_count = len([l for l in all_labels if 'query' in l and evaluated_key in l]) if all_labels else 0
+    data_summary = f"Training: {training_count}, Support: {support_count}, Query: {query_count}"
+    
+    plt.suptitle(f'Multi-Encoder Trajectory Analysis\nEVALUATION DATA - Trajectory Reconstructions: {decoder_display}\nData: {data_summary}', fontsize=16)
+    plt.tight_layout()
+    
+    # Debug: Print the save path
+    print(f"DEBUG: visualize_multi_encoder_comprehensive_trajectory saving to: {save_path}")
+    print(f"DEBUG: Directory exists: {os.path.exists(os.path.dirname(save_path))}")
+    
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"✓ Saved optimized multi-encoder trajectory visualization to: {save_path}")
+    print(f"[ OK ] Saved optimized multi-encoder trajectory visualization to: {save_path}")
 
-def parse_args():
-    parser = argparse.ArgumentParser(description='Visualize model trajectory in latent space')
-    parser.add_argument('--run_dir', type=str, required=True,
-                      help='Directory containing the evaluation results')
-    parser.add_argument('--key', type=str, required=True,
-                      help='Problem key to visualize')
-    parser.add_argument('--sample_idx', type=int, default=None,
-                      help='Index of specific sample to visualize (default: all samples)')
-    parser.add_argument('--save_dir', type=str, default=None,
-                      help='Directory to save visualizations (defaults to run_dir)')
-    parser.add_argument('--epoch', type=int, default=None,
-                      help='Epoch to load model from (defaults to latest)')
-    return parser.parse_args()
+def create_error_map(target_grid, reconstruction_grid, title="Error Map"):
+    """
+    Create an error map showing the difference between target and reconstruction.
+    Returns the error map and a boolean indicating if it was successfully created.
+    """
+    try:
+        # Ensure grids have the same dimensions
+        if target_grid.shape == reconstruction_grid.shape:
+            # Calculate error as difference between target and reconstruction
+            error_map = target_grid - reconstruction_grid
+            
+            # Create the error map visualization
+            fig, ax = plt.subplots(1, 1, figsize=(3, 2.5))
+            
+            # Use a diverging colormap for error visualization (red for positive, blue for negative)
+            im = ax.imshow(error_map, cmap='RdBu_r', interpolation='nearest', aspect='equal', vmin=-1, vmax=1)
+            
+            # Add colorbar
+            cbar = plt.colorbar(im, ax=ax, shrink=0.8)
+            cbar.set_label('Error (Target - Recon)')
+            
+            ax.set_title(title, fontsize=8)
+            ax.axis('off')
+            
+            # Convert to image array
+            fig.canvas.draw()
+            img_array = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+            img_array = img_array.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+            
+            plt.close(fig)
+            return img_array, True
+        else:
+            # Dimensions don't match, return None
+            return None, False
+    except Exception as e:
+        print(f"Error creating error map: {e}")
+        return None, False
 
-def main():
+def plot_error_maps_row(ax_error_maps, trajectory_info, model, num_encoders):
     """
-    Example command: python LPN_reproduction\evaluate_trajectory.py --key pattern_task --run_dir runs_re_arc\test_2s
+    Plot error maps for all encoders and POE reconstructions in a single row.
     """
-    args = parse_args()
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
+    # Get input and target grids
+    input_seq = trajectory_info['input_sample']
+    target_seq = trajectory_info['target_sample']
+    input_grid, input_shape = extract_grid_from_sequence(input_seq)
+    target_grid, target_shape = extract_grid_from_sequence(target_seq)
     
-    # Set save directory
-    save_dir = args.save_dir if args.save_dir else args.run_dir
-    os.makedirs(save_dir, exist_ok=True)
-    
-    # Load model (we need it for reconstruction computation)
-    print("Loading model...")
-    model, _, _, _ = load_model(args.run_dir, epoch=args.epoch, device=device)
-    
-    # Load evaluation results
-    eval_file = os.path.join(args.run_dir, 'evaluation_results.pkl')
-    if not os.path.exists(eval_file):
-        raise FileNotFoundError(f"No evaluation results found in {args.run_dir}")
-    
-    with open(eval_file, 'rb') as f:
-        eval_results = pickle.load(f)
-    
-    print(f"\n=== EVALUATION RESULTS DIAGNOSTIC ===")
-    print(f"Available keys in evaluation results: {list(eval_results.keys())}")
-    
-    # Get trajectory information for the specified key
-    if args.key not in eval_results:
-        print(f"Available keys: {list(eval_results.keys())}")
-        raise KeyError(f"No results found for key {args.key}")
-    
-    key_results = eval_results[args.key]
-    print(f"\nAnalyzing results for key '{args.key}':")
-    print(f"Results structure: {list(key_results.keys())}")
-    
-    # FIX: Look for trajectory_info in the correct location
-    trajectory_info_list = []
-    
-    # Try different possible locations for trajectory_info
-    if 'metrics' in key_results and 'trajectory_info' in key_results['metrics']:
-        trajectory_info_list = key_results['metrics']['trajectory_info']
-        print(f"✓ Found trajectory info in metrics: {len(trajectory_info_list)} samples")
-    elif 'trajectory_info' in key_results:
-        trajectory_info_list = key_results['trajectory_info'] 
-        print(f"✓ Found trajectory info at root level: {len(trajectory_info_list)} samples")
-    else:
-        print(f"⚠ Trajectory info not found. Available in metrics: {list(key_results.get('metrics', {}).keys())}")
-        print(f"Available at root: {list(key_results.keys())}")
-    
-    if not trajectory_info_list:
-        print(f"\n⚠ WARNING: No trajectory information found for key {args.key}")
-        print("\nDebug information:")
-        if 'metrics' in key_results:
-            metrics = key_results['metrics']
-            print(f"Used latent optimization: {metrics.get('used_latent_optimization', 'Not specified')}")
-            print(f"Available metrics keys: {list(metrics.keys())}")
-        
-        # Check optimization settings (using global settings import)
-        latent_opt = settings.get_latent_optimization()
-        print(f"\nLatent optimization settings:")
-        print(f"Inference enabled: {latent_opt['inference']['enabled']}")
-        print(f"Inference steps: {latent_opt['inference']['num_steps']}")
+    # Check if dimensions match
+    if input_grid.shape != target_grid.shape:
+        ax_error_maps.text(0.5, 0.5, 'Input/Target dimensions\ndo not match', 
+                          ha='center', va='center', transform=ax_error_maps.transAxes, fontsize=10)
+        ax_error_maps.set_title('Error Maps (Dimension Mismatch)')
+        ax_error_maps.axis('off')
         return
     
-    # Print trajectory information structure
-    print_trajectory_info(trajectory_info_list)
+    # Get trajectory reconstructions
+    trajectory_reconstructions = trajectory_info.get('poe_trajectory_reconstructions', {})
+    individual_encoder_reconstructions = trajectory_info.get('individual_encoder_reconstructions', {})
     
-    if args.sample_idx is not None:
-        # Visualize specific sample
-        if args.sample_idx >= len(trajectory_info_list):
-            raise ValueError(f"Sample index {args.sample_idx} out of range (max: {len(trajectory_info_list)-1})")
-        
-        print(f"\nCreating visualization for sample {args.sample_idx}...")
-        
-        # Create input/target visualization
-        input_target_path = os.path.join(save_dir, f'input_target_{args.key}_sample{args.sample_idx}.png')
-        print("Creating input/target visualization...")
-        visualize_input_target(trajectory_info_list[args.sample_idx], input_target_path)
-        print(f"Input/target visualization saved to {input_target_path}")
-        
-        # Create comprehensive trajectory visualization
-        trajectory_path = os.path.join(save_dir, f'comprehensive_trajectory_{args.key}_sample{args.sample_idx}.png')
-        print("Creating comprehensive trajectory visualization...")
-        visualize_comprehensive_trajectory(trajectory_info_list[args.sample_idx], model, trajectory_path, args.run_dir, device)
-        print(f"Comprehensive trajectory visualization saved to {trajectory_path}")
-    else:
-        # Visualize all samples in one figure
-        print(f"\nCreating comprehensive visualization for all {len(trajectory_info_list)} samples...")
-        
-        all_samples_path = os.path.join(save_dir, f'all_samples_comprehensive_trajectory_{args.key}.png')
-        print("Creating comprehensive trajectory visualization for all samples...")
-        visualize_all_samples_comprehensive(trajectory_info_list, model, all_samples_path, args.run_dir, device)
-        print(f"All samples comprehensive trajectory visualization saved to {all_samples_path}")
+    # Calculate number of error maps to show
+    num_error_maps = num_encoders + 3  # encoders + initial/mid/final POE
+    
+    # Create subplots for error maps
+    if num_error_maps <= 8:  # Can fit in one row
+        cols = num_error_maps
+        rows = 1
+    else:  # Need multiple rows
+        cols = 8
+        rows = (num_error_maps + 7) // 8
+    
+    # Create GridSpec for error maps
+    gs_error = ax_error_maps.get_gridspec()
+    fig = ax_error_maps.figure
+    
+    # Remove the original ax_error_maps
+    ax_error_maps.remove()
+    
+    # Create subplots for error maps directly below their corresponding grids
+    error_axes = []
+    
+    # Create individual error map subplots positioned below each reconstruction
+    # Encoder error maps (positioned below encoder reconstructions in columns 1-3)
+    for enc_idx in range(min(num_encoders, 3)):
+        ax = fig.add_subplot(gs_error[2, 1 + enc_idx])  # Row 2, columns 1-3
+        error_axes.append(ax)
+    
+    # POE error maps (positioned below POE reconstructions in columns 4-6)
+    for poe_idx in range(3):  # initial, mid, final
+        if num_encoders + poe_idx < num_error_maps:
+            ax = fig.add_subplot(gs_error[2, 4 + poe_idx])  # Row 2, columns 4-6
+            error_axes.append(ax)
+    
+    # Plot encoder error maps
+    for enc_idx in range(num_encoders):
+        if enc_idx < len(error_axes):
+            ax = error_axes[enc_idx]
+            
+            # Try to get encoder reconstruction
+            if individual_encoder_reconstructions and f'encoder_{enc_idx}' in individual_encoder_reconstructions:
+                recon_data = individual_encoder_reconstructions[f'encoder_{enc_idx}']
+                shape_logits = recon_data['shape_logits']
+                grid_logits = recon_data['grid_logits']
+                
+                recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
+                
+                if recon_grid is not None and recon_grid.shape == target_grid.shape:
+                    # Create error map
+                    error_map = target_grid - recon_grid
+                    im = ax.imshow(error_map, cmap='RdBu_r', interpolation='nearest', aspect='equal', vmin=-1, vmax=1)
+                    ax.set_title(f'Encoder {enc_idx}\nError', fontsize=8)
+                    ax.axis('off')
+                else:
+                    ax.text(0.5, 0.5, f'Encoder {enc_idx}\nNo Data', 
+                           ha='center', va='center', transform=ax.transAxes, fontsize=8)
+                    ax.set_title(f'Encoder {enc_idx}')
+                    ax.axis('off')
+            else:
+                ax.text(0.5, 0.5, f'Encoder {enc_idx}\nNo Data', 
+                       ha='center', va='center', transform=ax.transAxes, fontsize=8)
+                ax.set_title(f'Encoder {enc_idx}')
+                ax.axis('off')
+    
+    # Plot POE error maps (initial, mid, final)
+    poe_labels = ['initial', 'mid', 'final']
+    for i, label in enumerate(poe_labels):
+        if num_encoders + i < len(error_axes):
+            ax = error_axes[num_encoders + i]
+            
+            if trajectory_reconstructions and label in trajectory_reconstructions:
+                recon_data = trajectory_reconstructions[label]
+                shape_logits = recon_data['shape_logits']
+                grid_logits = recon_data['grid_logits']
+                
+                recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
+                
+                if recon_grid is not None and recon_grid.shape == target_grid.shape:
+                    # Create error map
+                    error_map = target_grid - recon_grid
+                    im = ax.imshow(error_map, cmap='RdBu_r', interpolation='nearest', aspect='equal', vmin=-1, vmax=1)
+                    ax.set_title(f'POE {label.title()}\nError', fontsize=8)
+                    ax.axis('off')
+                else:
+                    ax.text(0.5, 0.5, f'POE {label.title()}\nNo Data', 
+                           ha='center', va='center', transform=ax.transAxes, fontsize=8)
+                    ax.set_title(f'POE {label.title()}')
+                    ax.axis('off')
+            else:
+                ax.text(0.5, 0.5, f'POE {label.title()}\nNo Data', 
+                       ha='center', va='center', transform=ax.transAxes, fontsize=8)
+                ax.set_title(f'POE {label.title()}')
+                ax.axis('off')
+    
+    # Add overall title
+    fig.text(0.5, 0.02, 'Error Maps (Target - Reconstruction)', ha='center', va='bottom', fontsize=12)
 
-if __name__ == "__main__":
-    main()
+def plot_query_error_maps_row(ax_query_error_maps, trajectory_info, model, num_encoders):
+    """
+    Plot error maps for query reconstructions (encoders and POE).
+    """
+    # Get query input and target grids
+    query_input = trajectory_info.get('query_input')
+    query_target = trajectory_info.get('query_target')
+    
+    if query_input is None or query_target is None:
+        ax_query_error_maps.text(0.5, 0.5, 'No query data available', 
+                                ha='center', va='center', transform=ax_query_error_maps.transAxes, fontsize=10)
+        ax_query_error_maps.set_title('Query Error Maps (No Data)')
+        ax_query_error_maps.axis('off')
+        return
+    
+    input_grid, input_shape = extract_grid_from_sequence(query_input)
+    target_grid, target_shape = extract_grid_from_sequence(query_target)
+    
+    # Check if dimensions match
+    if input_grid.shape != target_grid.shape:
+        ax_query_error_maps.text(0.5, 0.5, 'Query Input/Target dimensions\ndo not match', 
+                                ha='center', va='center', transform=ax_query_error_maps.transAxes, fontsize=10)
+        ax_query_error_maps.set_title('Query Error Maps (Dimension Mismatch)')
+        ax_query_error_maps.axis('off')
+        return
+    
+    # Get query reconstructions
+    query_encoder_reconstructions = trajectory_info.get('query_encoder_reconstructions', {})
+    query_poe_reconstructions = trajectory_info.get('query_poe_reconstructions', {})
+    
+    # Calculate number of error maps to show
+    num_error_maps = num_encoders + 2  # encoders + initial/final POE
+    
+    # Create subplots for error maps
+    if num_error_maps <= 8:  # Can fit in one row
+        cols = num_error_maps
+        rows = 1
+    else:  # Need multiple rows
+        cols = 8
+        rows = (num_error_maps + 7) // 8
+    
+    # Create GridSpec for error maps
+    gs_error = ax_query_error_maps.get_gridspec()
+    fig = ax_query_error_maps.figure
+    
+    # Remove the original ax_query_error_maps
+    ax_query_error_maps.remove()
+    
+    # Create subplots for query error maps directly below their corresponding grids
+    error_axes = []
+    
+    # Create individual error map subplots positioned below each query reconstruction
+    # Query encoder error maps (positioned below query encoder reconstructions in columns 2-4)
+    for enc_idx in range(min(num_encoders, 3)):
+        ax = fig.add_subplot(gs_error[4, 2 + enc_idx])  # Row 4, columns 2-4
+        error_axes.append(ax)
+    
+    # Query POE error maps (positioned below query POE reconstructions in columns 5-6)
+    for poe_idx in range(2):  # initial/final only for query
+        if num_encoders + poe_idx < num_error_maps:
+            ax = fig.add_subplot(gs_error[4, 5 + poe_idx])  # Row 4, columns 5-6
+            error_axes.append(ax)
+    
+    # Plot query encoder error maps
+    for enc_idx in range(num_encoders):
+        if enc_idx < len(error_axes):
+            ax = error_axes[enc_idx]
+            
+            # Try to get query encoder reconstruction
+            if query_encoder_reconstructions and f'encoder_{enc_idx}' in query_encoder_reconstructions:
+                recon_data = query_encoder_reconstructions[f'encoder_{enc_idx}']
+                shape_logits = recon_data['shape_logits']
+                grid_logits = recon_data['grid_logits']
+                
+                recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
+                
+                if recon_grid is not None and recon_grid.shape == target_grid.shape:
+                    # Create error map
+                    error_map = target_grid - recon_grid
+                    im = ax.imshow(error_map, cmap='RdBu_r', interpolation='nearest', aspect='equal', vmin=-1, vmax=1)
+                    ax.set_title(f'Query Encoder {enc_idx}\nError', fontsize=8)
+                    ax.axis('off')
+                else:
+                    ax.text(0.5, 0.5, f'Query Encoder {enc_idx}\nNo Data', 
+                           ha='center', va='center', transform=ax.transAxes, fontsize=8)
+                    ax.set_title(f'Query Encoder {enc_idx}')
+                    ax.axis('off')
+            else:
+                ax.text(0.5, 0.5, f'Query Encoder {enc_idx}\nNo Data', 
+                       ha='center', va='center', transform=ax.transAxes, fontsize=8)
+                ax.set_title(f'Query Encoder {enc_idx}')
+                ax.axis('off')
+    
+    # Plot query POE error maps (initial, final)
+    poe_labels = ['initial', 'final']
+    for i, label in enumerate(poe_labels):
+        if num_encoders + i < len(error_axes):
+            ax = error_axes[num_encoders + i]
+            
+            if query_poe_reconstructions and label in query_poe_reconstructions:
+                recon_data = query_poe_reconstructions[label]
+                shape_logits = recon_data['shape_logits']
+                grid_logits = recon_data['grid_logits']
+                
+                recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
+                
+                
+                if recon_grid is not None and recon_grid.shape == target_grid.shape:
+                    # Create error map
+                    error_map = target_grid - recon_grid
+                    im = ax.imshow(error_map, cmap='RdBu_r', interpolation='nearest', aspect='equal', vmin=-1, vmax=1)
+                    ax.set_title(f'Query POE {label.title()}\nError', fontsize=8)
+                    ax.axis('off')
+                else:
+                    ax.text(0.5, 0.5, f'Query POE {label.title()}\nNo Data', 
+                           ha='center', va='center', transform=ax.transAxes, fontsize=8)
+                    ax.set_title(f'Query POE {label.title()}')
+                    ax.axis('off')
+            else:
+                ax.text(0.5, 0.5, f'Query POE {label.title()}\nNo Data', 
+                       ha='center', va='center', transform=ax.transAxes, fontsize=8)
+                ax.set_title(f'Query POE {label.title()}')
+                ax.axis('off')
+    
+    # Add overall title
+    fig.text(0.5, 0.02, 'Query Error Maps (Target - Reconstruction)', ha='center', va='bottom', fontsize=12)
+
+def load_unified_latent_data_with_trajectory(run_dir, model, device, trajectory_info, eval_results=None):
+    """
+    Load ALL latent vectors (training + support + query + trajectory) and apply unified t-SNE.
+    This ensures all points are plotted using the same t-SNE transformation for consistency.
+    """
+    print("Loading unified latent data (training + support + query + trajectory)...")
+    
+    # Get number of encoders from model
+    num_encoders = getattr(model, 'num_encoders', 1)
+    
+    # Load results.pkl
+    results_file = os.path.join(run_dir, "results.pkl")
+    if not os.path.exists(results_file):
+        print("[ WARNING ] Warning: No results.pkl found")
+        return None, None, None, None, None, None, None
+    
+    with open(results_file, 'rb') as f:
+        results = pickle.load(f)
+    
+    # Get actual training data from results
+    input_sequences = results.get('input_sequences', None)
+    output_sequences = results.get('output_sequences', None)
+    key_list = results.get('key_list', None)
+    
+    if input_sequences is None:
+        print("[ WARNING ] Warning: No training sequences found in results")
+        return None, None, None, None, None, None, None
+    
+    print(f"[ OK ] Found training data: {len(input_sequences)} sequences with keys: {key_list[:5]}...")
+    
+    # Convert sequences to tensors and compute latent vectors using reparameterization trick
+    all_latents = []
+    all_labels = []
+    all_colors = []
+    
+    # Process training data
+    print("Computing training latent vectors...")
+    model.eval()
+    
+    # Get the evaluated key for highlighting
+    evaluated_key = trajectory_info.get('evaluated_key', '')
+    print(f"DEBUG: Evaluating key: {evaluated_key}")
+    
+    with torch.no_grad():
+        for i, (input_seq, output_seq, key) in enumerate(zip(input_sequences, output_sequences, key_list)):
+            # Convert to tensor
+            input_tensor = torch.tensor(input_seq, dtype=torch.float32, device=device).unsqueeze(0)
+            output_tensor = torch.tensor(output_seq, dtype=torch.float32, device=device).unsqueeze(0)
+            
+            # Get latent representation using reparameterization trick
+            if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
+                num_encoders = getattr(model, 'num_encoders', 1)
+                for enc_idx in range(num_encoders):
+                    try:
+                        # Try multi-encoder call first
+                        mu, log_var, _ = model.multi_encoder.encoders[enc_idx](input_tensor, output_tensor)
+                    except TypeError:
+                        # Fallback to single encoder call
+                        mu, log_var, _ = model.multi_encoder.encoders[enc_idx](input_tensor, output_tensor)
+                    z = model.reparameterize(mu, log_var)  # Use reparameterization trick
+                    
+                    z_numpy = z.cpu().numpy().flatten()
+                    all_latents.append(z_numpy)
+                    all_labels.append(f"training_enc_{enc_idx}_key_{key}")
+                    
+                    # Color based on whether this key matches the evaluated key
+                    if key == evaluated_key:
+                        all_colors.append(plt.cm.Set1(enc_idx))  # Bright color for matching key
+                    else:
+                        all_colors.append(plt.cm.tab10(enc_idx % 10))  # More visible color for other keys
+            else:
+                mu, log_var, _ = model.encoder(input_tensor, output_tensor)
+                z = model.reparameterize(mu, log_var)  # Use reparameterization trick
+                
+                z_numpy = z.cpu().numpy().flatten()
+                all_latents.append(z_numpy)
+                all_labels.append(f"training_enc_0_key_{key}")
+                
+                # Color based on whether this key matches the evaluated key
+                if key == evaluated_key:
+                    all_colors.append(plt.cm.Set1(0))  # Bright color for matching key
+                else:
+                    all_colors.append(plt.cm.tab10(0))  # More visible color for other keys
+    
+    print(f"DEBUG: Training data summary - Total: {len(all_latents)}, Matching key '{evaluated_key}': {sum(1 for key in key_list if key == evaluated_key)}")
+    
+    # Load support and query data from evaluation results
+    print("Loading support and query latent vectors from evaluation results...")
+    try:
+        # Use provided eval_results if available, otherwise load from file
+        if eval_results is not None:
+            print("DEBUG: Using provided evaluation results")
+            key_results = eval_results.get('key_results', {})
+            print(f"DEBUG: Using provided evaluation results for {len(key_results)} keys")
+        else:
+            # Load evaluation results from file
+            eval_results_file = os.path.join(run_dir, 'evaluation_results.pkl')
+            if os.path.exists(eval_results_file):
+                with open(eval_results_file, 'rb') as f:
+                    eval_results = pickle.load(f)
+                key_results = eval_results.get('key_results', {})
+                print(f"DEBUG: Found evaluation results for {len(key_results)} keys")
+            else:
+                print("DEBUG: No evaluation results file found")
+                key_results = {}
+        
+        # Load support and query latents for the evaluated key
+        if evaluated_key in key_results:
+            key_data = key_results[evaluated_key]
+            print(f"DEBUG: Found data for evaluated key '{evaluated_key}'")
+            
+            # Extract support and query latent data
+            support_query_latents = []
+            support_query_labels = []
+            support_query_colors = []
+            
+            # Process support samples
+            if 'evaluation_latent_data' in key_data:
+                eval_latent_data = key_data['evaluation_latent_data']
+                print(f"DEBUG: evaluation_latent_data keys: {list(eval_latent_data.keys())}")
+                
+                # Check if this is task optimization format (has support_latents/query_latents)
+                if 'support_latents' in eval_latent_data and 'query_latents' in eval_latent_data:
+                    print("DEBUG: Using task optimization format")
+                    
+                    # Extract support latents (task optimization format)
+                    support_latents = eval_latent_data['support_latents']
+                    print(f"DEBUG: Found {len(support_latents)} support latents (task optimization)")
+                    for i, latent in enumerate(support_latents):
+                        # Handle different data types (tensor, numpy array, or dict)
+                        if isinstance(latent, dict):
+                            # If it's a dict, look for common keys
+                            if 'latent_z' in latent:
+                                latent_data = latent['latent_z']
+                            elif 'z' in latent:
+                                latent_data = latent['z']
+                            elif 'latent' in latent:
+                                latent_data = latent['latent']
+                            else:
+                                print(f"DEBUG: Unexpected dict structure in support latent {i}: {list(latent.keys())}")
+                                continue
+                        else:
+                            latent_data = latent
+                        
+                        # Convert to numpy and flatten
+                        if hasattr(latent_data, 'cpu'):
+                            latent_numpy = latent_data.cpu().numpy().flatten()
+                        elif hasattr(latent_data, 'flatten'):
+                            latent_numpy = latent_data.flatten()
+                        else:
+                            latent_numpy = np.array(latent_data).flatten()
+                        
+                        support_query_latents.append(latent_numpy)
+                        support_query_labels.append(f"support_{evaluated_key}")
+                        support_query_colors.append('blue')
+                    
+                    # Extract query latents (task optimization format)
+                    query_latents = eval_latent_data['query_latents']
+                    print(f"DEBUG: Found {len(query_latents)} query latents (task optimization)")
+                    for i, latent in enumerate(query_latents):
+                        # Handle different data types (tensor, numpy array, or dict)
+                        if isinstance(latent, dict):
+                            # If it's a dict, look for common keys
+                            if 'latent_z' in latent:
+                                latent_data = latent['latent_z']
+                            elif 'z' in latent:
+                                latent_data = latent['z']
+                            elif 'latent' in latent:
+                                latent_data = latent['latent']
+                            else:
+                                print(f"DEBUG: Unexpected dict structure in query latent {i}: {list(latent.keys())}")
+                                continue
+                        else:
+                            latent_data = latent
+                        
+                        # Convert to numpy and flatten
+                        if hasattr(latent_data, 'cpu'):
+                            latent_numpy = latent_data.cpu().numpy().flatten()
+                        elif hasattr(latent_data, 'flatten'):
+                            latent_numpy = latent_data.flatten()
+                        else:
+                            latent_numpy = np.array(latent_data).flatten()
+                        
+                        support_query_latents.append(latent_numpy)
+                        support_query_labels.append(f"query_{evaluated_key}")
+                        support_query_colors.append('red')
+                
+                # Process support samples (regular evaluation format)
+                elif 'support' in eval_latent_data:
+                    support_data = eval_latent_data['support']
+                    print(f"DEBUG: Processing support data with keys: {list(support_data.keys())}")
+                    
+                    # Extract PoE support latents
+                    if 'poe' in support_data and 'latent_zs' in support_data['poe']:
+                        poe_support_latents = support_data['poe']['latent_zs']
+                        print(f"DEBUG: Found {len(poe_support_latents)} PoE support latents")
+                        
+                        for i, latent in enumerate(poe_support_latents):
+                            if hasattr(latent, 'cpu'):
+                                latent_numpy = latent.cpu().numpy().flatten()
+                            else:
+                                latent_numpy = latent.flatten()
+                            support_query_latents.append(latent_numpy)
+                            support_query_labels.append(f"support_{evaluated_key}")
+                            support_query_colors.append('blue')
+                    
+                    # Extract individual encoder support latents
+                    for enc_idx in range(num_encoders):
+                        enc_key = f'encoder_{enc_idx}'
+                        if enc_key in support_data and 'latent_zs' in support_data[enc_key]:
+                            enc_support_latents = support_data[enc_key]['latent_zs']
+                            print(f"DEBUG: Found {len(enc_support_latents)} {enc_key} support latents")
+                            
+                            for i, latent in enumerate(enc_support_latents):
+                                if hasattr(latent, 'cpu'):
+                                    latent_numpy = latent.cpu().numpy().flatten()
+                                else:
+                                    latent_numpy = latent.flatten()
+                                support_query_latents.append(latent_numpy)
+                                support_query_labels.append(f"support_{evaluated_key}")
+                                support_query_colors.append('blue')
+                
+                # Process query samples
+                if 'query' in eval_latent_data:
+                    query_data = eval_latent_data['query']
+                    print(f"DEBUG: Processing query data with keys: {list(query_data.keys())}")
+                    
+                    # Extract PoE query latents
+                    if 'poe' in query_data and 'latent_zs' in query_data['poe']:
+                        poe_query_latents = query_data['poe']['latent_zs']
+                        print(f"DEBUG: Found {len(poe_query_latents)} PoE query latents")
+                        
+                        for i, latent in enumerate(poe_query_latents):
+                            if hasattr(latent, 'cpu'):
+                                latent_numpy = latent.cpu().numpy().flatten()
+                            else:
+                                latent_numpy = latent.flatten()
+                            support_query_latents.append(latent_numpy)
+                            support_query_labels.append(f"query_{evaluated_key}")
+                            support_query_colors.append('red')
+                    
+                    # Extract individual encoder query latents
+                    for enc_idx in range(num_encoders):
+                        enc_key = f'encoder_{enc_idx}'
+                        if enc_key in query_data and 'latent_zs' in query_data[enc_key]:
+                            enc_query_latents = query_data[enc_key]['latent_zs']
+                            print(f"DEBUG: Found {len(enc_query_latents)} {enc_key} query latents")
+                            
+                            for i, latent in enumerate(enc_query_latents):
+                                if hasattr(latent, 'cpu'):
+                                    latent_numpy = latent.cpu().numpy().flatten()
+                                else:
+                                    latent_numpy = latent.flatten()
+                                support_query_latents.append(latent_numpy)
+                                support_query_labels.append(f"query_{evaluated_key}")
+                                support_query_colors.append('red')
+            
+            # Add support/query latents to the unified dataset
+            if support_query_latents:
+                print(f"DEBUG: Adding {len(support_query_latents)} support/query samples from evaluation results")
+                all_latents.extend(support_query_latents)
+                all_labels.extend(support_query_labels)
+                all_colors.extend(support_query_colors)
+                print(f"[ OK ] Added {len(support_query_latents)} support/query samples from evaluation results")
+            else:
+                print(f"[ WARNING ] No support/query latents found for key '{evaluated_key}'")
+        else:
+            print(f"[ WARNING ] No evaluation data found for key '{evaluated_key}'")
+    except Exception as e:
+        print(f"[ WARNING ] Warning: Could not load support/query data from evaluation results: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    # Add trajectory points to unified dataset
+    print("Adding trajectory latent vectors...")
+    z_vectors = trajectory_info.get('z_vectors', [])
+    if z_vectors:
+        print(f"DEBUG: Processing {len(z_vectors)} trajectory vectors")
+        for i, z_vec in enumerate(z_vectors):
+            print(f"DEBUG: Trajectory vector {i} type: {type(z_vec)}, shape: {z_vec.shape if hasattr(z_vec, 'shape') else 'no shape'}")
+            # Handle both tensor and numpy array cases
+            if hasattr(z_vec, 'cpu'):
+                # Tensor case
+                z_numpy = z_vec.cpu().numpy().flatten()
+                print(f"DEBUG: Converted tensor to numpy, shape: {z_numpy.shape}")
+            else:
+                # Numpy array case
+                z_numpy = z_vec.flatten()
+                print(f"DEBUG: Flattened numpy array, shape: {z_numpy.shape}")
+            all_latents.append(z_numpy)
+            all_labels.append(f"trajectory_step_{i}")
+            all_colors.append('red')  # Red for trajectory points
+        print(f"[ OK ] Added {len(z_vectors)} trajectory points")
+    
+    # Convert to numpy arrays - ensure all vectors have the same shape and are numeric
+    print(f"DEBUG: Processing {len(all_latents)} latent vectors...")
+    
+    # First, ensure all latents are proper numpy arrays with numeric data
+    cleaned_latents = []
+    print(f"DEBUG: Starting to process {len(all_latents)} latent vectors...")
+    
+    for i, latent in enumerate(all_latents):
+        
+        try:
+            # Convert to numpy array if it isn't already
+            if not isinstance(latent, np.ndarray):
+                print(f"DEBUG: Converting latent {i} to numpy array")
+                latent = np.array(latent)
+                print(f"DEBUG: Converted latent {i} shape: {latent.shape}, dtype: {latent.dtype}")
+            
+            # Ensure it's numeric
+            if not np.issubdtype(latent.dtype, np.number):
+                print(f"DEBUG: Latent {i} has non-numeric dtype: {latent.dtype}")
+                # Try to convert to float
+                latent = latent.astype(np.float32)
+                print(f"DEBUG: Converted latent {i} to float32")
+            
+            # Ensure it's 1D
+            if latent.ndim > 1:
+                print(f"DEBUG: Flattening latent {i} from {latent.shape}")
+                latent = latent.flatten()
+                print(f"DEBUG: Flattened latent {i} to shape: {latent.shape}")
+            
+            cleaned_latents.append(latent)
+            
+        except Exception as e:
+            print(f"DEBUG: Error processing latent {i}: {e}")
+            print(f"DEBUG: Latent {i} type: {type(latent)}")
+            print(f"DEBUG: Latent {i} content: {latent}")
+            print(f"DEBUG: Latent {i} hasattr shape: {hasattr(latent, 'shape')}")
+            print(f"DEBUG: Latent {i} hasattr dtype: {hasattr(latent, 'dtype')}")
+            # Skip problematic latents
+            continue
+    
+    if not cleaned_latents:
+        print("ERROR: No valid latent vectors found!")
+        return None, None, None, None, None, None, None
+    
+    # Check shapes and find the most common shape
+    shapes = [latent.shape for latent in cleaned_latents]
+    shape_counts = {}
+    for shape in shapes:
+        shape_counts[shape] = shape_counts.get(shape, 0) + 1
+    
+    print(f"DEBUG: Shape distribution: {shape_counts}")
+    
+    # Use the most common shape as target
+    target_shape = max(shape_counts.items(), key=lambda x: x[1])[0]
+    print(f"DEBUG: Using target shape: {target_shape}")
+    
+    # Ensure all vectors have the target shape
+    normalized_latents = []
+    for i, latent in enumerate(cleaned_latents):
+        if latent.shape != target_shape:
+            print(f"DEBUG: Reshaping latent {i} from {latent.shape} to {target_shape}")
+            # Try to reshape or pad/truncate to match target shape
+            if len(latent.shape) == 1 and len(target_shape) == 1:
+                if latent.shape[0] > target_shape[0]:
+                    # Truncate
+                    latent = latent[:target_shape[0]]
+                elif latent.shape[0] < target_shape[0]:
+                    # Pad with zeros
+                    padded = np.zeros(target_shape[0], dtype=latent.dtype)
+                    padded[:latent.shape[0]] = latent
+                    latent = padded
+            else:
+                # For multi-dimensional, flatten and reshape
+                flattened = latent.flatten()
+                if len(flattened) > np.prod(target_shape):
+                    flattened = flattened[:int(np.prod(target_shape))]
+                elif len(flattened) < np.prod(target_shape):
+                    padded = np.zeros(int(np.prod(target_shape)), dtype=latent.dtype)
+                    padded[:len(flattened)] = flattened
+                    flattened = padded
+                latent = flattened.reshape(target_shape)
+        normalized_latents.append(latent)
+    
+    # Convert to numpy array with explicit dtype
+    print(f"DEBUG: About to create numpy array from {len(normalized_latents)} normalized latents")
+    print(f"DEBUG: First few normalized latents types: {[type(x) for x in normalized_latents[:3]]}")
+    print(f"DEBUG: First few normalized latents shapes: {[x.shape for x in normalized_latents[:3]]}")
+    print(f"DEBUG: First few normalized latents dtypes: {[x.dtype for x in normalized_latents[:3]]}")
+    
+    try:
+        all_latents = np.array(normalized_latents, dtype=np.float32)
+        print(f"DEBUG: Successfully created numpy array with shape: {all_latents.shape}")
+    except Exception as e:
+        print(f"DEBUG: Error creating numpy array: {e}")
+        print(f"DEBUG: Trying to identify problematic elements...")
+        
+        # Try to identify which element is causing the problem
+        for i, latent in enumerate(normalized_latents):
+            try:
+                test_array = np.array([latent], dtype=np.float32)
+                print(f"DEBUG: Element {i} is OK")
+            except Exception as e2:
+                print(f"DEBUG: Element {i} is problematic: {e2}")
+                print(f"DEBUG: Element {i} type: {type(latent)}")
+                print(f"DEBUG: Element {i} shape: {latent.shape if hasattr(latent, 'shape') else 'no shape'}")
+                print(f"DEBUG: Element {i} content: {latent}")
+        
+        # Fallback: try without dtype specification
+        try:
+            all_latents = np.array(normalized_latents)
+            print(f"DEBUG: Created array without dtype specification: {all_latents.shape}")
+        except Exception as e3:
+            print(f"DEBUG: Even fallback failed: {e3}")
+            return None, None, None, None, None, None, None
+    
+    # Ensure colors and labels lists match the cleaned latents
+    if len(all_colors) != len(normalized_latents):
+        print(f"DEBUG: Color list length ({len(all_colors)}) doesn't match latents length ({len(normalized_latents)})")
+        # Truncate or extend colors list to match
+        if len(all_colors) > len(normalized_latents):
+            all_colors = all_colors[:len(normalized_latents)]
+        else:
+            # Extend with default colors
+            default_color = plt.cm.tab10(0)
+            while len(all_colors) < len(normalized_latents):
+                all_colors.append(default_color)
+    
+    if len(all_labels) != len(normalized_latents):
+        print(f"DEBUG: Labels list length ({len(all_labels)}) doesn't match latents length ({len(normalized_latents)})")
+        # Truncate or extend labels list to match
+        if len(all_labels) > len(normalized_latents):
+            all_labels = all_labels[:len(normalized_latents)]
+        else:
+            # Extend with default labels
+            while len(all_labels) < len(normalized_latents):
+                all_labels.append("unknown")
+    
+    print(f"DEBUG: About to create colors array from {len(all_colors)} colors")
+    print(f"DEBUG: First few colors types: {[type(x) for x in all_colors[:3]]}")
+    print(f"DEBUG: First few colors: {all_colors[:3]}")
+    
+    # Convert color tuples to simple color names for numpy compatibility
+    simple_colors = []
+    for color in all_colors:
+        if isinstance(color, tuple):
+            # Convert matplotlib color tuple to simple color name
+            if len(color) == 4:  # RGBA
+                r, g, b, a = color
+                if r > 0.8 and g > 0.8 and b > 0.8:
+                    simple_colors.append('gray')
+                elif r > 0.5 and g > 0.5 and b < 0.5:
+                    simple_colors.append('blue')
+                elif r > 0.5 and g < 0.5 and b > 0.5:
+                    simple_colors.append('red')
+                elif r < 0.5 and g > 0.5 and b > 0.5:
+                    simple_colors.append('green')
+                else:
+                    simple_colors.append('black')
+            else:
+                simple_colors.append('gray')
+        else:
+            simple_colors.append(str(color))
+    
+    try:
+        all_colors = np.array(simple_colors)
+        print(f"DEBUG: Successfully created colors array with shape: {all_colors.shape}")
+    except Exception as e:
+        print(f"DEBUG: Error creating colors array: {e}")
+        # Fallback: create simple colors array
+        all_colors = np.array(['gray'] * len(normalized_latents))
+        print(f"DEBUG: Created fallback colors array: {all_colors.shape}")
+    
+    print(f"[ OK ] Unified dataset: {len(all_latents)} total samples")
+    print(f"  - Training: {len([l for l in all_labels if 'training' in l])}")
+    print(f"  - Support: {len([l for l in all_labels if 'support' in l])}")
+    print(f"  - Query: {len([l for l in all_labels if 'query' in l])}")
+    print(f"  - Trajectory: {len([l for l in all_labels if 'trajectory' in l])}")
+    
+    # Apply unified t-SNE to ALL latent vectors together
+    print("Applying unified t-SNE to all latent vectors...")
+    from sklearn.manifold import TSNE
+    from sklearn.preprocessing import StandardScaler
+    
+    
+    
+    try:
+        scaler = StandardScaler()
+        latents_normalized = scaler.fit_transform(all_latents)
+        
+        print(f"DEBUG: Normalized latents shape: {latents_normalized.shape}")
+        print(f"DEBUG: Normalized latents min/max: {latents_normalized.min():.4f}/{latents_normalized.max():.4f}")
+        
+        tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(all_latents)-1), n_iter=1000)
+        tsne_2d = tsne.fit_transform(latents_normalized)
+        
+        print(f"DEBUG: t-SNE result shape: {tsne_2d.shape}")
+    except Exception as e:
+        print(f"DEBUG: Error in t-SNE processing: {e}")
+        print(f"DEBUG: all_latents contains NaN: {np.isnan(all_latents).any()}")
+        print(f"DEBUG: all_latents contains Inf: {np.isinf(all_latents).any()}")
+        return None, None, None, None, None, None, None
+    
+    # Split back into original data and trajectory data
+    training_indices = [i for i, label in enumerate(all_labels) if 'training' in label]
+    support_indices = [i for i, label in enumerate(all_labels) if 'support' in label]
+    query_indices = [i for i, label in enumerate(all_labels) if 'query' in label]
+    trajectory_indices = [i for i, label in enumerate(all_labels) if 'trajectory' in label]
+    
+    # Return training data and trajectory data separately
+    training_latents = all_latents[training_indices] if training_indices else None
+    training_tsne_2d = tsne_2d[training_indices] if training_indices else None
+    training_labels = [all_labels[i] for i in training_indices] if training_indices else []
+    training_colors = [all_colors[i] for i in training_indices] if training_indices else []
+    
+    trajectory_tsne_2d = tsne_2d[trajectory_indices] if trajectory_indices else None
+    
+    print(f"[ OK ] Unified t-SNE applied successfully")
+    print(f"  - Training samples: {len(training_indices)}")
+    print(f"  - Support samples: {len(support_indices)}")
+    print(f"  - Query samples: {len(query_indices)}")
+    print(f"  - Trajectory points: {len(trajectory_indices)}")
+    
+    return training_latents, training_tsne_2d, training_labels, training_colors, trajectory_tsne_2d, all_labels, tsne_2d

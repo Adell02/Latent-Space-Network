@@ -33,7 +33,7 @@
     "inference": {
       "enabled": true,
       "num_steps": 2,
-      "learning_rate": 1e-8
+      "learning_rate": 0.1
     },
     "method": "gradient",
     "evolutionary": {
@@ -84,7 +84,15 @@
     "optimizer_weight_decay": 5e-03,
     "beta": 0.01,
     "use_mixed_precision": true,
-    "save_checkpoint_interval": 1,
+    "save_checkpoint_interval": 5,
+    "infinite_dataloader": true,
+    "batches_per_epoch": 10,
+    "return_task_keys": true,
+    "cross_pair_loss": {
+      "enabled": true,
+      "num_pairs": 4,
+      "description": "Cross-pair reconstruction loss for generalization"
+    },
     "learning_rate_scheduler": {
       "type": "none",
       "warmup_epochs": 20,
@@ -107,6 +115,17 @@
       "warmup_epochs": 0
     }
   },
+  "enhanced_training": {
+    "use_cyclical_beta": true,
+    "beta_cycle_length": 6,
+    "use_free_bits": true,
+    "free_bits_delta": 0.07,
+    "use_dynamic_lambda": false,
+    "lambda_high_multiplier": 6.0,
+    "use_contrastive_margin": false,
+    "margin_tau": 2.0,
+    "debug_kl_metrics": false
+  },
   "wandb_settings": {
     "enabled": true,
     "project_name": "sweep-LPN-specialist",
@@ -127,25 +146,15 @@
       "anti_batch_size": 0,
       "anti_batch_description": "Proportion (0-1) of anti-samples (from other encoders) mixed into each encoder's training batch to encourage specialization",
       "anti_batch_lambda": 0.01,
-      "anti_batch_lambda_description": "Weight for KL regularization on anti-samples (should be ≈ β)",
+      "anti_batch_lambda_description": "Weight for KL regularization on anti-samples (should be ~= beta)",
       "beta_warmup_epochs": 10,
-      "beta_warmup_description": "Epochs to warm up β from 0 to target value to prevent posterior collapse",
+      "beta_warmup_description": "Epochs to warm up beta from 0 to target value to prevent posterior collapse",
       "cross_pair_loss": {
         "enabled": true,
         "num_pairs": 4,
         "description": "Cross-pair reconstruction loss: L_cross = (1/|P|) * sum_{i≠j} ||g_θ(x_j, z_i) - y_j||_1. Forces latent codes to be reusable across different inputs."
-      },
-      "enhanced_training": {
-        "use_cyclical_beta": true,
-        "beta_cycle_length": 6,
-        "use_free_bits": true,
-        "free_bits_delta": 0.07,
-        "use_dynamic_lambda": false,
-        "lambda_high_multiplier": 6.0,
-        "use_contrastive_margin": false,
-        "margin_tau": 2.0,
-        "debug_kl_metrics": false
-        }
+      }
+
     },
     "phase_b": {
       "epochs": 50,

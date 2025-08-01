@@ -256,7 +256,7 @@ def extract_multi_encoder_metrics(results):
             }
             processed_results['aggregated_epoch_metrics'].append(aggregated_metrics)
     
-    print(f"✓ Multi-encoder metrics processed: {num_encoders} encoders, {num_epochs} epochs")
+    print(f"[ OK ] Multi-encoder metrics processed: {num_encoders} encoders, {num_epochs} epochs")
     return processed_results
 
 def plot_multi_encoder_training_losses(results, save_dir=None):
@@ -379,9 +379,9 @@ def load_evaluation_latent_data(run_dir, return_all_components=False):
                     'encoding_info': encoded_data.get('encoding_info', {})
                 }
                 
-                print(f"✓ Successfully loaded all latent components:")
-                print(f"  - Means (μ): {len(all_components['latent_mus'])} samples")
-                print(f"  - Log-vars (log σ²): {len(all_components['latent_log_vars'])} samples")
+                print(f"[ OK ] Successfully loaded all latent components:")
+                print(f"  - Means (mu): {len(all_components['latent_mus'])} samples")
+                print(f"  - Log-vars (log sigma^2): {len(all_components['latent_log_vars'])} samples")
                 print(f"  - Sampled Z: {len(all_components['latent_zs'])} samples")
                 print(f"  - Encoding device: {all_components['encoding_info'].get('device', 'Unknown')}")
                 
@@ -390,7 +390,7 @@ def load_evaluation_latent_data(run_dir, return_all_components=False):
                 latent_mus = encoded_data['latent_mus']
                 encoding_info = encoded_data.get('encoding_info', {})
                 
-                print(f"✓ Successfully loaded {len(latent_mus)} encoded training latent vectors")
+                print(f"[ OK ] Successfully loaded {len(latent_mus)} encoded training latent vectors")
                 print(f"  - Total training samples: {encoding_info.get('total_training_samples', 'Unknown')}")
                 print(f"  - Encoded samples: {encoding_info.get('encoded_samples', len(latent_mus))}")
                 print(f"  - Encoding device: {encoding_info.get('device', 'Unknown')}")
@@ -398,7 +398,7 @@ def load_evaluation_latent_data(run_dir, return_all_components=False):
                 return latent_mus
             
         except Exception as e:
-            print(f"⚠ Error loading encoded training latents: {e}")
+            print(f"[ WARNING ] Error loading encoded training latents: {e}")
     
     # Fallback: try to load from evaluation results
     eval_file = os.path.join(run_dir, 'evaluation_results.pkl')
@@ -435,7 +435,7 @@ def load_evaluation_latent_data(run_dir, return_all_components=False):
                             'encoding_info': embedded_data.get('encoding_info', {})
                         }
                         
-                        print(f"✓ Found all latent components in evaluation results for key '{key}'")
+                        print(f"[ OK ] Found all latent components in evaluation results for key '{key}'")
                         print(f"  - Means: {len(all_components['latent_mus'])} samples")
                         print(f"  - Log-vars: {len(all_components['latent_log_vars'])} samples")
                         print(f"  - Sampled Z: {len(all_components['latent_zs'])} samples")
@@ -448,18 +448,18 @@ def load_evaluation_latent_data(run_dir, return_all_components=False):
                         
                         encoding_info = embedded_data.get('encoding_info', {})
                         
-                        print(f"✓ Found {len(latent_mus)} training latent vectors in evaluation results for key '{key}'")
+                        print(f"[ OK ] Found {len(latent_mus)} training latent vectors in evaluation results for key '{key}'")
                         print(f"  - Total training samples: {encoding_info.get('total_training_samples', 'Unknown')}")
                         print(f"  - Encoded samples: {encoding_info.get('encoded_samples', len(latent_mus))}")
                         
                         return latent_mus
             
-            print("⚠ No encoded training latents found in evaluation results")
+            print("[ WARNING ] No encoded training latents found in evaluation results")
             
         except Exception as e:
-            print(f"⚠ Error loading evaluation results: {e}")
+            print(f"[ WARNING ] Error loading evaluation results: {e}")
     
-    print("⚠ Warning: No encoded training latent data found.")
+    print("[ WARNING ] Warning: No encoded training latent data found.")
     print("  This suggests evaluation hasn't been run with the updated code.")
     print("  Please run evaluation to generate encoded training latents.")
     return None
@@ -480,7 +480,7 @@ def load_legacy_latent_data(run_dir):
         return None
     
     try:
-        print("⚠ DEPRECATION WARNING: Loading latents from legacy training results.pkl")
+        print("[ WARNING ] DEPRECATION WARNING: Loading latents from legacy training results.pkl")
         print("  Using legacy training data for visualization.")
         
         with open(results_file, 'rb') as f:
@@ -529,11 +529,11 @@ def load_legacy_latent_data(run_dir):
         if all_mus is None or len(all_mus) < 2:
             return None
         
-        print(f"✓ Loaded {len(all_mus)} legacy training latent vectors")
+        print(f"[ OK ] Loaded {len(all_mus)} legacy training latent vectors")
         return all_mus
         
     except Exception as e:
-        print(f"⚠ Error loading legacy training results: {e}")
+        print(f"[ WARNING ] Error loading legacy training results: {e}")
         return None
 
 def load_training_latent_data(run_dir):
@@ -563,7 +563,7 @@ def load_training_latent_data(run_dir):
                             # Flatten to 2D array (samples x latent_dim)
                             if latent_zs.ndim > 2:
                                 latent_zs = latent_zs.reshape(latent_zs.shape[0], -1)
-                            print(f"✓ Loaded {latent_zs.shape[0]} training latent vectors for background visualization")
+                            print(f"[ OK ] Loaded {latent_zs.shape[0]} training latent vectors for background visualization")
                             return latent_zs
         
         # Fallback: Try to load from training results
@@ -589,7 +589,7 @@ def load_training_latent_data(run_dir):
                             latent_array = np.array(latent_data)
                             if latent_array.ndim > 2:
                                 latent_array = latent_array.reshape(latent_array.shape[0], -1)
-                            print(f"✓ Loaded {latent_array.shape[0]} training latent vectors from {desc}")
+                            print(f"[ OK ] Loaded {latent_array.shape[0]} training latent vectors from {desc}")
                             return latent_array
                         except:
                             continue
@@ -603,14 +603,14 @@ def load_training_latent_data(run_dir):
                                     if isinstance(latent_zs, np.ndarray) and len(latent_zs) > 0:
                                         if latent_zs.ndim > 2:
                                             latent_zs = latent_zs.reshape(latent_zs.shape[0], -1)
-                                        print(f"✓ Loaded {latent_zs.shape[0]} training latent vectors from {desc}")
+                                        print(f"[ OK ] Loaded {latent_zs.shape[0]} training latent vectors from {desc}")
                                         return latent_zs
         
-        print("⚠ Warning: No training latent data found for background visualization")
+        print("[ WARNING ] Warning: No training latent data found for background visualization")
         return None
         
     except Exception as e:
-        print(f"⚠ Warning: Error loading training latent data: {e}")
+        print(f"[ WARNING ] Warning: Error loading training latent data: {e}")
         return None
 
 ##############################
@@ -1049,9 +1049,9 @@ def visualize_stored_results(run_dir):
         try:
             with open(results_file, 'rb') as f:
                 results = pickle.load(f)
-            print("✓ Training results loaded successfully")
+            print("[ OK ] Training results loaded successfully")
         except Exception as e:
-            print(f"⚠ Warning: Could not load training results: {e}")
+            print(f"[ WARNING ] Warning: Could not load training results: {e}")
             results = None
     else:
         print("No training results file found (results.pkl)")
@@ -1065,9 +1065,9 @@ def visualize_stored_results(run_dir):
         try:
             with open(params_file, 'rb') as f:
                 model_params = pickle.load(f)
-            print("✓ Model parameters loaded successfully")
+            print("[ OK ] Model parameters loaded successfully")
         except Exception as e:
-            print(f"⚠ Warning: Could not load model parameters: {e}")
+            print(f"[ WARNING ] Warning: Could not load model parameters: {e}")
             model_params = None
     else:
         print("No model parameters file found (model_params.pkl)")
@@ -1115,9 +1115,9 @@ def visualize_stored_results(run_dir):
                 'DEFAULT_EVAL_EPOCH': evaluation_settings.get('eval_epoch', 1),
                 'OPTIMIZATION_METHOD': latent_optimization.get('method', 'gradient')
             }
-            print("✓ Created default model parameters from current settings")
+            print("[ OK ] Created default model parameters from current settings")
         except Exception as e:
-            print(f"⚠ Warning: Could not create default model parameters: {e}")
+            print(f"[ WARNING ] Warning: Could not create default model parameters: {e}")
             model_params = {
                 'TRAINING_KEYS': ['unknown'],
                 'TRAINING_SEED': 42,
@@ -1151,7 +1151,7 @@ def visualize_stored_results(run_dir):
                 'DEFAULT_EVAL_EPOCH': 1,
                 'OPTIMIZATION_METHOD': 'gradient'
             }
-            print("✓ Using minimal default model parameters")
+            print("[ OK ] Using minimal default model parameters")
     
     # Plot enhanced model summary if we have parameters (even if no training results)
     if model_params is not None:
@@ -1159,12 +1159,12 @@ def visualize_stored_results(run_dir):
         try:
             plot_enhanced_model_summary(results, model_params, run_dir)
         except Exception as e:
-            print(f"⚠ Warning: Could not plot enhanced model summary: {e}")
+            print(f"[ WARNING ] Warning: Could not plot enhanced model summary: {e}")
             # Fallback to original model summary
             try:
                 plot_model_summary(results, model_params, run_dir)
             except Exception as e2:
-                print(f"⚠ Warning: Could not plot fallback model summary: {e2}")
+                print(f"[ WARNING ] Warning: Could not plot fallback model summary: {e2}")
     
     # Visualize training results if available
     if results is not None:
@@ -1184,13 +1184,13 @@ def visualize_stored_results(run_dir):
                 try:
                     with open(eval_file, 'rb') as f:
                         eval_results_for_latent = pickle.load(f)
-                    print("✓ Loaded evaluation results for comprehensive latent visualization")
+                    print("[ OK ] Loaded evaluation results for comprehensive latent visualization")
                 except Exception as e:
-                    print(f"⚠ Warning: Could not load evaluation results for latent visualization: {e}")
+                    print(f"[ WARNING ] Warning: Could not load evaluation results for latent visualization: {e}")
             
             visualize_all_results(results, run_dir, eval_results_for_latent)
         except Exception as e:
-            print(f"⚠ Warning: Could not visualize training results: {e}")
+            print(f"[ WARNING ] Warning: Could not visualize training results: {e}")
     else:
         print("Skipping training results visualization (no training results available)")
     
@@ -1202,7 +1202,7 @@ def visualize_stored_results(run_dir):
         try:
             with open(eval_file, 'rb') as f:
                 eval_results = pickle.load(f)
-            print("✓ Evaluation results loaded successfully")
+            print("[ OK ] Evaluation results loaded successfully")
             
             print("Visualizing evaluation results...")
             plot_evaluation_results(eval_results, run_dir)
@@ -1220,10 +1220,10 @@ def visualize_stored_results(run_dir):
                 try:
                     plot_multi_encoder_trajectory_reconstructions(eval_results, run_dir)
                 except Exception as e:
-                    print(f"⚠ Warning: Could not create trajectory plots: {e}")
-                    print("✓ Trajectory reconstruction analysis placeholder - feature coming soon")
+                    print(f"[ WARNING ] Warning: Could not create trajectory plots: {e}")
+                    print("[ OK ] Trajectory reconstruction analysis placeholder - feature coming soon")
         except Exception as e:
-            print(f"⚠ Warning: Could not load/visualize evaluation results: {e}")
+            print(f"[ WARNING ] Warning: Could not load/visualize evaluation results: {e}")
     else:
         print("No evaluation results found (evaluation_results.pkl)")
     
@@ -1232,9 +1232,9 @@ def visualize_stored_results(run_dir):
         print("\nGenerating training data distribution analysis...")
         try:
             # TODO: Implement plot_training_data_distribution_analysis function
-            print("✓ Training data distribution analysis placeholder - feature coming soon")
+            print("[ OK ] Training data distribution analysis placeholder - feature coming soon")
         except Exception as e:
-            print(f"⚠ Warning: Could not generate training data distribution analysis: {e}")
+            print(f"[ WARNING ] Warning: Could not generate training data distribution analysis: {e}")
     
     # Generate JSON experiment summary
     if model_params is not None:
@@ -1242,27 +1242,27 @@ def visualize_stored_results(run_dir):
         try:
             create_simple_analysis_report(results, model_params, eval_results, run_dir)
         except Exception as e:
-            print(f"⚠ Warning: Could not generate experiment summary: {e}")
+            print(f"[ WARNING ] Warning: Could not generate experiment summary: {e}")
     
 
     
     # Summary of what was found and processed
     print(f"\n=== VISUALIZATION SUMMARY ===")
     print(f"Run directory: {run_dir}")
-    print(f"Training results: {'✓ Found and processed' if results is not None else '✗ Not found'}")
-    print(f"Model parameters: {'✓ Found and processed' if model_params is not None else '✗ Not found'}")
+    print(f"Training results: {'[ OK ] Found and processed' if results is not None else '✗ Not found'}")
+    print(f"Model parameters: {'[ OK ] Found and processed' if model_params is not None else '✗ Not found'}")
     eval_found = os.path.exists(os.path.join(run_dir, 'evaluation_results.pkl'))
-    print(f"Evaluation results: {'✓ Found and processed' if eval_found else '✗ Not found'}")
+    print(f"Evaluation results: {'[ OK ] Found and processed' if eval_found else '✗ Not found'}")
     
     if results is None and not eval_found:
-        print("\n⚠ Warning: No results files found in the specified directory.")
+        print("\n[ WARNING ] Warning: No results files found in the specified directory.")
         print("Make sure the directory contains either 'results.pkl' or 'evaluation_results.pkl'")
     elif results is None:
-        print("\n✓ Evaluation-only visualization completed successfully")
+        print("\n[ OK ] Evaluation-only visualization completed successfully")
     elif not eval_found:
-        print("\n✓ Training-only visualization completed successfully")
+        print("\n[ OK ] Training-only visualization completed successfully")
     else:
-        print("\n✓ Complete visualization (training + evaluation) completed successfully")
+        print("\n[ OK ] Complete visualization (training + evaluation) completed successfully")
 
 def plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir=None):
     """
@@ -1307,7 +1307,7 @@ def plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir=None):
             trajectory_info_list = key_results['trajectory_info']
         
         if not trajectory_info_list:
-            print(f"⚠ No trajectory information found for key {key}")
+            print(f"[ WARNING ] No trajectory information found for key {key}")
             continue
         
         # Filter for trajectories (unified processing for both single and multi-encoder)
@@ -1320,7 +1320,7 @@ def plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir=None):
                 valid_trajectories.append(t)
         
         if not valid_trajectories:
-            print(f"⚠ No trajectory information found for key {key}")
+            print(f"[ WARNING ] No trajectory information found for key {key}")
             continue
         
         # Determine trajectory type
@@ -1334,12 +1334,12 @@ def plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir=None):
         if save_dir:
             try:
                 model, _, _, _ = load_model(save_dir, device=device)
-                print(f"  ✓ Loaded model from {save_dir}")
+                print(f"  [ OK ] Loaded model from {save_dir}")
             except Exception as e:
-                print(f"  ⚠ Could not load model: {e}")
+                print(f"  [ WARNING ] Could not load model: {e}")
                 continue
         else:
-            print(f"  ⚠ No save directory provided for model loading")
+            print(f"  [ WARNING ] No save directory provided for model loading")
             continue
         
         # Create visualizations for each sample (limit to visualize_n_values)
@@ -1359,15 +1359,15 @@ def plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir=None):
                     trajectory_info, model, save_path, save_dir, device=device
                 )
                 
-                print(f"    ✓ Saved: {save_path}")
+                print(f"    [ OK ] Saved: {save_path}")
                 
             except Exception as e:
-                print(f"    ⚠ Error creating visualization for sample {sample_idx}: {e}")
+                print(f"    [ WARNING ] Error creating visualization for sample {sample_idx}: {e}")
                 continue
         
-        print(f"  ✓ Completed trajectory reconstructions for key {key}")
+        print(f"  [ OK ] Completed trajectory reconstructions for key {key}")
     
-    print(f"\n✓ Multi-encoder trajectory reconstruction visualization complete!")
+    print(f"\n[ OK ] Multi-encoder trajectory reconstruction visualization complete!")
 
 def create_multi_encoder_trajectory_reconstruction(trajectory_info, model, save_path, device='cuda'):
     """
@@ -1393,7 +1393,7 @@ def create_multi_encoder_trajectory_reconstruction(trajectory_info, model, save_
     num_encoders = trajectory_info.get('num_encoders', 1)
     
     if len(z_vectors) < 2:
-        print("⚠ Warning: Insufficient trajectory data for visualization")
+        print("[ WARNING ] Warning: Insufficient trajectory data for visualization")
         return
     
     # Prepare input/target tensors
@@ -1626,17 +1626,11 @@ def create_multi_encoder_trajectory_reconstruction(trajectory_info, model, save_
                 scaler = StandardScaler()
                 combined_data_scaled = scaler.fit_transform(combined_data)
                 
-                # Apply t-SNE if enough samples, otherwise PCA
-                if len(combined_data) > 50:
-                    perplexity = min(30, len(combined_data) - 1)
-                    tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity, n_iter=1000)
-                    combined_2d = tsne.fit_transform(combined_data_scaled)
-                    method_name = "t-SNE"
-                else:
-                    from sklearn.decomposition import PCA
-                    pca = PCA(n_components=2)
-                    combined_2d = pca.fit_transform(combined_data_scaled)
-                    method_name = f"PCA (var: {sum(pca.explained_variance_ratio_):.1%})"
+                # Always use PCA for consistent dimensionality reduction
+                from sklearn.decomposition import PCA
+                pca = PCA(n_components=2)
+                combined_2d = pca.fit_transform(combined_data_scaled)
+                method_name = f"PCA (var: {sum(pca.explained_variance_ratio_):.1%})"
                 
                 # Split back
                 n_training = len(training_subset)
@@ -1648,10 +1642,10 @@ def create_multi_encoder_trajectory_reconstruction(trajectory_info, model, save_
                           c=np.arange(len(training_2d)), cmap='viridis', 
                           alpha=0.3, s=20, edgecolors='none', label='Training Data')
                 
-                print(f"  ✓ Using {method_name} with {len(training_subset)} training samples as background")
+                print(f"  [ OK ] Using {method_name} with {len(training_subset)} training samples as background")
                 
             except Exception as e:
-                print(f"  ⚠ Could not use training background ({e}), falling back to trajectory-only")
+                print(f"  [ WARNING ] Could not use training background ({e}), falling back to trajectory-only")
                 # Fallback to trajectory-only PCA
                 if z_array.shape[1] > 2:
                     from sklearn.decomposition import PCA
@@ -1767,7 +1761,7 @@ def create_multi_encoder_trajectory_reconstruction(trajectory_info, model, save_
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
     
-    print(f"  ✓ Generated comprehensive multi-encoder trajectory visualization")
+    print(f"  [ OK ] Generated comprehensive multi-encoder trajectory visualization")
 
 
 
@@ -2071,12 +2065,12 @@ def plot_model_summary(results, model_params, save_dir=None):
         # File status
         sys_lines.append("")
         sys_lines.append("FILES:")
-        sys_lines.append(f"  Training: {'✓' if results else '✗'}")
+        sys_lines.append(f"  Training: {'[ OK ]' if results else '✗'}")
         if save_dir:
             eval_exists = os.path.exists(os.path.join(save_dir, 'evaluation_results.pkl'))
-            sys_lines.append(f"  Evaluation: {'✓' if eval_exists else '✗'}")
+            sys_lines.append(f"  Evaluation: {'[ OK ]' if eval_exists else '✗'}")
             model_exists = os.path.exists(os.path.join(save_dir, 'model.pth'))
-            sys_lines.append(f"  Model: {'✓' if model_exists else '✗'}")
+            sys_lines.append(f"  Model: {'[ OK ]' if model_exists else '✗'}")
         
     except Exception as e:
         sys_lines.append(f"System info error: {str(e)[:30]}...")
@@ -2245,11 +2239,11 @@ def create_simple_analysis_report(results, model_params, eval_results, save_dir)
         with open(json_path, 'w') as f:
             json.dump(summary, f, indent=2, default=str)
         
-        print(f"✓ Saved experiment summary: {json_path}")
-        print("✓ Visual summary integrated into model_summary.png")
+        print(f"[ OK ] Saved experiment summary: {json_path}")
+        print("[ OK ] Visual summary integrated into model_summary.png")
         
     except Exception as e:
-        print(f"⚠ Error creating experiment summary: {e}")
+        print(f"[ WARNING ] Error creating experiment summary: {e}")
         import traceback
         traceback.print_exc()
 
@@ -2323,7 +2317,7 @@ def extract_multi_encoder_accuracies(results):
                 encoder_accuracies['individual_encoders'][enc_idx]['overall_accuracy'].append(0.0)
                 encoder_accuracies['individual_encoders'][enc_idx]['sample_exact_accuracy'].append(0.0)
     
-    print(f"✓ Multi-encoder accuracy data processed: {num_encoders} encoders, {num_epochs} epochs")
+    print(f"[ OK ] Multi-encoder accuracy data processed: {num_encoders} encoders, {num_epochs} epochs")
     return encoder_accuracies
 
 def plot_multi_encoder_accuracies(results, save_dir=None):
@@ -2593,7 +2587,7 @@ def plot_multi_encoder_evaluation_results(key, key_results, save_dir=None):
         # Check if we have valid evaluation data
         if not individual_accuracies or len(individual_accuracies) == 0:
             # Fallback to simple single-encoder evaluation
-            print(f"⚠ Warning: No multi-encoder evaluation data found for {key}, using simple evaluation")
+            print(f"[ WARNING ] Warning: No multi-encoder evaluation data found for {key}, using simple evaluation")
             plot_single_encoder_evaluation_results(key, key_results, save_dir)
             return
         
@@ -2803,7 +2797,7 @@ def plot_enhanced_model_summary(results, model_params, save_dir=None):
         save_dir: Directory to save the plot (optional)
     """
     try:
-        print("⚠ Warning: Enhanced model summary disabled due to complexity issues, using simple summary")
+        print("[ WARNING ] Warning: Enhanced model summary disabled due to complexity issues, using simple summary")
         # Use the simpler, more reliable model summary instead
         plot_model_summary(results, model_params, save_dir)
         return
@@ -2834,30 +2828,30 @@ def plot_enhanced_model_summary(results, model_params, save_dir=None):
     num_encoders = model_params.get('NUM_ENCODERS', 1)
     is_multi_encoder = num_encoders > 1
     
-        # Get architecture parameters from settings if not in model_params
-        try:
-            from utils.settings_manager import settings
-            model_architecture = settings.get_model_architecture()
-            latent_dim = model_architecture.get('latent_dim', 'N/A')
-            encoder_hidden_dim = model_architecture.get('encoder_hidden_dim', 'N/A')
-            decoder_hidden_dim = model_architecture.get('decoder_hidden_dim', 'N/A')
-            dropout = model_params.get('DROPOUT', model_architecture.get('dropout', 'N/A'))
-            max_length = model_params.get('MAX_LENGTH', model_architecture.get('max_length', 'N/A'))
-            encoder_layers = model_architecture.get('encoder_layers', 'N/A')
-            decoder_layers = model_architecture.get('decoder_layers', 'N/A')
-            encoder_heads = model_architecture.get('encoder_heads', 'N/A')
-            decoder_heads = model_architecture.get('decoder_heads', 'N/A')
-        except:
-            # Fallback if settings not available
-            latent_dim = 'N/A'
-            encoder_hidden_dim = 'N/A'
-            decoder_hidden_dim = 'N/A'
-            dropout = model_params.get('DROPOUT', 'N/A')
-            max_length = model_params.get('MAX_LENGTH', 'N/A')
-            encoder_layers = 'N/A'
-            decoder_layers = 'N/A'
-            encoder_heads = 'N/A'
-            decoder_heads = 'N/A'
+    # Get architecture parameters from settings if not in model_params
+    try:
+        from utils.settings_manager import settings
+        model_architecture = settings.get_model_architecture()
+        latent_dim = model_architecture.get('latent_dim', 'N/A')
+        encoder_hidden_dim = model_architecture.get('encoder_hidden_dim', 'N/A')
+        decoder_hidden_dim = model_architecture.get('decoder_hidden_dim', 'N/A')
+        dropout = model_params.get('DROPOUT', model_architecture.get('dropout', 'N/A'))
+        max_length = model_params.get('MAX_LENGTH', model_architecture.get('max_length', 'N/A'))
+        encoder_layers = model_architecture.get('encoder_layers', 'N/A')
+        decoder_layers = model_architecture.get('decoder_layers', 'N/A')
+        encoder_heads = model_architecture.get('encoder_heads', 'N/A')
+        decoder_heads = model_architecture.get('decoder_heads', 'N/A')
+    except:
+        # Fallback if settings not available
+        latent_dim = 'N/A'
+        encoder_hidden_dim = 'N/A'
+        decoder_hidden_dim = 'N/A'
+        dropout = model_params.get('DROPOUT', 'N/A')
+        max_length = model_params.get('MAX_LENGTH', 'N/A')
+        encoder_layers = 'N/A'
+        decoder_layers = 'N/A'
+        encoder_heads = 'N/A'
+        decoder_heads = 'N/A'
     
     arch_lines = [
         "🏗️ MODEL ARCHITECTURE",
@@ -3030,7 +3024,7 @@ def plot_enhanced_model_summary(results, model_params, save_dir=None):
                     ])
             except Exception as e:
                 results_lines.extend([
-                    f"⚠️ Error processing results: {str(e)[:40]}...",
+                    f"[ WARNING ]️ Error processing results: {str(e)[:40]}...",
                     "   Results data may be incomplete"
             ])
     else:
@@ -3109,7 +3103,7 @@ def plot_enhanced_model_summary(results, model_params, save_dir=None):
                     
                 except Exception as e:
                     eval_lines.extend([
-                        f"⚠️ Error loading eval results",
+                        f"[ WARNING ]️ Error loading eval results",
                         f"   {str(e)[:30]}..."
                     ])
         
@@ -3173,10 +3167,10 @@ def plot_enhanced_model_summary(results, model_params, save_dir=None):
                 params_exists = os.path.exists(os.path.join(save_dir, 'model_params.json'))
                 
                 sys_lines.extend([
-                    f"├─ Model: {'✓' if model_exists else '✗'}",
-                    f"├─ Training: {'✓' if results_exists else '✗'}",
-                    f"├─ Evaluation: {'✓' if eval_exists else '✗'}",
-                    f"└─ Parameters: {'✓' if params_exists else '✗'}",
+                    f"├─ Model: {'[ OK ]' if model_exists else '✗'}",
+                    f"├─ Training: {'[ OK ]' if results_exists else '✗'}",
+                    f"├─ Evaluation: {'[ OK ]' if eval_exists else '✗'}",
+                    f"└─ Parameters: {'[ OK ]' if params_exists else '✗'}",
                 ])
     else:
                 sys_lines.append("   Directory not specified")
@@ -3188,7 +3182,7 @@ def plot_enhanced_model_summary(results, model_params, save_dir=None):
             
         except Exception as e:
             sys_lines.extend([
-                f"⚠️ System info error:",
+                f"[ WARNING ]️ System info error:",
                 f"   {str(e)[:30]}..."
             ])
         
@@ -3210,7 +3204,7 @@ def plot_enhanced_model_summary(results, model_params, save_dir=None):
         plt.show()
             
     except Exception as e:
-        print(f"⚠ Warning: Enhanced model summary failed ({str(e)}), falling back to simple summary")
+        print(f"[ WARNING ] Warning: Enhanced model summary failed ({str(e)}), falling back to simple summary")
         # Fallback to the simple model summary we created
         plot_model_summary(results, model_params, save_dir)
 
@@ -3255,7 +3249,7 @@ def plot_comprehensive_latent_space(results, eval_results=None, save_dir=None):
                     all_colors.extend([color] * len(latent_z))
                     all_labels.extend([data_type] * len(latent_z))
                     legend_elements.append(mpatches.Patch(color=color, label=f'{data_type} (n={len(latent_z)})'))
-                    print(f"    ✓ Added {len(latent_z)} samples from {data_type}")
+                    print(f"    [ OK ] Added {len(latent_z)} samples from {data_type}")
         
     # Process training data from results.pkl (legacy)
     if results:
@@ -3310,7 +3304,7 @@ def plot_comprehensive_latent_space(results, eval_results=None, save_dir=None):
                 break  # Only process first key for now
     
     if not all_latent_data:
-        print("⚠ Warning: No latent data found for visualization")
+        print("[ WARNING ] Warning: No latent data found for visualization")
         return
     
     # Combine all latent data
@@ -3331,7 +3325,7 @@ def plot_comprehensive_latent_space(results, eval_results=None, save_dir=None):
     # Apply t-SNE
     tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(combined_latents)//4))
     tsne_results = tsne.fit_transform(combined_latents)
-    print("    ✓ t-SNE completed")
+    print("    [ OK ] t-SNE completed")
     
     # Create the visualization
     fig, ax = plt.subplots(1, 1, figsize=(12, 10))
@@ -3458,21 +3452,21 @@ def get_comprehensive_latent_data_for_trajectory(run_dir):
                                 # Legacy format: single encoder latent data stored directly
                                 combined_latents = np.concatenate(training_results['latent_zs'], axis=0)
                                 add_latent_data(combined_latents, 'training_legacy')
-                                print(f"    ✓ Added {len(combined_latents)} legacy training samples")
+                                print(f"    [ OK ] Added {len(combined_latents)} legacy training samples")
                             elif 'encoder_latent_data' in training_results:
                                 # Multi-encoder format from training results
                                 for enc_key, enc_data in training_results['encoder_latent_data'].items():
                                     if enc_data.get('num_samples', 0) > 0:
                                         add_latent_data(enc_data['latent_zs'], f"training_{enc_key}")
-                                        print(f"    ✓ Added {enc_data['num_samples']} training samples from {enc_key}")
+                                        print(f"    [ OK ] Added {enc_data['num_samples']} training samples from {enc_key}")
                             elif 'single_encoder_latent_data' in training_results:
                                 # Single encoder format from training results  
                                 enc_data = training_results['single_encoder_latent_data']
                                 if enc_data.get('num_samples', 0) > 0:
                                     add_latent_data(enc_data['latent_zs'], 'training_single')
-                                    print(f"    ✓ Added {enc_data['num_samples']} training samples from single encoder")
+                                    print(f"    [ OK ] Added {enc_data['num_samples']} training samples from single encoder")
                         except Exception as e:
-                            print(f"    ⚠ Could not load training fallback data: {e}")
+                            print(f"    [ WARNING ] Could not load training fallback data: {e}")
                 
                 # ALSO Process encoded training latents (new format)
                 if 'encoded_training_latents' in key_results:
@@ -3520,5 +3514,5 @@ def get_comprehensive_latent_data_for_trajectory(run_dir):
         return combined_latents, tsne_2d, all_labels, all_colors
         
     except Exception as e:
-        print(f"⚠ Warning: Could not load comprehensive latent data: {e}")
+        print(f"[ WARNING ] Warning: Could not load comprehensive latent data: {e}")
         return None, None, None, None

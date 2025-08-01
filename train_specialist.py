@@ -146,7 +146,14 @@ def generate_specialist_reconstruction_plot(model, dataloader, device, epoch, ph
     model.eval()
     with torch.no_grad():
         # Get the first sample from the dataloader
-        for input_seq, target_seq in dataloader:
+        for batch in dataloader:
+            # Handle batch structure with keys
+            if len(batch) >= 3:
+                input_seq, target_seq, batch_keys = batch[:3]
+            else:
+                input_seq, target_seq = batch[:2]
+                batch_keys = None
+            
             input_seq = input_seq.to(device)
             target_seq = target_seq.to(device)
             
@@ -261,9 +268,16 @@ def generate_latent_histograms(model, dataloader, device, encoder_idx, epoch, wa
     
     with torch.no_grad():
         # Collect latent statistics from a subset of data (efficient)
-        for batch_idx, (input_seq, target_seq) in enumerate(dataloader):
+        for batch_idx, batch in enumerate(dataloader):
             if batch_idx >= 20:  # Limit to 20 batches for efficiency
                 break
+            
+            # Handle batch structure with keys
+            if len(batch) >= 3:
+                input_seq, target_seq, batch_keys = batch[:3]
+            else:
+                input_seq, target_seq = batch[:2]
+                batch_keys = None
                 
             input_seq = input_seq.to(device)
             target_seq = target_seq.to(device)
@@ -285,8 +299,8 @@ def generate_latent_histograms(model, dataloader, device, encoder_idx, epoch, wa
     
     # Histogram of means
     ax1.hist(all_mus, bins=50, alpha=0.7, color='blue', edgecolor='black')
-    ax1.axvline(0, color='red', linestyle='--', alpha=0.8, label='Prior μ=0')
-    ax1.set_xlabel('Latent Mean (μ)')
+    ax1.axvline(0, color='red', linestyle='--', alpha=0.8, label='Prior mu=0')
+    ax1.set_xlabel('Latent Mean (mu)')
     ax1.set_ylabel('Frequency')
     ax1.set_title(f'Encoder {encoder_idx} - Latent Means\nEpoch {epoch}')
     ax1.legend()
@@ -294,13 +308,13 @@ def generate_latent_histograms(model, dataloader, device, encoder_idx, epoch, wa
     
     # Add statistics
     mu_mean, mu_std = np.mean(all_mus), np.std(all_mus)
-    ax1.text(0.05, 0.95, f'μ={mu_mean:.3f}, σ={mu_std:.3f}', 
+    ax1.text(0.05, 0.95, f'mu={mu_mean:.3f}, sigma={mu_std:.3f}',
              transform=ax1.transAxes, va='top', bbox=dict(boxstyle='round', facecolor='wheat'))
     
     # Histogram of log variances
     ax2.hist(all_log_vars, bins=50, alpha=0.7, color='green', edgecolor='black')
-    ax2.axvline(0, color='red', linestyle='--', alpha=0.8, label='Prior log σ²=0')
-    ax2.set_xlabel('Log Variance (log σ²)')
+    ax2.axvline(0, color='red', linestyle='--', alpha=0.8, label='Prior log sigma^2=0')
+    ax2.set_xlabel('Log Variance (log sigma^2)')
     ax2.set_ylabel('Frequency')
     ax2.set_title(f'Encoder {encoder_idx} - Log Variances\nEpoch {epoch}')
     ax2.legend()
@@ -308,7 +322,7 @@ def generate_latent_histograms(model, dataloader, device, encoder_idx, epoch, wa
     
     # Add statistics
     logvar_mean, logvar_std = np.mean(all_log_vars), np.std(all_log_vars)
-    ax2.text(0.05, 0.95, f'μ={logvar_mean:.3f}, σ={logvar_std:.3f}', 
+    ax2.text(0.05, 0.95, f'mu={logvar_mean:.3f}, sigma={logvar_std:.3f}',
              transform=ax2.transAxes, va='top', bbox=dict(boxstyle='round', facecolor='lightgreen'))
     
     plt.suptitle(f'Phase A: Encoder {encoder_idx} Latent Distributions\nTraining Epoch {epoch}', fontsize=14)
@@ -330,9 +344,9 @@ def generate_latent_histograms(model, dataloader, device, encoder_idx, epoch, wa
                 f"phase_a_latents/encoder_{encoder_idx}_logvar_mean": logvar_mean,
                 f"phase_a_latents/encoder_{encoder_idx}_logvar_std": logvar_std,
             }, step_hint=global_step)
-            print(f"✓ Logged latent histograms for Encoder {encoder_idx} at epoch {epoch}")
+            print(f"[ OK ] Logged latent histograms for Encoder {encoder_idx} at epoch {epoch}")
         except Exception as e:
-            print(f"⚠ Failed to log latent histograms: {e}")
+            print(f"[ WARNING ] Failed to log latent histograms: {e}")
         finally:
             os.unlink(temp_plot_path)
     
@@ -393,7 +407,7 @@ def generate_phase_b_final_comparison_plot(model, encoder_datasets, device, run_
                 _, _, _, input_sequences, output_sequences = generate_and_process_tasks(eval_key, n_samples_per_key)
                 
                 if not input_sequences or not output_sequences:
-                    print(f"⚠ Warning: No evaluation data for key '{eval_key}', skipping...")
+                    print(f"[ WARNING ] Warning: No evaluation data for key '{eval_key}', skipping...")
                     continue
                 
                 eval_dataloader = prepare_dataloader(input_sequences, output_sequences, batch_size=1)
@@ -405,17 +419,17 @@ def generate_phase_b_final_comparison_plot(model, encoder_datasets, device, run_
                     key_samples.append((input_seq, target_seq, eval_key, i))
                 
                 eval_samples.extend(key_samples)
-                print(f"✓ Loaded {len(key_samples)} evaluation samples from key '{eval_key}'")
+                print(f"[ OK ] Loaded {len(key_samples)} evaluation samples from key '{eval_key}'")
                 
             except Exception as e:
-                print(f"⚠ Warning: Failed to generate evaluation data for key '{eval_key}': {e}")
+                print(f"[ WARNING ] Warning: Failed to generate evaluation data for key '{eval_key}': {e}")
                 continue
         
         if eval_samples:
             _create_comprehensive_analysis_plot(model, eval_samples, device, "evaluation", 
                                                n_samples_per_key, wandb_logger, global_step, "evaluation")
         else:
-            print("⚠ Error: No evaluation data could be generated - skipping evaluation analysis")
+            print("[ WARNING ] Error: No evaluation data could be generated - skipping evaluation analysis")
         
         # 3. ACCURACY MATRIX (KEY vs ENCODER/POE)
         print("\n=== Creating accuracy matrix ===")
@@ -448,7 +462,7 @@ def _create_comprehensive_analysis_plot(model, data_source, device, data_type, n
         num_encoders = len(model.multi_encoder.encoders)
     
     if not all_samples:
-        print(f"⚠ No {data_type} data available for analysis")
+        print(f"[ WARNING ] No {data_type} data available for analysis")
         return
     
     print(f"Analyzing {len(all_samples)} {data_type} samples...")
@@ -555,9 +569,9 @@ def _create_comprehensive_analysis_plot(model, data_source, device, data_type, n
                 f"phase_b_final/comprehensive_analysis_{source_name}": wandb.Image(temp_plot_path),
                 f"phase_b_final/{source_name}_samples_analyzed": len(sample_data)
             }, step_hint=global_step)
-            print(f"✓ Logged comprehensive analysis for {data_type} data")
+            print(f"[ OK ] Logged comprehensive analysis for {data_type} data")
         except Exception as e:
-            print(f"⚠ Failed to log {data_type} analysis: {e}")
+            print(f"[ WARNING ] Failed to log {data_type} analysis: {e}")
         finally:
             os.unlink(temp_plot_path)
 
@@ -650,9 +664,9 @@ def _create_accuracy_matrix(model, eval_keys, num_encoders, device, wandb_logger
                 "phase_b_final/matrix_shape": f"{num_encoders + 1}x{len(eval_keys)}",
                 "phase_b_final/eval_keys": eval_keys
             }, step_hint=global_step)
-            print("✓ Logged accuracy matrix")
+            print("[ OK ] Logged accuracy matrix")
         except Exception as e:
-            print(f"⚠ Failed to log accuracy matrix: {e}")
+            print(f"[ WARNING ] Failed to log accuracy matrix: {e}")
         finally:
             os.unlink(temp_plot_path)
 
@@ -727,37 +741,37 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
     logger.info(f"  Beta warmup epochs: {phase_a_settings.get('beta_warmup_epochs', 5)}")
     
     # Log enhanced training mechanisms
-    phase_a_enhanced = phase_a_settings.get('enhanced_training', {})
+    enhanced_training = settings.get_enhanced_training()
     logger.info(f"Enhanced training mechanisms:")
-    logger.info(f"  - Free-bits (minimum KL): {'ENABLED' if phase_a_enhanced.get('use_free_bits', True) else 'DISABLED'}")
-    if phase_a_enhanced.get('use_free_bits', True):
-        logger.info(f"    δ = {phase_a_enhanced.get('free_bits_delta', 0.07):.3f} per dimension")
-    logger.info(f"  - Cyclical β-annealing: {'ENABLED' if phase_a_enhanced.get('use_cyclical_beta', False) else 'DISABLED'}")
-    if phase_a_enhanced.get('use_cyclical_beta', False):
-        logger.info(f"    Cycle length: {phase_a_enhanced.get('beta_cycle_length', 4)} epochs")
-    logger.info(f"  - Dynamic λ scheduling: {'ENABLED' if phase_a_enhanced.get('use_dynamic_lambda', True) else 'DISABLED'}")
-    if phase_a_enhanced.get('use_dynamic_lambda', True):
-        logger.info(f"    High-β multiplier: {phase_a_enhanced.get('lambda_high_multiplier', 3.0)}")
-    logger.info(f"  - Contrastive KL margin: {'ENABLED' if phase_a_enhanced.get('use_contrastive_margin', True) else 'DISABLED'}")
-    if phase_a_enhanced.get('use_contrastive_margin', True):
-        logger.info(f"    Margin τ: {phase_a_enhanced.get('margin_tau', 1.5):.1f} nats")
-    logger.info(f"  - Debug KL metrics: {'ENABLED' if phase_a_enhanced.get('debug_kl_metrics', False) else 'DISABLED'}")
+    logger.info(f"  - Free-bits (minimum KL): {'ENABLED' if enhanced_training.get('use_free_bits', True) else 'DISABLED'}")
+    if enhanced_training.get('use_free_bits', True):
+        logger.info(f"    δ = {enhanced_training.get('free_bits_delta', 0.07):.3f} per dimension")
+    logger.info(f"  - Cyclical β-annealing: {'ENABLED' if enhanced_training.get('use_cyclical_beta', False) else 'DISABLED'}")
+    if enhanced_training.get('use_cyclical_beta', False):
+        logger.info(f"    Cycle length: {enhanced_training.get('beta_cycle_length', 4)} epochs")
+    logger.info(f"  - Dynamic λ scheduling: {'ENABLED' if enhanced_training.get('use_dynamic_lambda', True) else 'DISABLED'}")
+    if enhanced_training.get('use_dynamic_lambda', True):
+        logger.info(f"    High-β multiplier: {enhanced_training.get('lambda_high_multiplier', 3.0)}")
+    logger.info(f"  - Contrastive KL margin: {'ENABLED' if enhanced_training.get('use_contrastive_margin', True) else 'DISABLED'}")
+    if enhanced_training.get('use_contrastive_margin', True):
+        logger.info(f"    Margin τ: {enhanced_training.get('margin_tau', 1.5):.1f} nats")
+    logger.info(f"  - Debug KL metrics: {'ENABLED' if enhanced_training.get('debug_kl_metrics', False) else 'DISABLED'}")
     
     print(f"Phase A Enhanced Training: cross-pair={'ON' if cross_pair_enabled else 'OFF'}, anti-batch={'ON' if anti_batch_size > 0 else 'OFF'}")
     
     # Enhanced mechanisms summary
     enhanced_summary = []
-    if phase_a_enhanced.get('use_free_bits', True):
+    if enhanced_training.get('use_free_bits', True):
         enhanced_summary.append("free-bits")
-    if phase_a_enhanced.get('use_cyclical_beta', False):
+    if enhanced_training.get('use_cyclical_beta', False):
         enhanced_summary.append("cyclical-β")
-    if phase_a_enhanced.get('use_dynamic_lambda', True):
+    if enhanced_training.get('use_dynamic_lambda', True):
         enhanced_summary.append("dynamic-λ")
-    if phase_a_enhanced.get('use_contrastive_margin', True):
+    if enhanced_training.get('use_contrastive_margin', True):
         enhanced_summary.append("contrastive-margin")
     
     print(f"Enhanced mechanisms: {', '.join(enhanced_summary) if enhanced_summary else 'NONE'}")
-    print(f"Target KL/dim after warm-up: ≥ 0.2 (debug_kl_metrics={'ON' if phase_a_enhanced.get('debug_kl_metrics', False) else 'OFF'})")
+    print(f"Target KL/dim after warm-up: ≥ 0.2 (debug_kl_metrics={'ON' if enhanced_training.get('debug_kl_metrics', False) else 'OFF'})")
     
     # Phase A setup - all parameters unfrozen but we'll train one encoder+decoder at a time
     setup_phase_training(model, 'pretrain')
@@ -886,17 +900,17 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                         anti_mask = None
                     
                     # SPECIALIST LOSS: Cross-pair reconstruction + beta warmup + anti-batch KL + ENHANCED MECHANISMS
-                    # Get enhanced training settings
-                    phase_a_enhanced = phase_a_settings.get('enhanced_training', {})
-                    use_cyclical_beta = phase_a_enhanced.get('use_cyclical_beta', False)
-                    beta_cycle_length = phase_a_enhanced.get('beta_cycle_length', 4)
-                    use_free_bits = phase_a_enhanced.get('use_free_bits', True)
-                    free_bits_delta = phase_a_enhanced.get('free_bits_delta', 0.07)
-                    use_dynamic_lambda = phase_a_enhanced.get('use_dynamic_lambda', True)
-                    lambda_high_multiplier = phase_a_enhanced.get('lambda_high_multiplier', 3.0)
-                    use_contrastive_margin = phase_a_enhanced.get('use_contrastive_margin', True)
-                    margin_tau = phase_a_enhanced.get('margin_tau', 1.5)
-                    debug_kl_metrics = phase_a_enhanced.get('debug_kl_metrics', False)
+                    # Get enhanced training settings using centralized function
+                    enhanced_training = settings.get_enhanced_training()
+                    use_cyclical_beta = enhanced_training.get('use_cyclical_beta', False)
+                    beta_cycle_length = enhanced_training.get('beta_cycle_length', 4)
+                    use_free_bits = enhanced_training.get('use_free_bits', True)
+                    free_bits_delta = enhanced_training.get('free_bits_delta', 0.07)
+                    use_dynamic_lambda = enhanced_training.get('use_dynamic_lambda', True)
+                    lambda_high_multiplier = enhanced_training.get('lambda_high_multiplier', 3.0)
+                    use_contrastive_margin = enhanced_training.get('use_contrastive_margin', True)
+                    margin_tau = enhanced_training.get('margin_tau', 1.5)
+                    debug_kl_metrics = enhanced_training.get('debug_kl_metrics', False)
                     
                     loss_result = compute_loss(
                         model, input_seq, target_seq, 
@@ -1023,7 +1037,7 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                                 eval_results, run_dir, global_step, wandb_logger, 
                                 current_model=model, phase=f"phase_a_enc{encoder_idx}"
                             )
-                            print(f"✓ Evaluation logged for Encoder {encoder_idx} at epoch {epoch + 1} on ALL keys")
+                            print(f"[ OK ] Evaluation logged for Encoder {encoder_idx} at epoch {epoch + 1} on ALL keys")
                     except Exception as eval_error:
                         logger.warning(f"Evaluation failed for Encoder {encoder_idx} at epoch {epoch + 1}: {eval_error}")
                 
@@ -1031,7 +1045,7 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                 if should_run_evaluation(epoch + 1, eval_interval, phase_epochs):
                     try:
                         generate_latent_histograms(model, dataloader, device, encoder_idx, epoch + 1, wandb_logger, global_step)
-                        print(f"✓ Latent histograms logged for Encoder {encoder_idx} at epoch {epoch + 1}")
+                        print(f"[ OK ] Latent histograms logged for Encoder {encoder_idx} at epoch {epoch + 1}")
                     except Exception as hist_error:
                         logger.warning(f"Latent histogram generation failed for Encoder {encoder_idx} at epoch {epoch + 1}: {hist_error}")
                 
@@ -1039,7 +1053,7 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                 if should_run_evaluation(epoch + 1, eval_interval, phase_epochs):
                     try:
                         generate_per_dimension_kl_plot(model, dataloader, device, epoch + 1, encoder_idx=encoder_idx, wandb_logger=wandb_logger, global_step=global_step)
-                        print(f"✓ Per-dimension KL plot logged for Encoder {encoder_idx} at epoch {epoch + 1}")
+                        print(f"[ OK ] Per-dimension KL plot logged for Encoder {encoder_idx} at epoch {epoch + 1}")
                     except Exception as kl_error:
                         logger.warning(f"Per-dimension KL plot generation failed for Encoder {encoder_idx} at epoch {epoch + 1}: {kl_error}")
                 
@@ -1061,7 +1075,7 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                             wandb_logger._safe_log({
                                 f"phase_a_reconstruction/{wandb_key}": wandb.Image(plot_path)
                             }, step_hint=global_step)
-                            logger.info(f"✓ Logged Phase A reconstruction for Encoder {encoder_idx} at step {global_step}")
+                            logger.info(f"[ OK ] Logged Phase A reconstruction for Encoder {encoder_idx} at step {global_step}")
                         except Exception as wandb_error:
                             logger.warning(f"Failed to log Phase A reconstruction to WandB: {wandb_error}")
                         
@@ -1074,18 +1088,18 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
         
         # Save encoder checkpoint
         encoder_checkpoint_path = save_encoder_checkpoint(model, encoder_idx, run_dir)
-        logger.info(f"✓ Encoder {encoder_idx} saved to {encoder_checkpoint_path}")
+        logger.info(f"[ OK ] Encoder {encoder_idx} saved to {encoder_checkpoint_path}")
         
         # Save independent decoder checkpoint
         decoder_checkpoint_path = save_independent_decoder_checkpoint(model, encoder_idx, run_dir)
-        logger.info(f"✓ Independent decoder {encoder_idx} saved to {decoder_checkpoint_path}")
+        logger.info(f"[ OK ] Independent decoder {encoder_idx} saved to {decoder_checkpoint_path}")
         
         phase_a_results['encoder_losses'][encoder_idx] = encoder_losses
         
         # Log final encoder performance
         final_loss = encoder_losses[-1] if encoder_losses else float('inf')
         logger.info(f"Encoder {encoder_idx} final loss: {final_loss:.4f}")
-        print(f"✓ Encoder {encoder_idx} + independent decoder training complete (final loss: {final_loss:.4f})")
+        print(f"[ OK ] Encoder {encoder_idx} + independent decoder training complete (final loss: {final_loss:.4f})")
     
     logger.info("\n" + "=" * 60)
     logger.info("PHASE A COMPLETE - All encoders + independent decoders pre-trained")
@@ -1134,13 +1148,13 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                         "phase_a/encoder_losses_summary": wandb.Image(phase_a_plot_path),
                         "phase_a/completed": True
                     }, step_hint=final_phase_a_step)
-                    logger.info("✓ Phase A summary plot logged to WandB")
+                    logger.info("[ OK ] Phase A summary plot logged to WandB")
                 except Exception as wandb_error:
                     logger.warning(f"Failed to upload Phase A summary plot to WandB: {wandb_error}")
             except Exception as e:
                 logger.warning(f"Failed to log Phase A summary to WandB: {e}")
             
-            logger.info("✓ Phase A summary visualization completed")
+            logger.info("[ OK ] Phase A summary visualization completed")
             
         except Exception as plot_error:
             logger.warning(f"Failed to create Phase A summary plot: {plot_error}")
@@ -1263,14 +1277,13 @@ def train_phase_b_decoder(model, encoder_datasets, device, logger, wandb_logger,
             encoder_indices = encoder_indices.to(device)
             
             with torch.amp.autocast(device_type=device.type, enabled=use_mixed_precision):
-                # Get enhanced training settings for Phase B
-                phase_b_settings = specialist_settings.get('phase_b', {})
-                phase_b_enhanced = phase_b_settings.get('enhanced_training', {})
-                use_cyclical_beta = phase_b_enhanced.get('use_cyclical_beta', False)
-                beta_cycle_length = phase_b_enhanced.get('beta_cycle_length', 4)
-                use_free_bits = phase_b_enhanced.get('use_free_bits', True)
-                free_bits_delta = phase_b_enhanced.get('free_bits_delta', 0.07)
-                debug_kl_metrics = phase_b_enhanced.get('debug_kl_metrics', False)
+                # Get enhanced training settings for Phase B using centralized function
+                enhanced_training = settings.get_enhanced_training()
+                use_cyclical_beta = enhanced_training.get('use_cyclical_beta', False)
+                beta_cycle_length = enhanced_training.get('beta_cycle_length', 4)
+                use_free_bits = enhanced_training.get('use_free_bits', True)
+                free_bits_delta = enhanced_training.get('free_bits_delta', 0.07)
+                debug_kl_metrics = enhanced_training.get('debug_kl_metrics', False)
                 
                 # Use PoE inference with shared decoder (encoder_idx=None triggers PoE) + enhanced mechanisms
                 loss_result = compute_loss(
@@ -1382,7 +1395,7 @@ def train_phase_b_decoder(model, encoder_datasets, device, logger, wandb_logger,
                             eval_results, run_dir, global_step, wandb_logger, 
                             current_model=model, phase="phase_b_poe"
                         )
-                        print(f"✓ PoE evaluation logged at Phase B epoch {epoch + 1} on ALL keys")
+                        print(f"[ OK ] PoE evaluation logged at Phase B epoch {epoch + 1} on ALL keys")
                 except Exception as eval_error:
                     logger.warning(f"PoE evaluation failed at Phase B epoch {epoch + 1}: {eval_error}")
             
@@ -1390,7 +1403,7 @@ def train_phase_b_decoder(model, encoder_datasets, device, logger, wandb_logger,
             if should_run_evaluation(epoch + 1, eval_interval, phase_epochs):
                 try:
                     generate_per_dimension_kl_plot(model, mixed_dataloader, device, epoch + 1, encoder_idx=None, wandb_logger=wandb_logger, global_step=global_step)
-                    print(f"✓ Per-dimension KL plot logged for PoE at Phase B epoch {epoch + 1}")
+                    print(f"[ OK ] Per-dimension KL plot logged for PoE at Phase B epoch {epoch + 1}")
                 except Exception as kl_error:
                     logger.warning(f"Per-dimension KL plot generation failed for PoE at Phase B epoch {epoch + 1}: {kl_error}")
             
@@ -1407,7 +1420,7 @@ def train_phase_b_decoder(model, encoder_datasets, device, logger, wandb_logger,
     
     # Save final shared decoder checkpoint
     decoder_checkpoint_path = save_decoder_checkpoint(model, run_dir)
-    logger.info(f"✓ Shared decoder saved to {decoder_checkpoint_path}")
+    logger.info(f"[ OK ] Shared decoder saved to {decoder_checkpoint_path}")
     
     final_loss = phase_b_results['decoder_losses'][-1] if phase_b_results['decoder_losses'] else float('inf')
     logger.info(f"\n" + "=" * 60)
@@ -1421,7 +1434,7 @@ def train_phase_b_decoder(model, encoder_datasets, device, logger, wandb_logger,
         generate_phase_b_final_comparison_plot(
             model, encoder_datasets, device, run_dir, wandb_logger, final_global_step
         )
-        logger.info("✓ Phase B final comparison plot generated")
+        logger.info("[ OK ] Phase B final comparison plot generated")
         
     # Create Phase B summary visualization and final comprehensive evaluation
     if wandb_logger:
@@ -1454,13 +1467,13 @@ def train_phase_b_decoder(model, encoder_datasets, device, logger, wandb_logger,
                     "phase_b/decoder_loss_summary": wandb.Image(phase_b_plot_path),
                     "phase_b/completed": True
                 }, step_hint=final_phase_b_step)
-                logger.info("✓ Phase B summary plot logged to WandB")
+                logger.info("[ OK ] Phase B summary plot logged to WandB")
             except Exception as wandb_error:
                 logger.warning(f"Failed to upload Phase B summary plot to WandB: {wandb_error}")
         except Exception as e:
             logger.warning(f"Failed to log Phase B summary to WandB: {e}")
         
-        logger.info("✓ Phase B visualization completed")
+        logger.info("[ OK ] Phase B visualization completed")
     
     return phase_b_results
 
@@ -1483,7 +1496,7 @@ def run_evaluation_between_phases(model, device, logger, wandb_logger, run_dir, 
             # Pass the current model to avoid loading from disk
             log_evaluation_to_wandb(eval_results, run_dir, f"{phase_name}_final", wandb_logger, 
                                   current_model=model, phase=phase_name.lower().replace(' ', '_'))
-            logger.info(f"✓ Evaluation results logged to wandb for {phase_name} on ALL keys")
+            logger.info(f"[ OK ] Evaluation results logged to wandb for {phase_name} on ALL keys")
         return eval_results
     except Exception as e:
         logger.warning(f"Evaluation failed after {phase_name}: {e}")
@@ -1509,9 +1522,9 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
     specialist_settings_file = "model_specialist_settings.json"
     if os.path.exists(specialist_settings_file):
         settings = init_settings(specialist_settings_file)
-        print(f"✓ Loaded specialist settings from {specialist_settings_file}")
+        print(f"[ OK ] Loaded specialist settings from {specialist_settings_file}")
     else:
-        print(f"⚠ Warning: {specialist_settings_file} not found, using default settings")
+        print(f"[ WARNING ] Warning: {specialist_settings_file} not found, using default settings")
     
     # Get current settings
     data_settings = settings.get_data_settings()
@@ -1605,7 +1618,7 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
         NUM_ENCODERS = model_architecture.get('num_encoders', 1)
         N_EXAMPLES_PER_TASK = data_settings['n']
         
-        print(f"✓ Loaded frozen config: {NUM_ENCODERS} encoders, decoder_hidden_dim={model_architecture.get('decoder_hidden_dim')}")
+        print(f"[ OK ] Loaded frozen config: {NUM_ENCODERS} encoders, decoder_hidden_dim={model_architecture.get('decoder_hidden_dim')}")
         
     else:
         # Starting fresh: Save current config as frozen config
@@ -1616,7 +1629,7 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
         with open(frozen_config_path, 'w') as f:
             json.dump(current_config, f, indent=2)
         
-        print(f"✓ Frozen config saved: {NUM_ENCODERS} encoders, decoder_hidden_dim={model_architecture.get('decoder_hidden_dim')}")
+        print(f"[ OK ] Frozen config saved: {NUM_ENCODERS} encoders, decoder_hidden_dim={model_architecture.get('decoder_hidden_dim')}")
     
     logger.info(f"Starting specialist training for ARC problems: {TRAINING_KEYS}")
     logger.info(f"Using frozen config - Model architecture: encoders={NUM_ENCODERS}, decoder_hidden_dim={model_architecture.get('decoder_hidden_dim')}, decoder_layers={model_architecture.get('decoder_layers')}")
@@ -1628,20 +1641,20 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
     if wandb_settings.get('enabled', False):
         wandb_logger = init_wandb_for_mode('specialist_train', run_dir)
         if wandb_logger:
-            logger.info(f"✓ Wandb logging enabled: {wandb_logger.run.name}")
+            logger.info(f"[ OK ] Wandb logging enabled: {wandb_logger.run.name}")
             # Verify trajectory plot settings
             trajectory_plots_enabled = wandb_settings.get('log_trajectory_plots', False)
             trajectory_max_samples = wandb_settings.get('trajectory_max_samples', 3)
             eval_interval = wandb_settings.get('eval_log_interval', 10)
-            logger.info(f"✓ Trajectory plots: {'ENABLED' if trajectory_plots_enabled else 'DISABLED'}")
-            logger.info(f"✓ Trajectory max samples: {trajectory_max_samples}")
-            logger.info(f"✓ Evaluation/plot interval: every {eval_interval} epochs")
+            logger.info(f"[ OK ] Trajectory plots: {'ENABLED' if trajectory_plots_enabled else 'DISABLED'}")
+            logger.info(f"[ OK ] Trajectory max samples: {trajectory_max_samples}")
+            logger.info(f"[ OK ] Evaluation/plot interval: every {eval_interval} epochs")
             if trajectory_plots_enabled:
                 print(f"Trajectory plots enabled: {trajectory_max_samples} samples every {eval_interval} epochs")
             else:
-                print("⚠ Warning: Trajectory plots are disabled in WandB settings")
+                print("[ WARNING ] Warning: Trajectory plots are disabled in WandB settings")
         else:
-            logger.info("⚠ Wandb initialization failed, continuing without wandb")
+            logger.info("[ WARNING ] Wandb initialization failed, continuing without wandb")
     
     # Generate and split data for multi-encoder training
     logger.info("Generating and splitting data for specialist training...")
@@ -1746,7 +1759,7 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
             # Save final complete model after Phase B
             final_loss = phase_b_results['decoder_losses'][-1] if phase_b_results['decoder_losses'] else float('inf')
             final_model_path = save_full_model_checkpoint(model, None, phase_b_epochs, final_loss, run_dir)
-            logger.info(f"✓ Final specialist model saved to {final_model_path}")
+            logger.info(f"[ OK ] Final specialist model saved to {final_model_path}")
             
             # Save final model as a WandB artifact
             if wandb_logger:
@@ -1754,7 +1767,7 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
                 artifact = wandb.Artifact('final_specialist_model', type='model')
                 artifact.add_file(final_model_path)
                 wandb.log_artifact(artifact)
-                print("✓ Final specialist model uploaded to WandB as an artifact")
+                print("[ OK ] Final specialist model uploaded to WandB as an artifact")
             
             # Save results after each epoch
             save_results(results, run_dir)

@@ -18,7 +18,7 @@ from utils.visualizers import load_evaluation_latent_data
 
 def analyze_training_latent_variance(run_dir, save_dir=None):
     """
-    Measure variance per dimension over the training μ-cloud to identify active dimensions.
+    Measure variance per dimension over the training mu-cloud to identify active dimensions.
     """
     print("=== TRAINING LATENT VARIANCE ANALYSIS ===")
     
@@ -62,7 +62,7 @@ def analyze_training_latent_variance(run_dir, save_dir=None):
     ax1.bar(range(latent_dim), var_per_dim)
     ax1.set_xlabel('Latent Dimension')
     ax1.set_ylabel('Variance')
-    ax1.set_title('Variance per Latent Dimension (Training μ-cloud)')
+    ax1.set_title('Variance per Latent Dimension (Training mu-cloud)')
     ax1.grid(True, alpha=0.3)
     
     # Highlight active dimensions
@@ -84,7 +84,7 @@ def analyze_training_latent_variance(run_dir, save_dir=None):
     plt.savefig(variance_plot_path, dpi=150, bbox_inches='tight')
     plt.close()
     
-    print(f"✓ Variance analysis plot saved to: {variance_plot_path}")
+    print(f"[ OK ] Variance analysis plot saved to: {variance_plot_path}")
     
     return {
         'train_mu': train_mu,
@@ -161,14 +161,14 @@ def analyze_trajectory_on_active_dims(trajectory_info_list, variance_analysis, s
         plt.savefig(movement_plot_path, dpi=150, bbox_inches='tight')
         plt.close()
         
-        print(f"✓ Movement analysis plot saved to: {movement_plot_path}")
+        print(f"[ OK ] Movement analysis plot saved to: {movement_plot_path}")
         
         avg_ratio = np.mean(ratios)
         print(f"\nAverage movement ratio (active/full): {avg_ratio:.3f}")
         if avg_ratio < 0.5:
-            print("✓ Confirms hypothesis: Most movement is in high-variance dimensions")
+            print("[ OK ] Confirms hypothesis: Most movement is in high-variance dimensions")
         else:
-            print("⚠ Movement is more distributed across dimensions")
+            print("[ WARNING ] Movement is more distributed across dimensions")
 
 def analyze_gradient_norms_during_optimization(model, trajectory_info_list, device='cuda', save_dir=None):
     """
@@ -288,7 +288,7 @@ def analyze_gradient_norms_during_optimization(model, trajectory_info_list, devi
         plt.savefig(gradient_plot_path, dpi=150, bbox_inches='tight')
         plt.close()
         
-        print(f"✓ Gradient analysis plot saved to: {gradient_plot_path}")
+        print(f"[ OK ] Gradient analysis plot saved to: {gradient_plot_path}")
     
     return {
         'gradient_activity_ratio': gradient_activity_ratio,
@@ -363,17 +363,17 @@ def run_comprehensive_diagnostics(run_dir, key, save_dir=None):
         var_per_dim = variance_analysis['var_per_dim']
         active_dims = variance_analysis['active_dims']
         
-        print(f"✓ Latent dimension: {variance_analysis['latent_dim']}")
-        print(f"✓ Variance range: {var_per_dim.min():.6f} - {var_per_dim.max():.6f}")
-        print(f"✓ Most active dimensions: {active_dims}")
-        print(f"✓ Variance concentration: Top 8 dims have {(var_per_dim[active_dims].sum() / var_per_dim.sum()):.3f} of total variance")
+        print(f"[ OK ] Latent dimension: {variance_analysis['latent_dim']}")
+        print(f"[ OK ] Variance range: {var_per_dim.min():.6f} - {var_per_dim.max():.6f}")
+        print(f"[ OK ] Most active dimensions: {active_dims}")
+        print(f"[ OK ] Variance concentration: Top 8 dims have {(var_per_dim[active_dims].sum() / var_per_dim.sum()):.3f} of total variance")
     
     if gradient_analysis:
         low_activity_ratio = len(gradient_analysis['low_activity_dims']) / len(gradient_analysis['gradient_activity_ratio'])
-        print(f"✓ Low gradient activity dimensions: {low_activity_ratio:.3f} of total")
-        print(f"✓ High gradient activity dimensions: {len(gradient_analysis['high_activity_dims'])}")
+        print(f"[ OK ] Low gradient activity dimensions: {low_activity_ratio:.3f} of total")
+        print(f"[ OK ] High gradient activity dimensions: {len(gradient_analysis['high_activity_dims'])}")
     
-    print(f"\n✓ All diagnostic plots saved to: {save_dir}")
+    print(f"\n[ OK ] All diagnostic plots saved to: {save_dir}")
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Run latent space diagnostics')

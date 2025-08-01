@@ -194,9 +194,9 @@ def restore_original_settings():
         shutil.copy2(backup_settings_file, original_settings_file)
         os.unlink(backup_settings_file)
         settings.load_settings()
-        print("✓ Original settings restored")
+        print("[ OK ] Original settings restored")
     else:
-        print("⚠ No backup settings file found to restore")
+        print("[ WARNING ] No backup settings file found to restore")
 
 def run_single_experiment(run_number: int, config_name: str, config: Dict[str, Any], 
                          modes: List[str], device: str, specialist_mode: bool = False) -> bool:

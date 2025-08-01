@@ -18,6 +18,7 @@ from utils.settings_manager import settings
 import matplotlib.patches as mpatches
 import tempfile
 import matplotlib.cm as cm
+import hashlib
 
 # Unified color palette for latent space visualizations
 COLOR_PALETTE = {
@@ -115,7 +116,7 @@ def load_evaluation_latent_data(run_dir, return_all_components=False):
         for key, key_results in eval_results.items():
             if 'evaluation_latent_data' in key_results:
                 latent_data = key_results['evaluation_latent_data']
-                print(f"✓ Found evaluation latent data for key: {key}")
+                print(f"[ OK ] Found evaluation latent data for key: {key}")
                 
                 if return_all_components:
                     return latent_data
@@ -274,12 +275,12 @@ def get_comprehensive_latent_data(run_dir):
         # Combine all data
         combined_latents = np.vstack(all_latent_data)
         unique_data_types = len(set(all_labels))
-        print(f"✓ Combined {combined_latents.shape[0]} latent vectors from {len(all_latent_data)} sources")
-        print(f"✓ Processed ALL {len(key_results_dict)} evaluation keys")
-        print(f"✓ Support samples: {total_support_samples}, Query samples: {total_query_samples}")
-        print(f"✓ Data types: {unique_data_types}")
-        print(f"✓ Labels distribution: {dict(zip(*np.unique(all_labels, return_counts=True)))}")
-        print(f"✓ Note: Showing individual encoder training data + PoE support/query latents from ALL keys")
+        print(f"[ OK ] Combined {combined_latents.shape[0]} latent vectors from {len(all_latent_data)} sources")
+        print(f"[ OK ] Processed ALL {len(key_results_dict)} evaluation keys")
+        print(f"[ OK ] Support samples: {total_support_samples}, Query samples: {total_query_samples}")
+        print(f"[ OK ] Data types: {unique_data_types}")
+        print(f"[ OK ] Labels distribution: {dict(zip(*np.unique(all_labels, return_counts=True)))}")
+        print(f"[ OK ] Note: Showing individual encoder training data + PoE support/query latents from ALL keys")
         
         # Create t-SNE projection
         perplexity = min(30, len(combined_latents) // 4)
@@ -313,7 +314,7 @@ def get_comprehensive_latent_data_for_trajectory(run_dir):
             return None, None, None, None
             
     except Exception as e:
-        print(f"⚠ Warning: Could not load comprehensive latent data for trajectory: {e}")
+        print(f"[ WARNING ] Warning: Could not load comprehensive latent data for trajectory: {e}")
         return None, None, None, None
 
 ##############################
@@ -483,7 +484,7 @@ def plot_comprehensive_latent_space(results, eval_results=None, save_dir=None):
         plt.savefig(os.path.join(save_dir, 'latent_space_visualization.png'), 
                    dpi=150, bbox_inches='tight')
         plt.close()
-        print("✓ Comprehensive latent space visualization saved (ALL keys aggregated)")
+        print("[ OK ] Comprehensive latent space visualization saved (ALL keys aggregated)")
         print(f"  - Training encoders: {len([l for l in unique_labels if l.startswith('training_enc_')])} encoders")
         print(f"  - Support samples: {total_support} from {len(support_labels)} keys")
         print(f"  - Query samples: {total_query} from {len(query_labels)} keys")
@@ -509,7 +510,7 @@ def visualize_all_results(results, save_dir=None, eval_results=None, epoch=None)
             print("\nPlotting multi-encoder training accuracies...")
             plot_multi_encoder_accuracies(results, save_dir)
         except Exception as e:
-            print(f"⚠ Could not create multi-encoder accuracy plots: {e}")
+            print(f"[ WARNING ] Could not create multi-encoder accuracy plots: {e}")
 
     # Plot trajectory reconstructions if evaluation results available
     if eval_results and save_dir:
@@ -517,7 +518,7 @@ def visualize_all_results(results, save_dir=None, eval_results=None, epoch=None)
             print("\nPlotting trajectory reconstructions...")
             plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir, epoch=epoch)
         except Exception as e:
-            print(f"⚠ Could not create trajectory reconstructions: {e}")
+            print(f"[ WARNING ] Could not create trajectory reconstructions: {e}")
 
     if 'losses_gradient_ascent' in results:
         if len(results['losses_gradient_ascent']) > 0:
@@ -530,7 +531,7 @@ def visualize_all_results(results, save_dir=None, eval_results=None, epoch=None)
             print("\nPlotting training reconstruction analysis...")
             plot_training_reconstruction_analysis(results, save_dir, max_examples=2)
         except Exception as e:
-            print(f"⚠ Could not create training reconstruction analysis: {e}")
+            print(f"[ WARNING ] Could not create training reconstruction analysis: {e}")
 
     # Plot evaluation reconstruction analysis if evaluation results available
     if eval_results and save_dir:
@@ -538,7 +539,7 @@ def visualize_all_results(results, save_dir=None, eval_results=None, epoch=None)
             print("\nPlotting evaluation reconstruction analysis...")
             plot_poe_reconstruction_analysis(eval_results, save_dir, max_examples=2)
         except Exception as e:
-            print(f"⚠ Could not create evaluation reconstruction analysis: {e}")
+            print(f"[ WARNING ] Could not create evaluation reconstruction analysis: {e}")
 
     # Plot encoder influence analysis if evaluation results available
     if eval_results and save_dir:
@@ -546,7 +547,7 @@ def visualize_all_results(results, save_dir=None, eval_results=None, epoch=None)
             print("\nPlotting encoder influence analysis...")
             plot_encoder_influence_analysis(eval_results, save_dir)
         except Exception as e:
-            print(f"⚠ Could not create encoder influence analysis: {e}")
+            print(f"[ WARNING ] Could not create encoder influence analysis: {e}")
 
 def visualize_stored_results(run_dir, epoch=None):
     """Load and visualize results from a previous run with optional epoch specification."""
@@ -558,7 +559,7 @@ def visualize_stored_results(run_dir, epoch=None):
         from utils.wandb_logger import init_wandb_for_mode
         wandb_logger = init_wandb_for_mode('visualize', run_dir)
     except Exception as e:
-        print(f"⚠ Could not initialize wandb for visualize: {e}")
+        print(f"[ WARNING ] Could not initialize wandb for visualize: {e}")
     
     # Try to load training results
     results_file = os.path.join(run_dir, 'results.pkl')
@@ -569,9 +570,9 @@ def visualize_stored_results(run_dir, epoch=None):
         try:
             with open(results_file, 'rb') as f:
                 results = pickle.load(f)
-            print("✓ Training results loaded successfully")
+            print("[ OK ] Training results loaded successfully")
         except Exception as e:
-            print(f"⚠ Warning: Could not load training results: {e}")
+            print(f"[ WARNING ] Warning: Could not load training results: {e}")
             results = None
     else:
         print("No training results file found (results.pkl)")
@@ -585,9 +586,9 @@ def visualize_stored_results(run_dir, epoch=None):
         try:
             with open(params_file, 'rb') as f:
                 model_params = pickle.load(f)
-            print("✓ Model parameters loaded successfully")
+            print("[ OK ] Model parameters loaded successfully")
         except Exception as e:
-            print(f"⚠ Warning: Could not load model parameters: {e}")
+            print(f"[ WARNING ] Warning: Could not load model parameters: {e}")
             model_params = None
     else:
         print("No model parameters file found (model_params.pkl)")
@@ -600,9 +601,9 @@ def visualize_stored_results(run_dir, epoch=None):
         try:
             with open(eval_file, 'rb') as f:
                 eval_results = pickle.load(f)
-            print("✓ Evaluation results loaded successfully")
+            print("[ OK ] Evaluation results loaded successfully")
         except Exception as e:
-            print(f"⚠ Warning: Could not load evaluation results: {e}")
+            print(f"[ WARNING ] Warning: Could not load evaluation results: {e}")
     else:
         print("No evaluation results found (evaluation_results.pkl)")
     
@@ -612,7 +613,7 @@ def visualize_stored_results(run_dir, epoch=None):
         try:
             visualize_all_results(results, run_dir, eval_results, epoch=epoch)
         except Exception as e:
-            print(f"⚠ Warning: Could not visualize training results: {e}")
+            print(f"[ WARNING ] Warning: Could not visualize training results: {e}")
     else:
         print("Skipping training results visualization (no training results available)")
     
@@ -621,9 +622,9 @@ def visualize_stored_results(run_dir, epoch=None):
         print("\nGenerating comprehensive experiment summary JSON...")
         try:
             summary_data = generate_experiment_summary_json(results, model_params, run_dir, eval_results, epoch=epoch)
-            print("✓ Experiment summary JSON generated successfully")
+            print("[ OK ] Experiment summary JSON generated successfully")
         except Exception as e:
-            print(f"⚠ Warning: Could not generate experiment summary JSON: {e}")
+            print(f"[ WARNING ] Warning: Could not generate experiment summary JSON: {e}")
     
     # Upload all plots to wandb if initialized
     if wandb_logger and wandb_logger.is_initialized:
@@ -631,41 +632,41 @@ def visualize_stored_results(run_dir, epoch=None):
             print(f"\n🔼 UPLOADING PLOTS TO WANDB...")
             uploaded_count = wandb_logger.upload_all_plots(run_dir, epoch)
             if uploaded_count > 0:
-                print(f"✓ Successfully uploaded {uploaded_count} plots to wandb")
+                print(f"[ OK ] Successfully uploaded {uploaded_count} plots to wandb")
             else:
-                print("⚠ No plots were uploaded to wandb")
+                print("[ WARNING ] No plots were uploaded to wandb")
         except Exception as e:
-            print(f"\n⚠ Could not upload plots to wandb: {e}")
+            print(f"\n[ WARNING ] Could not upload plots to wandb: {e}")
     else:
-        print(f"\n⚠ Wandb not available - plots saved locally only")
+        print(f"\n[ WARNING ] Wandb not available - plots saved locally only")
 
     # Finish wandb session
     if wandb_logger:
         try:
             wandb_logger.finish()
-            print("✓ Wandb session closed")
+            print("[ OK ] Wandb session closed")
         except Exception as e:
-            print(f"⚠ Error closing wandb session: {e}")
+            print(f"[ WARNING ] Error closing wandb session: {e}")
 
     # Summary of what was found and processed
     print(f"\n=== VISUALIZATION SUMMARY ===")
     print(f"Run directory: {run_dir}")
     print(f"Requested epoch: {epoch if epoch else 'latest'}")
-    print(f"Training results: {'✓ Found and processed' if results is not None else '✗ Not found'}")
-    print(f"Model parameters: {'✓ Found and processed' if model_params is not None else '✗ Not found'}")
+    print(f"Training results: {'[ OK ] Found and processed' if results is not None else '✗ Not found'}")
+    print(f"Model parameters: {'[ OK ] Found and processed' if model_params is not None else '✗ Not found'}")
     eval_found = os.path.exists(os.path.join(run_dir, 'evaluation_results.pkl'))
-    print(f"Evaluation results: {'✓ Found and processed' if eval_found else '✗ Not found'}")
-    print(f"Wandb upload: {'✓ Completed' if wandb_logger and wandb_logger.is_initialized else '✗ Not available'}")
+    print(f"Evaluation results: {'[ OK ] Found and processed' if eval_found else '✗ Not found'}")
+    print(f"Wandb upload: {'[ OK ] Completed' if wandb_logger and wandb_logger.is_initialized else '✗ Not available'}")
     
     if results is None and not eval_found:
-        print("\n⚠ Warning: No results files found in the specified directory.")
+        print("\n[ WARNING ] Warning: No results files found in the specified directory.")
         print("Make sure the directory contains either 'results.pkl' or 'evaluation_results.pkl'")
     elif results is None:
-        print("\n✓ Evaluation-only visualization completed successfully")
+        print("\n[ OK ] Evaluation-only visualization completed successfully")
     elif not eval_found:
-        print("\n✓ Training-only visualization completed successfully")
+        print("\n[ OK ] Training-only visualization completed successfully")
     else:
-        print("\n✓ Complete visualization (training + evaluation) completed successfully")
+        print("\n[ OK ] Complete visualization (training + evaluation) completed successfully")
 
 ##############################
 # RECOVERED FUNCTIONS FOR SPECIFIC VISUALIZATIONS
@@ -815,7 +816,7 @@ def plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir=None, e
     
         # Ensure key_results is a dict with proper structure
         if not isinstance(key_results, dict):
-            print(f"⚠ Key '{key}' does not contain valid results structure")
+            print(f"[ WARNING ] Key '{key}' does not contain valid results structure")
             continue
     
         # Look for trajectory information
@@ -826,7 +827,7 @@ def plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir=None, e
             trajectory_info_list = key_results['trajectory_info']
         
         if not trajectory_info_list:
-            print(f"⚠ No trajectory information found for key {key}")
+            print(f"[ WARNING ] No trajectory information found for key {key}")
             print(f"  Available keys in results: {list(key_results.keys())}")
             if 'metrics' in key_results:
                 print(f"  Available keys in metrics: {list(key_results['metrics'].keys())}")
@@ -842,7 +843,7 @@ def plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir=None, e
                 valid_trajectories.append(t)
         
         if not valid_trajectories:
-            print(f"⚠ No trajectory information found for key {key}")
+            print(f"[ WARNING ] No trajectory information found for key {key}")
             continue
         
         # Determine trajectory type
@@ -861,12 +862,12 @@ def plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir=None, e
                     epoch_to_load = eval_results['evaluation_metadata'].get('epoch')
                 
                 model, _, _, _ = load_model(save_dir, epoch=epoch_to_load, device=device)
-                print(f"  ✓ Loaded model from {save_dir}" + (f" (epoch {epoch_to_load})" if epoch_to_load else ""))
+                print(f"  [ OK ] Loaded model from {save_dir}" + (f" (epoch {epoch_to_load})" if epoch_to_load else ""))
             except Exception as e:
-                print(f"  ⚠ Could not load model: {e}")
+                print(f"  [ WARNING ] Could not load model: {e}")
                 continue
         else:
-            print(f"  ⚠ No save directory provided for model loading")
+            print(f"  [ WARNING ] No save directory provided for model loading")
             continue
                 
         # Create visualizations for each sample (limit to visualize_n_values)
@@ -875,9 +876,13 @@ def plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir=None, e
         
         for sample_idx, trajectory_info in enumerate(valid_trajectories[:max_samples]):
             try:
+                # Create trajectory plots folder
+                trajectory_plots_dir = os.path.join(save_dir, "trajectory_plots") if save_dir else "trajectory_plots"
+                os.makedirs(trajectory_plots_dir, exist_ok=True)
+                
                 # Create filename
                 filename = f'multi_encoder_trajectory_reconstruction_sample_{sample_idx}.png'
-                save_path = os.path.join(save_dir, filename) if save_dir else filename
+                save_path = os.path.join(trajectory_plots_dir, filename)
                 
                 print(f"    Sample {sample_idx + 1}: Creating comprehensive visualization...")
                 
@@ -886,15 +891,15 @@ def plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir=None, e
                     trajectory_info, model, save_path, save_dir, device=device
                 )
                 
-                print(f"    ✓ Saved: {save_path}")
+                print(f"    [ OK ] Saved: {save_path}")
                                 
             except Exception as e:
-                print(f"    ⚠ Error creating visualization for sample {sample_idx}: {e}")
+                print(f"    [ WARNING ] Error creating visualization for sample {sample_idx}: {e}")
                 continue
         
-        print(f"  ✓ Completed trajectory reconstructions for key {key}")
+        print(f"  [ OK ] Completed trajectory reconstructions for key {key}")
     
-    print(f"\n✓ Multi-encoder trajectory reconstruction visualization complete!")
+    print(f"\n[ OK ] Multi-encoder trajectory reconstruction visualization complete!")
 
 def generate_experiment_summary_json(results, model_params, save_dir=None, eval_results=None, epoch=None):
     """Generate comprehensive experiment summary as JSON with accurate statistics and parameters."""
@@ -911,7 +916,7 @@ def generate_experiment_summary_json(results, model_params, save_dir=None, eval_
                     with open(eval_file, 'rb') as f:
                         eval_results = pickle.load(f)
             except Exception as e:
-                print(f"⚠ Could not load evaluation results: {e}")
+                print(f"[ WARNING ] Could not load evaluation results: {e}")
         
         # Load actual model to get precise parameter count
         total_params = None
@@ -928,7 +933,7 @@ def generate_experiment_summary_json(results, model_params, save_dir=None, eval_
                 total_params = sum(p.numel() for p in model.parameters())
                 trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         except Exception as e:
-            print(f"⚠ Could not load model for parameter counting: {e}")
+            print(f"[ WARNING ] Could not load model for parameter counting: {e}")
         
         # Build comprehensive summary
         summary = {
@@ -1096,7 +1101,7 @@ def generate_experiment_summary_json(results, model_params, save_dir=None, eval_
             json_path = os.path.join(save_dir, 'comprehensive_experiment_summary.json')
             with open(json_path, 'w') as f:
                 json.dump(summary, f, indent=2, default=str)
-            print(f"✓ Comprehensive experiment summary saved to {json_path}")
+            print(f"[ OK ] Comprehensive experiment summary saved to {json_path}")
         
         return summary
         
@@ -1122,7 +1127,7 @@ def generate_experiment_summary_json(results, model_params, save_dir=None, eval_
             json_path = os.path.join(save_dir, 'comprehensive_experiment_summary.json')
             with open(json_path, 'w') as f:
                 json.dump(fallback_summary, f, indent=2, default=str)
-            print(f"⚠ Fallback experiment summary saved to {json_path}")
+            print(f"[ WARNING ] Fallback experiment summary saved to {json_path}")
         
         return fallback_summary 
 
@@ -1465,7 +1470,7 @@ def plot_reconstruction_analysis(data_results, save_dir=None, max_examples=2, da
             # Plot reconstruction  
             ax_recon = fig.add_subplot(gs[row_idx, 1])
             ax_recon.imshow(recon_grid, cmap='viridis', interpolation='nearest')
-            size_status = "✓" if grid_size_match else "✗"
+            size_status = "[ OK ]" if grid_size_match else "✗"
             ax_recon.set_title(f'{reconstruction_type} Reconstruction\n{pred_rows}×{pred_cols} {size_status}', 
                               fontsize=11, fontweight='bold')
             ax_recon.axis('off')
@@ -1531,7 +1536,7 @@ Overall Quality:
         save_path = os.path.join(save_dir, filename)
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close()
-        print(f"✓ {dataset_name} reconstruction analysis saved to: {save_path}")
+        print(f"[ OK ] {dataset_name} reconstruction analysis saved to: {save_path}")
         print(f"  - Analyzed {total_samples} {data_type} samples from {len(key_results_dict)} problem keys")
         print(f"  - Mean pixel accuracy: {mean_pixel_acc:.1f}%")
         print(f"  - Grid size accuracy: {grid_accuracy_pct:.1f}%")
@@ -1601,7 +1606,7 @@ def plot_training_reconstruction_analysis(training_results, save_dir=None, max_e
                     # Store reconstruction data
                     training_reconstructions.append({
                         'target': target_seq.tolist(),
-                        'reconstruction': (shape_logits[0].cpu().numpy(), grid_logits[0].cpu().numpy())
+                        'reconstruction': (shape_logits[0].detach().cpu().numpy(), grid_logits[0].detach().cpu().numpy())
                     })
                 except Exception as e:
                     print(f"Error generating reconstruction for sample {idx}: {e}")
@@ -1807,7 +1812,7 @@ def plot_encoder_influence_analysis(eval_results, save_dir=None):
             if influences:
                 mean_trace = np.mean(influences)
                 std_trace = np.std(influences)
-                stats_text.append(f'Enc {enc_idx}: μ={mean_trace:.2f}, σ={std_trace:.2f}')
+                stats_text.append(f'Enc {enc_idx}: mu={mean_trace:.2f}, sigma={std_trace:.2f}')
         
         # Add stats box
         stats_str = '\n'.join(stats_text)
@@ -1823,7 +1828,7 @@ def plot_encoder_influence_analysis(eval_results, save_dir=None):
         save_path = os.path.join(save_dir, filename)
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close()
-        print(f"✓ Encoder covariance analysis saved to: {save_path}")
+        print(f"[ OK ] Encoder covariance analysis saved to: {save_path}")
         print(f"  - Analyzed {num_encoders} encoders across {len(keys_with_data)} evaluation keys")
         
         # Print summary statistics
@@ -1845,7 +1850,7 @@ def plot_encoder_influence_analysis(eval_results, save_dir=None):
                     std_inf = np.std(influences)
                     min_inf = np.min(influences)
                     max_inf = np.max(influences)
-                    print(f"  Encoder {enc_idx}: μ={mean_inf:.4f}, σ={std_inf:.4f}, range=[{min_inf:.4f}, {max_inf:.4f}]")
+                    print(f"  Encoder {enc_idx}: mu={mean_inf:.4f}, sigma={std_inf:.4f}, range=[{min_inf:.4f}, {max_inf:.4f}]")
             
             # Calculate encoder dominance statistics
             dominant_encoder_counts = {f'encoder_{i}': 0 for i in range(num_encoders)}
@@ -1874,8 +1879,8 @@ def generate_per_dimension_kl_plot(model, dataloader, device, epoch, encoder_idx
     """
     Generate per-dimension KL divergence bar plot showing KL divergence for each latent dimension.
     
-    KL divergence per dimension: 0.5·(μ² + σ² – 1 – log σ²)
-    where σ² = exp(log_var), so log σ² = log_var
+    KL divergence per dimension: 0.5*(mu^2 + sigma^2 - 1 - log sigma^2)
+    where sigma^2 = exp(log_var), so log sigma^2 = log_var
     
     Args:
         model: Current model state
@@ -1928,8 +1933,8 @@ def generate_per_dimension_kl_plot(model, dataloader, device, epoch, encoder_idx
                     # Single encoder
                     mu, log_var,_ = model.encoder(input_seq, target_seq)
             
-            all_mus.append(mu.cpu().numpy())
-            all_log_vars.append(log_var.cpu().numpy())
+            all_mus.append(mu.detach().cpu().numpy())
+            all_log_vars.append(log_var.detach().cpu().numpy())
     
     if not all_mus:
         print("No latent data collected for KL divergence plot")
@@ -1940,8 +1945,8 @@ def generate_per_dimension_kl_plot(model, dataloader, device, epoch, encoder_idx
     all_log_vars = np.concatenate(all_log_vars, axis=0)
     
     # Calculate per-dimension KL divergence (SAME as apply_free_bits_per_dimension)
-    # KL = 0.5·(μ² + σ² – 1 – log σ²)
-    # where σ² = exp(log_var), so log σ² = log_var
+    # KL = 0.5*(mu^2 + sigma^2 - 1 - log sigma^2)
+    # where sigma^2 = exp(log_var), so log sigma^2 = log_var
     mu_squared = all_mus ** 2
     sigma_squared = np.exp(all_log_vars)
     log_sigma_squared = all_log_vars
@@ -2064,7 +2069,7 @@ def generate_per_dimension_kl_plot(model, dataloader, device, epoch, encoder_idx
             
             wandb_logger._safe_log(log_dict, step_hint=global_step)
             
-            print(f"✓ Per-dimension KL plot logged to WandB at step {global_step}")
+            print(f"[ OK ] Per-dimension KL plot logged to WandB at step {global_step}")
             print(f"  - Encoder: {'PoE' if encoder_idx is None else encoder_idx}")
             print(f"  - Latent dimension: {latent_dim}")
             print(f"  - Mean KL per dimension (RAW): {mean_kl_raw:.3f}")
@@ -2072,11 +2077,11 @@ def generate_per_dimension_kl_plot(model, dataloader, device, epoch, encoder_idx
             print(f"  - Samples analyzed: {all_mus.shape[0]}")
             
         except Exception as e:
-            print(f"⚠ Failed to log per-dimension KL plot to WandB: {e}")
+            print(f"[ WARNING ] Failed to log per-dimension KL plot to WandB: {e}")
         finally:
             os.unlink(temp_plot_path)
     else:
-        print(f"✓ Per-dimension KL plot generated for epoch {epoch}")
+        print(f"[ OK ] Per-dimension KL plot generated for epoch {epoch}")
         print(f"  - Encoder: {'PoE' if encoder_idx is None else encoder_idx}")
         print(f"  - Latent dimension: {latent_dim}")
         print(f"  - Mean KL per dimension (RAW): {mean_kl_raw:.3f}")
@@ -2086,11 +2091,10 @@ def generate_per_dimension_kl_plot(model, dataloader, device, epoch, encoder_idx
     
     model.train()
 
-def plot_latent_space_by_key_and_encoder(latent_tuples, title, save_path=None, key_colors=None, epoch=None, phase=None, infinite_dataloader=False, logvars=None):
-    """
-    Plot t-SNE of latent vectors, color by key, overlay short key and encoder assignment on each point.
-    If logvars is provided, use -logvar.mean(1) as certainty and scale point size.
-    """
+# --- Global persistent table for latent space slider ---
+wandb_latent_table = None
+
+def plot_latent_space_by_key_and_encoder(latent_tuples, title, save_path=None, key_colors=None, epoch=None, phase=None, infinite_dataloader=False, logvars=None, wandb_logger=None, slider_table=None, upload_slider=False):
     import matplotlib.pyplot as plt
     import numpy as np
     from sklearn.manifold import TSNE
@@ -2114,25 +2118,22 @@ def plot_latent_space_by_key_and_encoder(latent_tuples, title, save_path=None, k
     # Certainty as -logvar.mean(1)
     if logvars is not None:
         certainties = -np.mean(logvars, axis=1)
-        # Normalize and scale for point size
         min_c, max_c = np.min(certainties), np.max(certainties)
         sizes = 40 + 160 * (certainties - min_c) / (max_c - min_c + 1e-8)
     else:
+        certainties = [1]*len(tsne_coords)
         sizes = 60
 
     plt.figure(figsize=(12, 10))
     for i, (coord, key, enc) in enumerate(zip(tsne_coords, keys, encoders)):
         plt.scatter(coord[0], coord[1], color=key_colors[key], s=sizes[i] if isinstance(sizes, np.ndarray) else sizes, alpha=0.7, edgecolors='k', linewidths=0.3)
-        # Overlay short key and encoder
         label = f"{str(key)[:4]}"
         if enc is not None:
             label += f"/E{enc}"
         plt.text(coord[0], coord[1], label, fontsize=7, color=key_colors[key], alpha=0.85)
-    # Legend for keys
     for k in unique_keys:
         plt.scatter([], [], color=key_colors[k], label=f"{str(k)[:4]}")
     plt.legend(title="Key (first 4 chars)", bbox_to_anchor=(1.01, 1), loc='upper left', fontsize=9)
-    # Title
     full_title = title
     if phase:
         full_title = f"{phase.title()} Latent Space: " + full_title
@@ -2147,16 +2148,12 @@ def plot_latent_space_by_key_and_encoder(latent_tuples, title, save_path=None, k
     if save_path:
         plt.savefig(save_path, dpi=180, bbox_inches='tight')
         plt.close()
-        print(f"✓ Saved latent space plot: {save_path}")
+        print(f"[OK] Saved latent space plot: {save_path}")
     else:
         plt.show()
 
-    # If wandb_logger is provided, upload interactive plot
-    if 'wandb_logger' in locals() and wandb_logger is not None and hasattr(wandb_logger, 'is_initialized') and wandb_logger.is_initialized:
-        try:
-            upload_latent_space_slider_to_wandb(latent_tuples, tsne_coords, certainties if logvars is not None else [1]*len(tsne_coords), keys, encoders, wandb_logger, phase or 'latent', epoch)
-        except Exception as e:
-            print(f"⚠ Could not upload interactive plot: {e}")
+    # Note: WandB logging is now handled in the calling function (plot_training_latent_space_per_epoch)
+    # using the correct approach of logging the same image key across epochs
 
 def extract_latent_key_encoder_tuples_from_eval(eval_results, use_training_data=False, return_logvar=False):
     tuples = []
@@ -2218,7 +2215,7 @@ def extract_latent_key_encoder_tuples_from_eval(eval_results, use_training_data=
                                     logvars_list.append(logvars[i])
     return (tuples, np.array(logvars_list)) if return_logvar else tuples
 
-def extract_latent_key_encoder_tuples_from_dataloader(model, dataloader, device, key_list=None, encoder_idx=None, max_batches=5, return_logvar=False):
+def extract_latent_key_encoder_tuples_from_dataloader(model, dataloader, device, key_list=None, encoder_idx=None, max_batches=10, return_logvar=False):
     model.eval()
     tuples = []
     logvars_list = [] if return_logvar else None
@@ -2227,10 +2224,17 @@ def extract_latent_key_encoder_tuples_from_dataloader(model, dataloader, device,
         for batch in dataloader:
             if batch_count >= max_batches:
                 break
-            if isinstance(batch, (list, tuple)) and len(batch) >= 2:
+            
+            # ← MODIFIED: Handle keys properly
+            if isinstance(batch, (list, tuple)) and len(batch) >= 3:
+                input_seq, target_seq, batch_keys = batch[:3]
+                batch_keys = list(batch_keys)  # Ensure it's a list
+            elif isinstance(batch, (list, tuple)) and len(batch) >= 2:
                 input_seq, target_seq = batch[:2]
+                batch_keys = None
             else:
                 continue
+                
             input_seq = input_seq.to(device)
             target_seq = target_seq.to(device)
             # Get latent
@@ -2244,10 +2248,17 @@ def extract_latent_key_encoder_tuples_from_dataloader(model, dataloader, device,
                 enc_idx = encoder_idx if encoder_idx is not None else 0
             else:
                 continue
-            z_np = z.cpu().numpy()
+            z_np = z.detach().cpu().numpy()
             if return_logvar:
-                logvars_list.append(logvar.cpu().numpy())
-            batch_keys = key_list[batch_count*input_seq.size(0):(batch_count+1)*input_seq.size(0)] if key_list else [None]*z_np.shape[0]
+                logvars_list.append(logvar.detach().cpu().numpy())
+            if batch_keys is None:
+                if key_list is not None:
+                    batch_keys = key_list[batch_count*input_seq.size(0):(batch_count+1)*input_seq.size(0)]
+                else:
+                    # For infinite dataloader without keys, use generic labels
+                    batch_keys = [f"batch_{batch_count}_sample_{i}" for i in range(z_np.shape[0])]
+            else:
+                batch_keys = list(batch_keys)
             for latent, key in zip(z_np, batch_keys):
                 tuples.append((latent, key, enc_idx))
             batch_count += 1
@@ -2257,20 +2268,53 @@ def extract_latent_key_encoder_tuples_from_dataloader(model, dataloader, device,
         return tuples, logvars_all
     return tuples
 
-def plot_training_latent_space_per_epoch(model, dataloader, device, epoch, save_dir, key_list=None, encoder_idx=None, infinite_dataloader=False, max_batches=5, wandb_logger=None, input_sequences=None, output_sequences=None, training_keys=None):
+def plot_training_latent_space_per_epoch(model, dataloader, device, epoch, save_dir, key_list=None, encoder_idx=None, infinite_dataloader=False, max_batches=10, wandb_logger=None, input_sequences=None, output_sequences=None, training_keys=None, slider_table=None, upload_slider=False, use_task_optimization=True):
     """
-    Plot the training latent space after each epoch using t-SNE, color by key, overlay encoder assignment.
-    Uses the original training samples for each key to compute latents and plot their arrangement.
-    If input_sequences/output_sequences are not provided, falls back to dataloader-based approach.
-    Also plots certainty as -logvar.mean(1) as point size.
+    Plot training latent space using task-level optimization for proper task clustering.
+    Creates ONE point per task instead of multiple points per realization.
     """
-    tuples = []
-    logvars = None
+    if use_task_optimization and dataloader is not None:
+        # Use task-level optimization for proper task clustering
+        latent_data, task_keys = extract_latent_data_from_dataloader(
+            dataloader, model, max_batches=max_batches, use_optimization=True
+        )
+        
+        # Convert to expected format with real task keys
+        all_tuples = []
+        for encoder_key, encoder_data in latent_data.items():
+            encoder_idx_val = int(encoder_key.split('_')[1]) if '_' in encoder_key else 0
+            for i, latent_z in enumerate(encoder_data['latent_zs']):
+                # Now task_keys has one key per latent (not per sample)
+                task_key = task_keys[i] if task_keys and i < len(task_keys) else f"unknown_task_{i}"
+                all_tuples.append((latent_z, task_key, encoder_idx_val))
+        
+        title = f"Training Latent Space (Task-Level Optimized) - Epoch {epoch+1}"
+        save_path = os.path.join(save_dir, "latent_space_plots", f"training_task_level_epoch_{epoch+1}.png")
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        
+        plot_latent_space_by_key_and_encoder(all_tuples, title=title, save_path=save_path, epoch=epoch, phase="training_task_level", infinite_dataloader=False, wandb_logger=wandb_logger, slider_table=slider_table, upload_slider=upload_slider)
+        return
+    
+    # Original per-sample implementation"""
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from sklearn.manifold import TSNE
+    
+    # Create latent space plots folder
+    latent_plots_dir = os.path.join(save_dir, "latent_space_plots")
+    os.makedirs(latent_plots_dir, exist_ok=True)
+    
+    # Collect all latent data efficiently
+    all_tuples = []
+    all_logvars = []
+    
     if input_sequences is not None and output_sequences is not None and training_keys is not None:
+        # Use pre-computed sequences
         model.eval()
         batch_size = 128
         input_arr = np.array(input_sequences)
         output_arr = np.array(output_sequences)
+        
         if key_list is not None and len(key_list) == len(input_arr):
             sample_keys = key_list
         else:
@@ -2279,7 +2323,321 @@ def plot_training_latent_space_per_epoch(model, dataloader, device, epoch, save_
             for k in training_keys:
                 sample_keys.extend([k] * n_per_key)
             sample_keys.extend([training_keys[-1]] * (len(input_arr) - len(sample_keys)))
-        tuples = []
+        
+        if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
+            num_encoders = getattr(model, 'num_encoders', 1)
+            for enc_idx in range(num_encoders):
+                for i in range(0, len(input_arr), batch_size):
+                    batch_inputs = torch.tensor(input_arr[i:i+batch_size], dtype=torch.float32, device=device)
+                    batch_outputs = torch.tensor(output_arr[i:i+batch_size], dtype=torch.float32, device=device)
+                    mu, logvar, _ = model.multi_encoder.encoders[enc_idx](batch_inputs, batch_outputs)
+                    z = model.reparameterize(mu, logvar)
+                    z_np = z.detach().cpu().numpy()
+                    logvar_np = logvar.detach().cpu().numpy()
+                    batch_keys = sample_keys[i:i+batch_size]
+                    for latent, key, logvar_sample in zip(z_np, batch_keys, logvar_np):
+                        all_tuples.append((latent, key, enc_idx))
+                        all_logvars.append(logvar_sample)
+        else:
+            for i in range(0, len(input_arr), batch_size):
+                batch_inputs = torch.tensor(input_arr[i:i+batch_size], dtype=torch.float32, device=device)
+                batch_outputs = torch.tensor(output_arr[i:i+batch_size], dtype=torch.float32, device=device)
+                mu, logvar, _ = model.encoder(batch_inputs, batch_outputs)
+                z = model.reparameterize(mu, logvar)
+                z_np = z.detach().cpu().numpy()
+                logvar_np = logvar.detach().cpu().numpy()
+                batch_keys = sample_keys[i:i+batch_size]
+                for latent, key, logvar_sample in zip(z_np, batch_keys, logvar_np):
+                    all_tuples.append((latent, key, 0))
+                    all_logvars.append(logvar_sample)
+        model.train()
+    else:
+        # Fallback to dataloader-based approach
+        if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
+            num_encoders = getattr(model, 'num_encoders', 1)
+            for enc_idx in range(num_encoders):
+                t, l = extract_latent_key_encoder_tuples_from_dataloader(
+                    model, dataloader, device, key_list=key_list, encoder_idx=enc_idx, max_batches=max_batches, return_logvar=True
+                )
+                all_tuples.extend(t)
+                if l is not None:
+                    all_logvars.extend(l)
+        else:
+            tuples, logvars = extract_latent_key_encoder_tuples_from_dataloader(
+                model, dataloader, device, key_list=key_list, encoder_idx=encoder_idx, max_batches=max_batches, return_logvar=True
+            )
+            all_tuples.extend(tuples)
+            if logvars is not None:
+                all_logvars.extend(logvars)
+    
+    if not all_tuples:
+        print("No training latent data to plot for epoch.")
+        return
+    
+    # Convert to numpy arrays for efficiency
+    latents = np.array([x[0] for x in all_tuples])
+    keys = [x[1] for x in all_tuples]
+    encoders = [x[2] for x in all_tuples]
+    logvars_array = np.array(all_logvars) if all_logvars else None
+    
+    # Compute t-SNE once for all data
+    tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(latents)//4))
+    tsne_coords = tsne.fit_transform(latents)
+    
+    # Compute certainties
+    if logvars_array is not None:
+        certainties = -np.mean(logvars_array, axis=1)
+        min_c, max_c = np.min(certainties), np.max(certainties)
+        sizes = 40 + 160 * (certainties - min_c) / (max_c - min_c + 1e-8)
+    else:
+        sizes = np.full(len(tsne_coords), 60)
+    
+    # Get unique keys and encoders for color mapping
+    unique_keys = sorted(list(set(keys)))
+    unique_encoders = sorted(list(set(encoders)))
+    
+    # Create color maps
+    key_colors = {k: plt.cm.tab20(i % 20) for i, k in enumerate(unique_keys)}
+    encoder_colors = {e: plt.cm.tab10(i % 10) for i, e in enumerate(unique_encoders)}
+    
+    # 1. Create separate plots for each encoder
+    if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
+        for enc_idx in unique_encoders:
+            # Filter data for this encoder
+            enc_mask = [e == enc_idx for e in encoders]
+            enc_coords = tsne_coords[enc_mask]
+            enc_keys = [k for i, k in enumerate(keys) if enc_mask[i]]
+            enc_sizes = sizes[enc_mask] if isinstance(sizes, np.ndarray) else [sizes[i] for i in range(len(sizes)) if enc_mask[i]]
+            
+            plt.figure(figsize=(10, 8))
+            for i, (coord, key) in enumerate(zip(enc_coords, enc_keys)):
+                plt.scatter(coord[0], coord[1], color=key_colors[key], s=enc_sizes[i], alpha=0.7, edgecolors='k', linewidths=0.3)
+            
+            # Add legend
+            for k in unique_keys:
+                plt.scatter([], [], color=key_colors[k], label=f"{str(k)[:8]}")
+            
+            plt.legend(title="Task Keys", bbox_to_anchor=(1.01, 1), loc='upper left', fontsize=9)
+            plt.title(f"Training Latent Space - Encoder {enc_idx} (Epoch {epoch+1})", fontsize=14)
+            plt.xlabel('t-SNE 1')
+            plt.ylabel('t-SNE 2')
+            plt.tight_layout()
+            
+            save_path = os.path.join(latent_plots_dir, f"latent_space_training_encoder_{enc_idx}_epoch_{epoch+1}.png")
+            plt.savefig(save_path, dpi=180, bbox_inches='tight')
+            plt.close()
+            print(f"[OK] Saved encoder {enc_idx} latent space plot: {save_path}")
+    
+    # 2. Create overview plots: color by encoder and color by task key
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
+    
+    # Plot 1: Color by encoder
+    for i, (coord, enc) in enumerate(zip(tsne_coords, encoders)):
+        ax1.scatter(coord[0], coord[1], color=encoder_colors[enc], s=sizes[i], alpha=0.7, edgecolors='k', linewidths=0.3)
+    
+    for enc in unique_encoders:
+        ax1.scatter([], [], color=encoder_colors[enc], label=f"Encoder {enc}")
+    
+    ax1.legend(title="Encoders", fontsize=10)
+    ax1.set_title(f"Training Latent Space - Color by Encoder (Epoch {epoch+1})", fontsize=14)
+    ax1.set_xlabel('t-SNE 1')
+    ax1.set_ylabel('t-SNE 2')
+    
+    # Plot 2: Color by task key
+    for i, (coord, key) in enumerate(zip(tsne_coords, keys)):
+        ax2.scatter(coord[0], coord[1], color=key_colors[key], s=sizes[i], alpha=0.7, edgecolors='k', linewidths=0.3)
+    
+    for key in unique_keys:
+        ax2.scatter([], [], color=key_colors[key], label=f"{str(key)[:8]}")
+    
+    ax2.legend(title="Task Keys", fontsize=10)
+    ax2.set_title(f"Training Latent Space - Color by Task Key (Epoch {epoch+1})", fontsize=14)
+    ax2.set_xlabel('t-SNE 1')
+    ax2.set_ylabel('t-SNE 2')
+    
+    plt.tight_layout()
+    overview_save_path = os.path.join(latent_plots_dir, f"latent_space_training_overview_epoch_{epoch+1}.png")
+    plt.savefig(overview_save_path, dpi=180, bbox_inches='tight')
+    plt.close()
+    print(f"[OK] Saved overview latent space plot: {overview_save_path}")
+    
+    # Upload to WandB if available
+    if wandb_logger is not None and hasattr(wandb_logger, 'is_initialized') and wandb_logger.is_initialized:
+        try:
+            import wandb
+            
+            # Upload individual encoder plots
+            if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
+                for enc_idx in unique_encoders:
+                    enc_save_path = os.path.join(latent_plots_dir, f"latent_space_training_encoder_{enc_idx}_epoch_{epoch+1}.png")
+                    wandb_logger._safe_log({
+                        f"training_latent_space_encoder_{enc_idx}": wandb.Image(enc_save_path, caption=f"Encoder {enc_idx} - Epoch {epoch+1}")
+                    }, step_hint=epoch+1)
+            
+            # Upload overview plot
+            wandb_logger._safe_log({
+                "training_latent_space_overview": wandb.Image(overview_save_path, caption=f"Overview - Epoch {epoch+1}")
+            }, step_hint=epoch+1)
+            
+            print(f"[ OK ] Uploaded training latent space plots to wandb (epoch {epoch+1})")
+            
+        except Exception as e:
+            print(f"[ WARNING ] Could not upload latent space plots to wandb: {e}")
+
+def plot_evaluation_latent_space_by_key_and_encoder(eval_results, save_dir, epoch=None, wandb_logger=None, slider_table=None, upload_slider=False, use_task_optimization=True):
+    """
+    Plot evaluation latent space showing query and support samples with different colors and shapes.
+    Shows task keys with different colors, and query/support samples with different markers.
+    """
+    if use_task_optimization and 'task_latent_data' in eval_results:
+        print("Creating comprehensive evaluation latent space plot...")
+        latent_plots_dir = os.path.join(save_dir, "latent_space_plots")
+        os.makedirs(latent_plots_dir, exist_ok=True)
+        save_path = os.path.join(latent_plots_dir, f"eval_comprehensive_epoch_{epoch+1}.png" if epoch else "eval_comprehensive.png")
+        
+        task_latent_data = eval_results['task_latent_data']
+        all_tuples = []
+        sample_types = []  # Track if sample is 'query' or 'support'
+        
+        # Extract task latents (one per task)
+        task_latents_dict = task_latent_data.get('task_latents', {})
+        print(f"DEBUG: Found {len(task_latents_dict)} task latents in task_latent_data")
+        print(f"DEBUG: Task keys: {list(task_latents_dict.keys())}")
+            
+        for task_key, task_data in task_latents_dict.items():
+            if 'latent_z' in task_data:
+                latent_z = task_data['latent_z']  # Already numpy array
+                all_tuples.append((latent_z.flatten(), task_key, 0))
+                sample_types.append('task')  # Task-level point
+                print(f"DEBUG: Added task latent for key '{task_key}' with shape {latent_z.shape}")
+            else:
+                print(f"DEBUG: Task key '{task_key}' missing 'latent_z' field")
+        
+        # For task optimization, we have task-level latents which are the main visualization focus
+        # Support and query samples are raw tensors, not individual latents
+        # So we'll just use the task-level latents for now
+        print(f"Created {len(all_tuples)} task-level latent points for visualization")
+        
+        # Note: In task optimization, individual support/query latents aren't stored
+        # because the whole point is to optimize one latent per task, not per sample
+        
+        if all_tuples:
+            title = "Evaluation Latent Space (Query + Support + Task Keys)"
+            plot_evaluation_latent_space_comprehensive(all_tuples, sample_types, title=title, save_path=save_path, epoch=epoch, phase="evaluation_comprehensive", infinite_dataloader=False, wandb_logger=wandb_logger, slider_table=slider_table, upload_slider=upload_slider)
+            print(f"[ OK ] Saved comprehensive evaluation latent space plot: {save_path}")
+            return
+        else:
+            print("No evaluation latent data found for visualization")
+    
+    # Fallback to original per-sample visualization
+    print("No evaluation latent data to plot.")
+    return
+
+def upload_latent_space_slider_to_wandb(tuples, tsne_coords, certainties, keys, encoders, wandb_logger, phase, epoch=None):
+    """
+    Upload latent space data to wandb for panel creation with epoch slider.
+    This accumulates data for the panel slider, not creating an interactive table.
+    """
+    try:
+        import wandb
+        
+        # Create a table with epoch information for panel slider
+        data = []
+        for i, (coord, certainty, key, enc) in enumerate(zip(tsne_coords, certainties, keys, encoders)):
+            data.append({
+                "tsne_x": coord[0],
+                "tsne_y": coord[1],
+                "certainty": certainty,
+                "key": str(key),
+                "encoder": str(enc),
+                "epoch": epoch + 1 if epoch is not None else "final",
+                "phase": phase
+            })
+        
+        # Create a wandb table for panel data
+        table = wandb.Table(data=data, columns=["tsne_x", "tsne_y", "certainty", "key", "encoder", "epoch", "phase"])
+        
+        # Log the table data for panel creation (this will be used by the panel slider)
+        wandb_logger._safe_log({
+            f"{phase}_latent_space_panel_data_epoch_{epoch+1 if epoch is not None else 'final'}": table
+        }, step_hint=epoch+1 if epoch is not None else None)
+        
+        print(f"[ OK ] Uploaded {phase} latent space data for panel slider (epoch {epoch+1 if epoch is not None else 'final'})")
+        
+    except Exception as e:
+        print(f"[ WARNING ] Could not upload latent space data for panel: {e}")
+
+def create_training_evolution_slider(model, dataloader, device, current_epoch, save_dir, wandb_logger, 
+                                   key_list=None, encoder_idx=None, infinite_dataloader=False, max_batches=3,
+                                   input_sequences=None, output_sequences=None, training_keys=None,
+                                   log_interval=1, max_epochs_to_show=20):
+    """
+    Create a training evolution slider that shows latent space evolution across epochs.
+    Accumulates data from multiple epochs and creates a single interactive chart.
+    
+    Args:
+        model: The trained model
+        dataloader: DataLoader for training data
+        device: Device to run on
+        current_epoch: Current epoch number (0-indexed)
+        save_dir: Directory to save plots
+        wandb_logger: WandB logger instance
+        key_list: List of keys for each sample
+        encoder_idx: Specific encoder to use
+        infinite_dataloader: Whether using infinite dataloader
+        max_batches: Maximum batches to process
+        input_sequences: Pre-computed input sequences
+        output_sequences: Pre-computed output sequences
+        training_keys: List of training keys
+        log_interval: How often to log (every N epochs)
+        max_epochs_to_show: Maximum number of epochs to show in slider
+    """
+    # Only create slider every log_interval epochs
+    if (current_epoch + 1) % log_interval != 0:
+        return None
+    
+    # Create evolution folder
+    evolution_dir = os.path.join(save_dir, "training_evolution")
+    os.makedirs(evolution_dir, exist_ok=True)
+    
+    # Initialize or load existing evolution data
+    evolution_data_file = os.path.join(evolution_dir, "evolution_data.pkl")
+    evolution_data = {
+        'epochs': [],
+        'latent_tuples': [],
+        'logvars': [],
+        'tsne_coords': [],
+        'certainties': [],
+        'keys': [],
+        'encoders': []
+    }
+    
+    if os.path.exists(evolution_data_file):
+        try:
+            with open(evolution_data_file, 'rb') as f:
+                evolution_data = pickle.load(f)
+        except Exception as e:
+            print(f"[ WARNING ] Could not load existing evolution data: {e}")
+    
+    # Extract current epoch's latent data
+    current_tuples = []
+    current_logvars = None
+    
+    if input_sequences is not None and output_sequences is not None and training_keys is not None:
+        model.eval()
+        batch_size = 128
+        input_arr = np.array(input_sequences)
+        output_arr = np.array(output_sequences)
+        
+        if key_list is not None and len(key_list) == len(input_arr):
+            sample_keys = key_list
+        else:
+            n_per_key = len(input_arr) // len(training_keys)
+            sample_keys = []
+            for k in training_keys:
+                sample_keys.extend([k] * n_per_key)
+            sample_keys.extend([training_keys[-1]] * (len(input_arr) - len(sample_keys)))
+        
         logvars_list = []
         if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
             num_encoders = getattr(model, 'num_encoders', 1)
@@ -2289,112 +2647,986 @@ def plot_training_latent_space_per_epoch(model, dataloader, device, epoch, save_
                     batch_outputs = torch.tensor(output_arr[i:i+batch_size], dtype=torch.float32, device=device)
                     mu, logvar, _ = model.multi_encoder.encoders[enc_idx](batch_inputs, batch_outputs)
                     z = model.reparameterize(mu, logvar)
-                    z_np = z.cpu().numpy()
-                    logvars_list.append(logvar.cpu().numpy())
+                    z_np = z.detach().cpu().numpy()
+                    logvars_list.append(logvar.detach().cpu().numpy())
                     batch_keys = sample_keys[i:i+batch_size]
                     for latent, key in zip(z_np, batch_keys):
-                        tuples.append((latent, key, enc_idx))
-            logvars = np.concatenate(logvars_list, axis=0)
+                        current_tuples.append((latent, key, enc_idx))
+            current_logvars = np.concatenate(logvars_list, axis=0)
         else:
             for i in range(0, len(input_arr), batch_size):
                 batch_inputs = torch.tensor(input_arr[i:i+batch_size], dtype=torch.float32, device=device)
                 batch_outputs = torch.tensor(output_arr[i:i+batch_size], dtype=torch.float32, device=device)
                 mu, logvar, _ = model.encoder(batch_inputs, batch_outputs)
                 z = model.reparameterize(mu, logvar)
-                z_np = z.cpu().numpy()
-                logvars_list.append(logvar.cpu().numpy())
+                z_np = z.detach().cpu().numpy()
+                logvars_list.append(logvar.detach().cpu().numpy())
                 batch_keys = sample_keys[i:i+batch_size]
                 for latent, key in zip(z_np, batch_keys):
-                    tuples.append((latent, key, 0))
-            logvars = np.concatenate(logvars_list, axis=0)
+                    current_tuples.append((latent, key, 0))
+            current_logvars = np.concatenate(logvars_list, axis=0)
         model.train()
     else:
-        # Fallback: use dataloader-based approach
+        # Fallback to dataloader-based approach
         if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
             num_encoders = getattr(model, 'num_encoders', 1)
-            tuples = []
-            logvars = []
             for enc_idx in range(num_encoders):
                 t, l = extract_latent_key_encoder_tuples_from_dataloader(
                     model, dataloader, device, key_list=key_list, encoder_idx=enc_idx, max_batches=max_batches, return_logvar=True
                 )
-                tuples += t
+                current_tuples += t
                 if l is not None:
-                    logvars.append(l)
-            logvars = np.concatenate(logvars, axis=0) if logvars else None
+                    if current_logvars is None:
+                        current_logvars = l
+                    else:
+                        current_logvars = np.concatenate([current_logvars, l], axis=0)
         else:
-            tuples, logvars = extract_latent_key_encoder_tuples_from_dataloader(
+            current_tuples, current_logvars = extract_latent_key_encoder_tuples_from_dataloader(
                 model, dataloader, device, key_list=key_list, encoder_idx=encoder_idx, max_batches=max_batches, return_logvar=True
             )
-    if not tuples:
-        print("No training latent data to plot for epoch.")
+    
+    if not current_tuples:
+        print("No training latent data to add to evolution slider.")
+        return None
+    
+    # Add current epoch data to evolution data
+    evolution_data['epochs'].append(current_epoch + 1)
+    evolution_data['latent_tuples'].append(current_tuples)
+    evolution_data['logvars'].append(current_logvars)
+    
+    # Calculate t-SNE coordinates and other data for interactive plots
+    if current_tuples:
+        latents = np.array([x[0] for x in current_tuples])
+        keys = [x[1] for x in current_tuples]
+        encoders = [x[2] for x in current_tuples]
+        
+        # Calculate certainties from logvars
+        if current_logvars is not None:
+            certainties = -np.mean(current_logvars, axis=1)
+        else:
+            certainties = np.ones(len(latents)) * 0.5
+        
+        # t-SNE for interactive plot
+        from sklearn.manifold import TSNE
+        tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(latents)//4))
+        tsne_coords = tsne.fit_transform(latents)
+        
+        # Store the data for interactive plots
+        evolution_data['tsne_coords'].append(tsne_coords)
+        evolution_data['certainties'].append(certainties)
+        evolution_data['keys'].append(keys)
+        evolution_data['encoders'].append(encoders)
+    
+    # Limit the number of epochs to show
+    if len(evolution_data['epochs']) > max_epochs_to_show:
+        # Remove oldest epochs
+        remove_count = len(evolution_data['epochs']) - max_epochs_to_show
+        evolution_data['epochs'] = evolution_data['epochs'][remove_count:]
+        evolution_data['latent_tuples'] = evolution_data['latent_tuples'][remove_count:]
+        evolution_data['logvars'] = evolution_data['logvars'][remove_count:]
+        evolution_data['tsne_coords'] = evolution_data['tsne_coords'][remove_count:]
+        evolution_data['certainties'] = evolution_data['certainties'][remove_count:]
+        evolution_data['keys'] = evolution_data['keys'][remove_count:]
+        evolution_data['encoders'] = evolution_data['encoders'][remove_count:]
+    
+    # Save updated evolution data
+    try:
+        with open(evolution_data_file, 'wb') as f:
+            pickle.dump(evolution_data, f)
+    except Exception as e:
+        print(f"[ WARNING ] Could not save evolution data: {e}")
+    
+    # Create evolution slider plot
+    if len(evolution_data['epochs']) >= 2:  # Need at least 2 epochs for evolution
+        create_evolution_slider_plot(evolution_data, evolution_dir, current_epoch, wandb_logger)
+    
+    return evolution_data
+
+def create_evolution_slider_plot(evolution_data, save_dir, current_epoch, wandb_logger):
+    """
+    Create an interactive slider plot showing latent space evolution across epochs.
+    
+    Args:
+        evolution_data: Dictionary containing evolution data across epochs
+        save_dir: Directory to save the plot
+        current_epoch: Current epoch number
+        wandb_logger: WandB logger instance
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from sklearn.manifold import TSNE
+    
+    if len(evolution_data['epochs']) < 2:
         return
-    title = "Training Latent Space"
-    save_path = os.path.join(save_dir, f"latent_space_training_epoch_{epoch+1}.png")
-    plot_latent_space_by_key_and_encoder(
-        tuples,
-        title=title,
-        save_path=save_path,
-        epoch=epoch,
-        phase="training",
-        infinite_dataloader=infinite_dataloader,
-        logvars=logvars
-    )
-    # Upload to wandb if logger is provided
+    
+    # Create evolution folder
+    evolution_dir = os.path.join(save_dir, "training_evolution")
+    os.makedirs(evolution_dir, exist_ok=True)
+    
+    # Create figure with subplots for each epoch
+    n_epochs = len(evolution_data['epochs'])
+    fig, axes = plt.subplots(2, min(5, n_epochs), figsize=(20, 8))
+    if n_epochs == 1:
+        axes = axes.reshape(1, -1)
+    elif n_epochs <= 5:
+        axes = axes.reshape(1, -1)
+    
+    # Get all unique keys for consistent coloring
+    all_keys = set()
+    for tuples in evolution_data['latent_tuples']:
+        for _, key, _ in tuples:
+            all_keys.add(key)
+    unique_keys = sorted(list(all_keys))
+    key_colors = {k: plt.cm.tab20(i % 20) for i, k in enumerate(unique_keys)}
+    
+    # Plot each epoch
+    for epoch_idx, (epoch, tuples, logvars) in enumerate(zip(
+        evolution_data['epochs'], 
+        evolution_data['latent_tuples'], 
+        evolution_data['logvars']
+    )):
+        if epoch_idx >= 10:  # Only show first 10 epochs in grid
+            break
+            
+        ax = axes[epoch_idx // 5, epoch_idx % 5] if n_epochs > 5 else axes[epoch_idx]
+        
+        if not tuples:
+            continue
+        
+        # Extract data
+        latents = np.array([x[0] for x in tuples])
+        keys = [x[1] for x in tuples]
+        encoders = [x[2] for x in tuples]
+        
+        # t-SNE
+        tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(latents)//4))
+        tsne_coords = tsne.fit_transform(latents)
+        
+        # Certainty
+        if logvars is not None:
+            certainties = -np.mean(logvars, axis=1)
+            min_c, max_c = np.min(certainties), np.max(certainties)
+            sizes = 40 + 160 * (certainties - min_c) / (max_c - min_c + 1e-8)
+        else:
+            sizes = 60
+        
+        # Plot points
+        for i, (coord, key, enc) in enumerate(zip(tsne_coords, keys, encoders)):
+            ax.scatter(coord[0], coord[1], color=key_colors[key], s=sizes[i] if isinstance(sizes, np.ndarray) else sizes, 
+                      alpha=0.7, edgecolors='k', linewidths=0.3)
+        
+        ax.set_title(f'Epoch {epoch}', fontsize=10)
+        ax.set_xlabel('t-SNE 1')
+        ax.set_ylabel('t-SNE 2')
+    
+    # Add legend
+    if n_epochs <= 5:
+        legend_ax = axes[-1] if n_epochs > 1 else axes
+    else:
+        legend_ax = axes[1, -1]
+    
+    for k in unique_keys:
+        legend_ax.scatter([], [], color=key_colors[k], label=f"{str(k)[:4]}")
+    legend_ax.legend(title="Key (first 4 chars)", fontsize=8, loc='upper right')
+    
+    plt.suptitle(f'Training Latent Space Evolution (Epochs {evolution_data["epochs"][0]}-{evolution_data["epochs"][-1]})', fontsize=14)
+    plt.tight_layout()
+    
+    # Save plot
+    evolution_plot_path = os.path.join(evolution_dir, f"training_evolution_epoch_{current_epoch+1}.png")
+    plt.savefig(evolution_plot_path, dpi=180, bbox_inches='tight')
+    plt.close()
+    
+    # Upload to wandb with proper slider format
     if wandb_logger is not None and hasattr(wandb_logger, 'is_initialized') and wandb_logger.is_initialized:
         try:
             import wandb
+            
+            # Create a wandb table for the evolution slider
+            evolution_table = wandb.Table(columns=["epoch", "image", "description"])
+            
+            # Add each epoch's plot to the table
+            for epoch_num in evolution_data['epochs']:
+                epoch_plot_path = os.path.join(evolution_dir, f"training_evolution_epoch_{epoch_num}.png")
+                if os.path.exists(epoch_plot_path):
+                    evolution_table.add_data(epoch_num, wandb.Image(epoch_plot_path), f"Training Evolution Epoch {epoch_num}")
+            
+            # Log the evolution slider as interactive panel
             wandb_logger._safe_log({
-                f"latent_space/training_epoch_{epoch+1}": wandb.Image(save_path)
-            }, step_hint=epoch+1)
-            print(f"✓ Uploaded latent space plot to wandb: {save_path}")
+                f"training_evolution_slider": evolution_table
+            }, step_hint=current_epoch+1)
+            
+            # Also log the current evolution plot as individual image
+            wandb_logger._safe_log({
+                f"training_evolution_epoch_{current_epoch+1}": wandb.Image(evolution_plot_path)
+            }, step_hint=current_epoch+1)
+            
+            # Create interactive scatter plot for training evolution (like trajectory plots)
+            if len(evolution_data['epochs']) > 1:
+                # Combine all epochs' data for interactive plot
+                all_tsne_coords = []
+                all_certainties = []
+                all_keys = []
+                all_encoders = []
+                all_epochs = []
+                
+                for epoch_idx, epoch_num in enumerate(evolution_data['epochs']):
+                    if epoch_idx < len(evolution_data['tsne_coords']):
+                        all_tsne_coords.extend(evolution_data['tsne_coords'][epoch_idx])
+                        all_certainties.extend(evolution_data['certainties'][epoch_idx])
+                        all_keys.extend(evolution_data['keys'][epoch_idx])
+                        all_encoders.extend(evolution_data['encoders'][epoch_idx])
+                        all_epochs.extend([epoch_num] * len(evolution_data['tsne_coords'][epoch_idx]))
+                
+                if all_tsne_coords:
+                    # Create interactive scatter plot
+                    data = []
+                    for i, (coord, certainty, key, enc, epoch) in enumerate(zip(all_tsne_coords, all_certainties, all_keys, all_encoders, all_epochs)):
+                        data.append({
+                            "tsne_x": coord[0],
+                            "tsne_y": coord[1],
+                            "certainty": certainty,
+                            "key": str(key),
+                            "encoder": str(enc),
+                            "epoch": epoch
+                        })
+                    
+                    table = wandb.Table(data=data, columns=["tsne_x", "tsne_y", "certainty", "key", "encoder", "epoch"])
+                    plot = wandb.plot_table(
+                        "wandb/scatter",
+                        table,
+                        {"x": "tsne_x", "y": "tsne_y", "size": "certainty", "color": "key", "label": "encoder", "group": "epoch"},
+                        title=f"Training Latent Space Evolution (Epochs {evolution_data['epochs'][0]}-{evolution_data['epochs'][-1]})"
+                    )
+                    wandb_logger._safe_log({
+                        f"training_evolution_interactive": plot
+                    }, step_hint=current_epoch+1)
+                    
+                    print(f"[ OK ] Uploaded training evolution plot and slider to wandb: {evolution_plot_path}")
         except Exception as e:
-            print(f"⚠ Could not upload latent space plot to wandb: {e}")
+            print(f"[ WARNING ] Could not upload training evolution plot to wandb: {e}")
+    
+    print(f"[ OK ] Created training evolution plot: {evolution_plot_path}")
 
-def plot_evaluation_latent_space_by_key_and_encoder(eval_results, save_dir, epoch=None):
+def create_training_latent_space_panel(model, dataloader, device, current_epoch, save_dir, wandb_logger, 
+                                     key_list=None, encoder_idx=None, infinite_dataloader=False, max_batches=3,
+                                     input_sequences=None, output_sequences=None, training_keys=None,
+                                     log_interval=1, max_epochs_to_show=20):
     """
-    Plot the evaluation latent space using t-SNE, color by key, overlay encoder assignment.
-    Also plots certainty as -logvar.mean(1) as point size.
+    Create a training latent space panel with epoch slider for wandb.
+    This creates a panel that allows sliding between different epochs to visualize latent space evolution.
+    
+    Args:
+        model: The trained model
+        dataloader: DataLoader for training data
+        device: Device to run on
+        current_epoch: Current epoch number (0-indexed)
+        save_dir: Directory to save plots
+        wandb_logger: WandB logger instance
+        key_list: List of keys for each sample
+        encoder_idx: Specific encoder to use
+        infinite_dataloader: Whether using infinite dataloader
+        max_batches: Maximum batches to process
+        input_sequences: Pre-computed input sequences
+        output_sequences: Pre-computed output sequences
+        training_keys: List of training keys
+        log_interval: How often to log (every N epochs)
+        max_epochs_to_show: Maximum number of epochs to show in panel
     """
-    tuples, logvars = extract_latent_key_encoder_tuples_from_eval(eval_results, use_training_data=False, return_logvar=True)
-    if not tuples:
-        print("No evaluation latent data to plot.")
-        return
-    title = "Evaluation Latent Space"
-    save_path = os.path.join(save_dir, f"latent_space_evaluation.png" if epoch is None else f"latent_space_evaluation_epoch_{epoch+1}.png")
-    plot_latent_space_by_key_and_encoder(
-        tuples,
-        title=title,
-        save_path=save_path,
-        epoch=epoch,
-        phase="evaluation",
-        infinite_dataloader=False,
-        logvars=logvars
+    # Only create panel every log_interval epochs
+    if (current_epoch + 1) % log_interval != 0:
+        return None
+    
+    # Create panel folder
+    panel_dir = os.path.join(save_dir, "training_panel")
+    os.makedirs(panel_dir, exist_ok=True)
+    
+    # Initialize or load existing panel data
+    panel_data_file = os.path.join(panel_dir, "panel_data.pkl")
+    panel_data = {
+        'epochs': [],
+        'latent_tuples': [],
+        'logvars': [],
+        'tsne_coords': [],
+        'certainties': [],
+        'keys': [],
+        'encoders': []
+    }
+    
+    if os.path.exists(panel_data_file):
+        try:
+            with open(panel_data_file, 'rb') as f:
+                panel_data = pickle.load(f)
+        except Exception as e:
+            print(f"[ WARNING ] Could not load existing panel data: {e}")
+    
+    # Extract current epoch's latent data
+    current_tuples = []
+    current_logvars = None
+    
+    if input_sequences is not None and output_sequences is not None and training_keys is not None:
+        model.eval()
+        batch_size = 128
+        input_arr = np.array(input_sequences)
+        output_arr = np.array(output_sequences)
+        
+        if key_list is not None and len(key_list) == len(input_arr):
+            sample_keys = key_list
+        else:
+            n_per_key = len(input_arr) // len(training_keys)
+            sample_keys = []
+            for k in training_keys:
+                sample_keys.extend([k] * n_per_key)
+            sample_keys.extend([training_keys[-1]] * (len(input_arr) - len(sample_keys)))
+        
+        logvars_list = []
+        if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
+            num_encoders = getattr(model, 'num_encoders', 1)
+            for enc_idx in range(num_encoders):
+                for i in range(0, len(input_arr), batch_size):
+                    batch_inputs = torch.tensor(input_arr[i:i+batch_size], dtype=torch.float32, device=device)
+                    batch_outputs = torch.tensor(output_arr[i:i+batch_size], dtype=torch.float32, device=device)
+                    mu, logvar, _ = model.multi_encoder.encoders[enc_idx](batch_inputs, batch_outputs)
+                    z = model.reparameterize(mu, logvar)
+                    z_np = z.detach().cpu().numpy()
+                    logvars_list.append(logvar.detach().cpu().numpy())
+                    batch_keys = sample_keys[i:i+batch_size]
+                    for latent, key in zip(z_np, batch_keys):
+                        current_tuples.append((latent, key, enc_idx))
+            current_logvars = np.concatenate(logvars_list, axis=0)
+        else:
+            for i in range(0, len(input_arr), batch_size):
+                batch_inputs = torch.tensor(input_arr[i:i+batch_size], dtype=torch.float32, device=device)
+                batch_outputs = torch.tensor(output_arr[i:i+batch_size], dtype=torch.float32, device=device)
+                mu, logvar, _ = model.encoder(batch_inputs, batch_outputs)
+                z = model.reparameterize(mu, logvar)
+                z_np = z.detach().cpu().numpy()
+                logvars_list.append(logvar.detach().cpu().numpy())
+                batch_keys = sample_keys[i:i+batch_size]
+                for latent, key in zip(z_np, batch_keys):
+                    current_tuples.append((latent, key, 0))
+            current_logvars = np.concatenate(logvars_list, axis=0)
+        model.train()
+    else:
+        # Fallback to dataloader-based approach
+        if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
+            num_encoders = getattr(model, 'num_encoders', 1)
+            for enc_idx in range(num_encoders):
+                t, l = extract_latent_key_encoder_tuples_from_dataloader(
+                    model, dataloader, device, key_list=key_list, encoder_idx=enc_idx, max_batches=max_batches, return_logvar=True
+                )
+                current_tuples += t
+                if l is not None:
+                    if current_logvars is None:
+                        current_logvars = l
+                    else:
+                        current_logvars = np.concatenate([current_logvars, l], axis=0)
+        else:
+            current_tuples, current_logvars = extract_latent_key_encoder_tuples_from_dataloader(
+                model, dataloader, device, key_list=key_list, encoder_idx=encoder_idx, max_batches=max_batches, return_logvar=True
+            )
+    
+    if not current_tuples:
+        print("No training latent data for panel.")
+        return None
+    
+    # Calculate t-SNE coordinates for current epoch
+    latents = np.array([x[0] for x in current_tuples])
+    from sklearn.manifold import TSNE
+    tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(latents)//4))
+    current_tsne_coords = tsne.fit_transform(latents)
+    
+    # Calculate certainties from logvars if available
+    if current_logvars is not None:
+        current_certainties = -np.mean(current_logvars, axis=1)
+    else:
+        current_certainties = np.ones(len(latents)) * 0.5
+    
+    # Extract keys and encoders
+    current_keys = [x[1] for x in current_tuples]
+    current_encoders = [x[2] for x in current_tuples]
+    
+    # Add current epoch data to panel data
+    panel_data['epochs'].append(current_epoch + 1)
+    panel_data['latent_tuples'].append(current_tuples)
+    panel_data['logvars'].append(current_logvars)
+    panel_data['tsne_coords'].append(current_tsne_coords)
+    panel_data['certainties'].append(current_certainties)
+    panel_data['keys'].append(current_keys)
+    panel_data['encoders'].append(current_encoders)
+    
+    # Limit the number of epochs to show
+    if len(panel_data['epochs']) > max_epochs_to_show:
+        # Remove oldest epochs
+        panel_data['epochs'] = panel_data['epochs'][-max_epochs_to_show:]
+        panel_data['latent_tuples'] = panel_data['latent_tuples'][-max_epochs_to_show:]
+        panel_data['logvars'] = panel_data['logvars'][-max_epochs_to_show:]
+        panel_data['tsne_coords'] = panel_data['tsne_coords'][-max_epochs_to_show:]
+        panel_data['certainties'] = panel_data['certainties'][-max_epochs_to_show:]
+        panel_data['keys'] = panel_data['keys'][-max_epochs_to_show:]
+        panel_data['encoders'] = panel_data['encoders'][-max_epochs_to_show:]
+    
+    # Save panel data
+    with open(panel_data_file, 'wb') as f:
+        pickle.dump(panel_data, f)
+    
+    # Create panel visualization
+    if wandb_logger and hasattr(wandb_logger, 'is_initialized') and wandb_logger.is_initialized:
+        try:
+            import wandb
+            
+            # Create a comprehensive table with all epoch data for panel
+            all_data = []
+            for epoch_idx, epoch in enumerate(panel_data['epochs']):
+                tsne_coords = panel_data['tsne_coords'][epoch_idx]
+                certainties = panel_data['certainties'][epoch_idx]
+                keys = panel_data['keys'][epoch_idx]
+                encoders = panel_data['encoders'][epoch_idx]
+                
+                for i, (coord, certainty, key, enc) in enumerate(zip(tsne_coords, certainties, keys, encoders)):
+                    all_data.append({
+                        "tsne_x": coord[0],
+                        "tsne_y": coord[1],
+                        "certainty": certainty,
+                        "key": str(key),
+                        "encoder": str(enc),
+                        "epoch": epoch,
+                        "epoch_idx": epoch_idx
+                    })
+            
+            # Create wandb table for panel
+            panel_table = wandb.Table(data=all_data, columns=["tsne_x", "tsne_y", "certainty", "key", "encoder", "epoch", "epoch_idx"])
+            
+            # Log the panel table
+            wandb_logger._safe_log({
+                "training_latent_space_panel": panel_table
+            }, step_hint=current_epoch+1)
+            
+            print(f"[ OK ] Created training latent space panel with {len(panel_data['epochs'])} epochs")
+            
+        except Exception as e:
+            print(f"[ WARNING ] Could not create training latent space panel: {e}")
+    
+    return panel_data
+
+def create_standalone_latent_space_plot(trajectory_info, model, save_dir, epoch, sample_idx, evaluated_key=None, device='cuda', wandb_logger=None, eval_results=None):
+    """
+    Create a standalone latent space plot for a specific trajectory.
+    This replicates exactly the latent space visualization from the trajectory figure.
+    
+    Args:
+        trajectory_info: Dictionary containing trajectory data
+        model: The trained model
+        save_dir: Directory to save the plot
+        epoch: Current epoch number
+        sample_idx: Index of the sample (0, 1, 2, etc.)
+        evaluated_key: The key being evaluated (optional)
+        device: Device to run on
+        wandb_logger: WandB logger for uploading plots
+        eval_results: Evaluation results containing support/query latents
+        
+    Returns:
+        str: Path to the saved plot file
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import os
+    
+    # Create trajectory plots directory
+    trajectory_plots_dir = os.path.join(save_dir, "trajectory_plots")
+    os.makedirs(trajectory_plots_dir, exist_ok=True)
+    
+    # Generate filename with the specified naming convention
+    # Extract key hash from evaluated_key if available
+    key_hash = ""
+    if evaluated_key:
+        # Create a hash from the key (first 8 characters of hash)
+        import hashlib
+        key_hash = hashlib.md5(evaluated_key.encode()).hexdigest()[:8]
+    
+    filename = f"trajectory_epoch{epoch}_{key_hash}_sample{sample_idx}_latent_space_wandb.png"
+    save_path = os.path.join(trajectory_plots_dir, filename)
+    
+    print(f"Creating standalone latent space plot: {filename}")
+    
+    # Load unified latent data (training + support + query + trajectory) - same as trajectory figure
+    from LPN_reproduction.evaluate_trajectory import load_unified_latent_data_with_trajectory
+    training_latent_data, training_tsne_2d, training_labels, training_colors, trajectory_tsne_2d, all_labels, all_tsne_2d = load_unified_latent_data_with_trajectory(
+        save_dir, model, device, trajectory_info, eval_results=eval_results
     )
+    
+    # Get trajectory data
+    z_vectors = trajectory_info.get('z_vectors', [])
+    losses = trajectory_info.get('losses', [])
+    
+    if not z_vectors or len(z_vectors) < 2:
+        print(f"Warning: No trajectory data found for sample {sample_idx}")
+        return None
+    
+    # Create the plot - replicate exactly the trajectory figure latent space
+    fig, ax = plt.subplots(figsize=(12, 10))
+    
+    # Plot trajectory in latent space using precomputed t-SNE coordinates (same as trajectory figure)
+    if training_latent_data is not None and training_tsne_2d is not None:
+        # Plot training background using precomputed coordinates - COLOR BY ENCODER + HIGHLIGHT SAME KEY
+        if training_colors is not None and training_labels is not None:
+            # Extract keys and encoders from training labels (assuming format like "training_enc_0_key_1234")
+            training_keys = []
+            training_encoders = []
+            for label in training_labels:
+                if '_key_' in label and 'training_enc_' in label:
+                    # Extract encoder and key
+                    encoder_part = label.split('_key_')[0]
+                    encoder = encoder_part.split('training_enc_')[-1]
+                    key = label.split('_key_')[-1]
+                    training_keys.append(key)
+                    training_encoders.append(int(encoder))
+                else:
+                    training_keys.append(label)
+                    training_encoders.append(0)  # Default encoder
+            
+            # Get the key of the sample being evaluated
+            evaluated_key = trajectory_info.get('evaluated_key', 'unknown')
+            print(f"DEBUG: Using evaluated_key: '{evaluated_key}'")
+            
+            # Create light colors for encoders (different light colors for each encoder)
+            unique_encoders = sorted(list(set(training_encoders)))
+            encoder_colors = {
+                enc: plt.cm.tab10(enc % 10) for enc in unique_encoders  # More visible colors from tab10
+            }
+            
+            # Create bright colors for the evaluated key (replaced yellow with more visible colors)
+            bright_colors = ['red', 'orange', 'darkorange', 'lime', 'cyan', 'magenta', 'pink', 'brown']
+            evaluated_color = bright_colors[hash(evaluated_key) % len(bright_colors)]
+            
+            # Plot background points colored by encoder (light colors)
+            for encoder in unique_encoders:
+                indices = [i for i, enc in enumerate(training_encoders) if enc == encoder]
+                if indices:
+                    x_coords = training_tsne_2d[indices, 0]
+                    y_coords = training_tsne_2d[indices, 1]
+                    color = encoder_colors[encoder]
+                    
+                    # Use alpha for background effect
+                    ax.scatter(x_coords, y_coords, color=color, alpha=0.6, s=35, 
+                           edgecolors='none', label=f'Encoder {encoder} (Light)')
+            
+            # Highlight samples with the same key as evaluated sample (bright colors)
+            same_key_indices = [i for i, key in enumerate(training_keys) if key == evaluated_key]
+            if same_key_indices:
+                x_coords = training_tsne_2d[same_key_indices, 0]
+                y_coords = training_tsne_2d[same_key_indices, 1]
+                
+                # Use bright color for same key samples
+                ax.scatter(x_coords, y_coords, color=evaluated_color, alpha=0.9, s=50, 
+                       edgecolors='black', linewidth=1.5, 
+                       label=f'Same Key: {evaluated_key[:8]} (Bright)')
+            
+            # Plot support and query samples for the evaluated key only
+            if all_labels is not None and all_tsne_2d is not None:
+                # Filter support samples for the evaluated key
+                support_indices = []
+                for i, label in enumerate(all_labels):
+                    if 'support' in label and evaluated_key in label:
+                        support_indices.append(i)
+                
+                print(f"DEBUG: Found {len(support_indices)} support samples for key '{evaluated_key}'")
+                if support_indices:
+                    x_coords = all_tsne_2d[support_indices, 0]
+                    y_coords = all_tsne_2d[support_indices, 1]
+                    ax.scatter(x_coords, y_coords, color='blue', alpha=0.8, s=35, 
+                            marker='s', edgecolors='black', linewidth=1.0, label='Support Samples')
+                
+                # Filter query samples for the evaluated key
+                query_indices = []
+                for i, label in enumerate(all_labels):
+                    if 'query' in label and evaluated_key in label:
+                        query_indices.append(i)
+                
+                print(f"DEBUG: Found {len(query_indices)} query samples for key '{evaluated_key}'")
+                if query_indices:
+                    x_coords = all_tsne_2d[query_indices, 0]
+                    y_coords = all_tsne_2d[query_indices, 1]
+                    ax.scatter(x_coords, y_coords, color='red', alpha=0.8, s=35, 
+                            marker='^', edgecolors='black', linewidth=1.0, label='Query Samples')
+    
+    # Use unified trajectory coordinates (already computed in unified t-SNE) - same as trajectory figure
+    z_2d = trajectory_tsne_2d
+    
+    if z_2d is not None:
+        # Fix: Ensure losses array matches trajectory length
+        if len(losses) != len(z_2d):
+            print(f"Warning: losses length ({len(losses)}) != trajectory length ({len(z_2d)})")
+            # Use the shorter length to avoid mismatch
+            min_length = min(len(losses), len(z_2d))
+            z_2d = z_2d[:min_length]
+            losses = losses[:min_length]
+            print(f"Adjusted to length: {min_length}")
+        
+        # Plot trajectory in latent space using precomputed t-SNE coordinates (same as trajectory figure)
+        trajectory_scatter = ax.scatter(z_2d[:, 0], z_2d[:, 1], c=losses, cmap='plasma', 
+                                     s=50, alpha=0.6, edgecolors='black', linewidth=2)
+        
+        # Draw arrows between consecutive trajectory points - same as trajectory figure
+        for i in range(len(z_2d) - 1):
+            ax.annotate('', xy=z_2d[i+1], xytext=z_2d[i],
+                     arrowprops=dict(arrowstyle='->', color='red', alpha=0.8, lw=2))
+        
+        # Mark start and end points - same as trajectory figure
+        ax.scatter(z_2d[0, 0], z_2d[0, 1], color='green', s=100, marker='o', 
+                label='Trajectory Start', edgecolors='black', linewidth=3, zorder=10, alpha=0.8)
+        ax.scatter(z_2d[-1, 0], z_2d[-1, 1], color='red', s=100, marker='s', 
+                label='Trajectory End', edgecolors='black', linewidth=3, zorder=10, alpha=0.8)
+        
+        # Add colorbar - same as trajectory figure
+        cbar = plt.colorbar(trajectory_scatter, ax=ax, shrink=0.6)
+        cbar.set_label('Loss', rotation=270, labelpad=20)
+    
+    # Add title
+    title = f"Trajectory Latent Space - Sample {sample_idx}"
+    if evaluated_key:
+        title += f" (Key: {evaluated_key[:20]}{'...' if len(evaluated_key) > 20 else ''})"
+    title += f" (Epoch {epoch})"
+    ax.set_title(title, fontsize=14)
+    
+    # Add legend
+    ax.legend(bbox_to_anchor=(1.01, 1), loc='upper left', fontsize=10)
+    
+    plt.xlabel('t-SNE 1')
+    plt.ylabel('t-SNE 2')
+    plt.tight_layout()
+    
+    # Save the plot
+    plt.savefig(save_path, dpi=180, bbox_inches='tight')
+    plt.close()
+    
+    print(f"[OK] Saved standalone latent space plot: {save_path}")
+    
+    # Upload to WandB if available - using step = epoch
+    if wandb_logger is not None and hasattr(wandb_logger, 'is_initialized') and wandb_logger.is_initialized:
+        try:
+            import wandb
+            
+            # Use consistent key naming for slider visualization across epochs (same as trajectory plots)
+            # Format: trajectory_latent_space_{key}_sample{idx} - this creates sliders
+            panel_name = f"trajectory_latent_space_{evaluated_key}_sample{sample_idx}" if evaluated_key else f"trajectory_latent_space_sample_{sample_idx}"
+            
+            wandb_logger._safe_log({
+                panel_name: wandb.Image(save_path, caption=f"Trajectory Latent Space - Sample {sample_idx} - Epoch {epoch}")
+            }, step_hint=epoch)  # Using step = epoch as requested
+            
+            print(f"[ OK ] Uploaded trajectory latent space plot to wandb panel '{panel_name}' (step={epoch})")
+            
+        except Exception as e:
+            print(f"[ WARNING ] Could not upload trajectory latent space plot to wandb: {e}")
+    
+    return save_path
 
-def upload_latent_space_slider_to_wandb(tuples, tsne_coords, certainties, keys, encoders, wandb_logger, phase, epoch=None):
+def extract_latent_data_from_dataloader(dataloader, model, max_batches=3, use_optimization=True):
+    from utils.latent_functions import optimize_task_latent
+    device = next(model.parameters()).device
+    model.eval()
+    
+    if use_optimization:
+        # Group samples by task key and preserve sample info
+        task_samples = {}
+        sample_to_task = []  # Track (sample_idx, task_key) mapping
+        
+        for batch_idx, batch in enumerate(dataloader):
+            if batch_idx >= max_batches: break
+            
+            batch_input, batch_target, batch_keys = batch[:3] if len(batch) >= 3 else (*batch[:2], [f"sample_{i}" for i in range(batch[0].size(0))])
+            batch_input, batch_target = batch_input.to(device), batch_target.to(device)
+            
+            for i, key in enumerate(batch_keys):
+                if key not in task_samples: task_samples[key] = []
+                task_samples[key].append((batch_input[i:i+1], batch_target[i:i+1]))
+                sample_to_task.append(key)
+        
+        # Optimize per task and assign to all samples of that task
+        latent_optimization = settings.get_latent_optimization()
+        task_latents = {}  # Store optimized latents per task
+        
+        for task_key, support_samples in task_samples.items():
+            task_latent, _, _ = optimize_task_latent(
+                model, support_samples, task_key,
+                num_steps=latent_optimization['training']['num_steps'],
+                lr=latent_optimization['training']['learning_rate']
+            )
+            task_latents[task_key] = task_latent.cpu().numpy().flatten()
+        
+        # Create result with one entry per task (not per sample)
+        result = {'encoder_0': {'latent_zs': [], 'data_type': 'task_optimized'}}
+        task_keys_ordered = []  # Keep track of task order
+        
+        for task_key, task_latent in task_latents.items():
+            result['encoder_0']['latent_zs'].append(task_latent)
+            task_keys_ordered.append(task_key)
+        
+        return result, task_keys_ordered
+    
+    # Regular extraction
+    result = {'encoder_0': {'latent_zs': [], 'data_type': 'training'}}
+    sample_keys = []
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(dataloader):
+            if batch_idx >= max_batches: break
+            batch_input, batch_target, batch_keys = batch[:3] if len(batch) >= 3 else (*batch[:2], [f"sample_{i}" for i in range(batch[0].size(0))])
+            mu, log_var, _ = model.encoder(batch_input.to(device), batch_target.to(device))
+            z = model.reparameterize(mu, log_var)
+            result['encoder_0']['latent_zs'].extend([z[i].cpu().numpy() for i in range(z.size(0))])
+            sample_keys.extend(batch_keys)
+    return result, sample_keys
+
+def plot_evaluation_latent_space_comprehensive(latent_tuples, sample_types, title, save_path=None, key_colors=None, epoch=None, phase=None, infinite_dataloader=False, logvars=None, wandb_logger=None, slider_table=None, upload_slider=False):
     """
-    Upload an interactive latent space scatter plot to wandb with certainty as point size and slider for epoch/phase.
+    Plot evaluation latent space with different markers for query, support, and task samples.
+    Shows task keys with different colors, and query/support samples with different markers.
     """
-    try:
-        import wandb
-        data = []
-        for i, (coord, certainty, key, enc) in enumerate(zip(tsne_coords, certainties, keys, encoders)):
-            data.append({
-                "tsne_x": coord[0],
-                "tsne_y": coord[1],
-                "certainty": certainty,
-                "key": str(key),
-                "encoder": str(enc)
-            })
-        table = wandb.Table(data=data, columns=["tsne_x", "tsne_y", "certainty", "key", "encoder"])
-        plot = wandb.plot_table(
-            "wandb/scatter",
-            table,
-            {"x": "tsne_x", "y": "tsne_y", "size": "certainty", "color": "key", "label": "encoder"},
-            title=f"{phase.title()} Latent Space t-SNE (Epoch {epoch+1 if epoch is not None else ''})"
-        )
-        wandb_logger._safe_log({f"latent_space/{phase}_interactive_epoch_{epoch+1 if epoch is not None else 'final'}": plot}, step_hint=epoch+1 if epoch is not None else None)
-        print(f"✓ Uploaded interactive latent space plot to wandb for {phase} epoch {epoch+1 if epoch is not None else 'final'}")
-    except Exception as e:
-        print(f"⚠ Could not upload interactive latent space plot to wandb: {e}")
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from sklearn.manifold import TSNE
+
+    if not latent_tuples or len(latent_tuples) == 0:
+        print("No latent data to plot.")
+        return
+
+    latents = np.array([x[0] for x in latent_tuples])
+    keys = [x[1] for x in latent_tuples]
+    encoders = [x[2] for x in latent_tuples]
+    unique_keys = sorted(list(set(keys)))
+    
+    if key_colors is None:
+        key_colors = {k: cm.tab20(i % 20) for i, k in enumerate(unique_keys)}
+
+    # t-SNE
+    tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(latents)//4))
+    tsne_coords = tsne.fit_transform(latents)
+
+    # Certainty as -logvar.mean(1)
+    if logvars is not None:
+        certainties = -np.mean(logvars, axis=1)
+        min_c, max_c = np.min(certainties), np.max(certainties)
+        sizes = 40 + 160 * (certainties - min_c) / (max_c - min_c + 1e-8)
+    else:
+        certainties = [1]*len(tsne_coords)
+        sizes = 60
+
+    plt.figure(figsize=(14, 10))
+    
+    # Plot with different markers for different sample types
+    for i, (coord, key, enc) in enumerate(zip(tsne_coords, keys, encoders)):
+        sample_type = sample_types[i] if i < len(sample_types) else 'unknown'
+        
+        # Different markers for different sample types
+        if sample_type == 'task':
+            marker = 's'  # Square for task-level points
+            size = sizes[i] if isinstance(sizes, np.ndarray) else sizes
+            alpha = 0.8
+            edgecolor = 'k'
+            linewidth = 1.0
+        elif sample_type == 'support':
+            marker = 'o'  # Circle for support samples
+            size = (sizes[i] if isinstance(sizes, np.ndarray) else sizes) * 0.7
+            alpha = 0.6
+            edgecolor = 'k'
+            linewidth = 0.5
+        elif sample_type == 'query':
+            marker = '^'  # Triangle for query samples
+            size = (sizes[i] if isinstance(sizes, np.ndarray) else sizes) * 0.8
+            alpha = 0.7
+            edgecolor = 'k'
+            linewidth = 0.8
+        else:
+            marker = 'o'
+            size = sizes[i] if isinstance(sizes, np.ndarray) else sizes
+            alpha = 0.5
+            edgecolor = 'k'
+            linewidth = 0.3
+        
+        plt.scatter(coord[0], coord[1], color=key_colors[key], s=size, alpha=alpha, 
+                   edgecolors=edgecolor, linewidths=linewidth, marker=marker)
+        
+        # Add labels for task-level points only to avoid clutter
+        if sample_type == 'task':
+            label = f"{str(key)[:4]}"
+            if enc is not None:
+                label += f"/E{enc}"
+            plt.text(coord[0], coord[1], label, fontsize=8, color=key_colors[key], alpha=0.9,
+                    ha='center', va='center', weight='bold')
+    
+    # Create legend with different markers
+    legend_elements = []
+    
+    # Task-level points legend
+    for k in unique_keys:
+        legend_elements.append(plt.Line2D([0], [0], marker='s', color='w', markerfacecolor=key_colors[k], 
+                                        markersize=8, label=f"Task {str(k)[:4]}"))
+    
+    # Sample type legend
+    legend_elements.append(plt.Line2D([0], [0], marker='s', color='w', markerfacecolor='gray', 
+                                    markersize=8, label='Task Key'))
+    legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', 
+                                    markersize=6, label='Support Sample'))
+    legend_elements.append(plt.Line2D([0], [0], marker='^', color='w', markerfacecolor='gray', 
+                                    markersize=6, label='Query Sample'))
+    
+    plt.legend(handles=legend_elements, title="Sample Types", bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=9)
+    
+    full_title = title
+    if phase:
+        full_title = f"{phase.title()} Latent Space: " + full_title
+    if epoch is not None:
+        full_title += f" (Epoch {epoch+1})"
+    if infinite_dataloader:
+        full_title += " [Infinite Dataloader]"
+    plt.title(full_title, fontsize=15)
+    plt.xlabel('t-SNE 1')
+    plt.ylabel('t-SNE 2')
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=180, bbox_inches='tight')
+        plt.close()
+        print(f"[OK] Saved comprehensive evaluation latent space plot: {save_path}")
+    else:
+        plt.show()
+
+    # Upload to wandb if requested
+    if wandb_logger and upload_slider:
+        try:
+            upload_latent_space_slider_to_wandb(latent_tuples, tsne_coords, certainties, keys, encoders, wandb_logger, phase, epoch)
+        except Exception as e:
+            print(f"[ WARNING ] Could not upload latent space data: {e}")
+
+def plot_original_bonnet_latent_space(eval_results, save_dir, epoch=None, wandb_logger=None, slider_table=None, upload_slider=False):
+    """
+    Original Bonnet approach: Plot latent space with all samples, where latents are directly sampled 
+    from the encoder posterior for BOTH training set and evaluation set.
+    
+    Args:
+        eval_results: Results from evaluate_model_original_bonnet_approach
+        save_dir: Directory to save plots
+        epoch: Current epoch number
+        wandb_logger: WandB logger instance
+        slider_table: Table for slider visualization
+        upload_slider: Whether to upload to slider
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from sklearn.manifold import TSNE
+    
+    if 'latent_data' not in eval_results:
+        print("No latent data found in evaluation results")
+        return
+    
+    latent_data = eval_results['latent_data']
+    
+    # Extract all latents and keys
+    all_latents = []
+    all_keys = []
+    all_sample_types = []  # 'support' or 'query'
+    
+    # Add support latents
+    if 'support_latents' in latent_data and latent_data['support_latents']:
+        support_latents = np.array(latent_data['support_latents'])
+        support_keys = latent_data['support_keys']
+        
+        all_latents.extend(support_latents)
+        all_keys.extend(support_keys)
+        all_sample_types.extend(['support'] * len(support_latents))
+        
+        print(f"Added {len(support_latents)} support latents")
+    
+    # Add query latents
+    if 'query_latents' in latent_data and latent_data['query_latents']:
+        query_latents = np.array(latent_data['query_latents'])
+        query_keys = latent_data['query_keys']
+        
+        all_latents.extend(query_latents)
+        all_keys.extend(query_keys)
+        all_sample_types.extend(['query'] * len(query_latents))
+        
+        print(f"Added {len(query_latents)} query latents")
+    
+    if not all_latents:
+        print("No latent data to visualize")
+        return
+    
+    # Convert to numpy array
+    all_latents = np.array(all_latents)
+    print(f"Total latents shape: {all_latents.shape}")
+    
+    # Apply t-SNE for 2D visualization
+    print("Applying t-SNE to all latents...")
+    tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(all_latents)//4))
+    tsne_coords = tsne.fit_transform(all_latents)
+    
+    # Create visualization
+    plt.figure(figsize=(16, 12))
+    
+    # Get unique keys for color mapping
+    unique_keys = sorted(list(set(all_keys)))
+    key_colors = {k: plt.cm.tab20(i % 20) for i, k in enumerate(unique_keys)}
+    
+    # Plot support samples
+    support_mask = np.array(all_sample_types) == 'support'
+    if np.any(support_mask):
+        support_coords = tsne_coords[support_mask]
+        support_keys_subset = [all_keys[i] for i in range(len(all_keys)) if all_sample_types[i] == 'support']
+        
+        for i, (coord, key) in enumerate(zip(support_coords, support_keys_subset)):
+            plt.scatter(coord[0], coord[1], color=key_colors[key], s=100, alpha=0.7, 
+                       marker='o', edgecolors='k', linewidths=0.5, label=f'Support: {key[:4]}' if i == 0 else "")
+    
+    # Plot query samples
+    query_mask = np.array(all_sample_types) == 'query'
+    if np.any(query_mask):
+        query_coords = tsne_coords[query_mask]
+        query_keys_subset = [all_keys[i] for i in range(len(all_keys)) if all_sample_types[i] == 'query']
+        
+        for i, (coord, key) in enumerate(zip(query_coords, query_keys_subset)):
+            plt.scatter(coord[0], coord[1], color=key_colors[key], s=150, alpha=0.8, 
+                       marker='s', edgecolors='k', linewidths=1.0, label=f'Query: {key[:4]}' if i == 0 else "")
+    
+    # Create legend
+    legend_elements = []
+    for key in unique_keys:
+        color = key_colors[key]
+        # Add support legend element
+        legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=color, 
+                                        markersize=8, label=f'Support: {key[:8]}'))
+        # Add query legend element  
+        legend_elements.append(plt.Line2D([0], [0], marker='s', color='w', markerfacecolor=color, 
+                                        markersize=10, label=f'Query: {key[:8]}'))
+    
+    plt.legend(handles=legend_elements, bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=9)
+    
+    plt.title(f"Original Bonnet Latent Space (Epoch {epoch+1 if epoch else 'Final'})\n"
+              f"Support: {np.sum(support_mask)} samples, Query: {np.sum(query_mask)} samples", fontsize=14)
+    plt.xlabel('t-SNE Component 1', fontsize=12)
+    plt.ylabel('t-SNE Component 2', fontsize=12)
+    plt.grid(True, alpha=0.3)
+    
+    # Save plot
+    latent_plots_dir = os.path.join(save_dir, "latent_space_plots")
+    os.makedirs(latent_plots_dir, exist_ok=True)
+    save_path = os.path.join(latent_plots_dir, f"original_bonnet_latent_space_epoch_{epoch+1}.png" if epoch else "original_bonnet_latent_space.png")
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"[ OK ] Saved original Bonnet latent space plot: {save_path}")
+    
+    # Upload to WandB if provided
+    if wandb_logger:
+        try:
+            wandb_logger._safe_log({
+                'original_bonnet_latent_space': wandb.Image(save_path)
+            }, step_hint=epoch+1 if epoch else None)
+            print(f"[ OK ] Uploaded original Bonnet latent space plot to WandB")
+        except Exception as e:
+            print(f"[ WARNING ] Could not upload original Bonnet latent space plot to wandb: {e}")
+    
+    return save_path

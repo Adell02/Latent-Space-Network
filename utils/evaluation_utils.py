@@ -12,7 +12,7 @@ from typing import Dict, Any, Optional, Tuple, List
 from utils.settings_manager import settings
 import re
 
-def generate_trajectory_plots(eval_results: Dict[str, Any], run_dir: str, epoch: int, max_samples: int = 3, current_model=None) -> Dict[str, str]:
+def generate_trajectory_plots(eval_results: Dict[str, Any], run_dir: str, epoch: int, max_samples: int = 3, current_model=None, wandb_logger=None) -> Dict[str, str]:
     """
     Generate trajectory plots from evaluation results efficiently.
     
@@ -53,24 +53,24 @@ def generate_trajectory_plots(eval_results: Dict[str, Any], run_dir: str, epoch:
         # Get the model - prioritize in-memory model to avoid disk loading issues
         model = current_model
         if model is None:
-            print(f"⚠ No current model provided, attempting to load from disk for epoch {epoch}")
+            print(f"[ WARNING ] No current model provided, attempting to load from disk for epoch {epoch}")
             try:
                 from utils.model_utils import load_model
                 model, _, _, _ = load_model(run_dir, epoch=epoch, device='cuda')
-                print(f"✓ Loaded model from disk for epoch {epoch}")
+                print(f"[ OK ] Loaded model from disk for epoch {epoch}")
             except Exception as e:
-                print(f"⚠ Could not load model for epoch {epoch}, skipping trajectory plots: {e}")
+                print(f"[ WARNING ] Could not load model for epoch {epoch}, skipping trajectory plots: {e}")
                 print(f"   Error details: {str(e)}")
                 return trajectory_plots
         else:
-            print(f"✓ Using provided in-memory model for trajectory plots (epoch {epoch})")
+            print(f"[ OK ] Using provided in-memory model for trajectory plots (epoch {epoch})")
         
         # Process each key's trajectory info
         for key, key_results in eval_results.get('key_results', {}).items():
             if 'metrics' not in key_results:
                 continue
                 
-            trajectory_info_list = key_results['metrics'].get('trajectory_info', [])
+            trajectory_info_list = key_results.get('trajectory_info', [])
             if not trajectory_info_list:
                 continue
                 
@@ -82,40 +82,68 @@ def generate_trajectory_plots(eval_results: Dict[str, Any], run_dir: str, epoch:
             # Generate plots for each sample
             for sample_idx, trajectory_info in enumerate(limited_trajectory_list):
                 try:
+                    # Add the evaluated key to the trajectory info for proper filtering
+                    trajectory_info['evaluated_key'] = key
+                    
+                    # Create trajectory plots folder
+                    trajectory_plots_dir = os.path.join(run_dir, "trajectory_plots")
+                    os.makedirs(trajectory_plots_dir, exist_ok=True)
+                    
                     # Create descriptive filename - include epoch for file uniqueness
                     plot_filename = f'trajectory_epoch{epoch}_{key}_sample{sample_idx}.png'
-                    plot_path = os.path.join(run_dir, plot_filename)
+                    plot_path = os.path.join(trajectory_plots_dir, plot_filename)
+                    
+                    # Debug: Print the exact path being used
+                    print(f"DEBUG: Saving trajectory plot to: {plot_path}")
+                    print(f"DEBUG: Directory exists: {os.path.exists(trajectory_plots_dir)}")
+                    print(f"DEBUG: Directory is writable: {os.access(trajectory_plots_dir, os.W_OK)}")
                     
                     # Check if this is multi-encoder
                     is_multi_encoder = trajectory_info.get('is_multi_encoder', False)
                     
                     if is_multi_encoder:
-                        visualize_multi_encoder_comprehensive_trajectory(
+                        plot_data = visualize_multi_encoder_comprehensive_trajectory(
                             trajectory_info, model, plot_path, run_dir, device='cuda'
                         )
+                        
+                        # Create standalone latent space plot for this trajectory
+                        from utils.visualizers import create_standalone_latent_space_plot
+                        latent_space_path = create_standalone_latent_space_plot(trajectory_info, model, run_dir, epoch, sample_idx, key, device='cuda', wandb_logger=wandb_logger)
                     else:
-                        visualize_comprehensive_trajectory(
+                        plot_data = visualize_comprehensive_trajectory(
                             trajectory_info, model, plot_path, run_dir, device='cuda'
                         )
+                        
+                        # Create standalone latent space plot for this trajectory
+                        from utils.visualizers import create_standalone_latent_space_plot
+                        latent_space_path = create_standalone_latent_space_plot(trajectory_info, model, run_dir, epoch, sample_idx, key, device='cuda', wandb_logger=wandb_logger)
                     
                     # Store plot path with consistent key for slider visualization
                     # Use key_sample format without epoch in the key for consistent naming across epochs
                     plot_key = f'{key}_sample{sample_idx}'
                     trajectory_plots[plot_key] = plot_path
                     
-                    print(f"  ✓ Generated trajectory plot: {plot_filename}")
+                    # Store standalone latent space plot path
+                    if latent_space_path:
+                        latent_space_key = f'{key}_sample{sample_idx}_latent_space'
+                        trajectory_plots[latent_space_key] = latent_space_path
+                        print(f"  [ OK ] Also captured standalone latent space plot: {latent_space_path}")
+                    else:
+                        print(f"  [ WARNING ] No latent space plot created for {key} sample {sample_idx}")
+                    
+                    print(f"  [ OK ] Generated trajectory plot: {plot_filename}")
                     
                 except Exception as e:
-                    print(f"  ⚠ Failed to generate trajectory plot for {key} sample {sample_idx}: {e}")
+                    print(f"  [ WARNING ] Failed to generate trajectory plot for {key} sample {sample_idx}: {e}")
                     continue
                     
         if trajectory_plots:
-            print(f"✓ Generated {len(trajectory_plots)} trajectory plots for epoch {epoch}")
+            print(f"[ OK ] Generated {len(trajectory_plots)} trajectory plots for epoch {epoch}")
         else:
             print(f"No trajectory data available for epoch {epoch}")
             
     except Exception as e:
-        print(f"⚠ Error generating trajectory plots: {e}")
+        print(f"[ WARNING ] Error generating trajectory plots: {e}")
         import traceback
         traceback.print_exc()
     
@@ -161,21 +189,22 @@ def run_quick_evaluation(model, run_dir: str, epoch: int, eval_keys: List[str] =
                                encoder_idx=encoder_idx, use_independent_decoder=use_independent_decoder)
         
         if eval_results:
-            print(f"✓ Quick evaluation completed for epoch {epoch}")
-            # Add epoch metadata to results
+            print(f"[ OK ] Quick evaluation completed for epoch {epoch}")
+            # Add epoch metadata and model reference for task optimization
             if 'evaluation_metadata' not in eval_results:
                 eval_results['evaluation_metadata'] = {}
             eval_results['evaluation_metadata']['epoch'] = epoch
+            eval_results['model'] = model  # Store model reference for task optimization
             # Capture reconstruction results
             if 'reconstruction_results' in eval_results:
                 eval_results['trajectory_reconstruction'] = eval_results['reconstruction_results']
             return eval_results
         else:
-            print(f"⚠ Quick evaluation failed for epoch {epoch}")
+            print(f"[ WARNING ] Quick evaluation failed for epoch {epoch}")
             return None
             
     except Exception as e:
-        print(f"⚠ Quick evaluation error: {e}")
+        print(f"[ WARNING ] Quick evaluation error: {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -246,29 +275,29 @@ def log_evaluation_to_wandb(eval_results: Dict[str, Any], run_dir: str, epoch: i
                 f'{prefix}query_loss': avg_metrics.get('avg_query_loss', 0.0),
             }
             wandb_logger.log_training_metrics(step, eval_metrics)
-            print(f"✓ Logged evaluation metrics to wandb")
+            print(f"[ OK ] Logged evaluation metrics to wandb")
         else:
-            print("⚠ No aggregated metrics found in evaluation results")
+            print("[ WARNING ] No aggregated metrics found in evaluation results")
         
         # Save evaluation results to file for visualization
         try:
             eval_results_file = os.path.join(run_dir, 'evaluation_results.pkl')
             with open(eval_results_file, 'wb') as f:
                 pickle.dump(eval_results, f)
-            print(f"✓ Saved evaluation results to {eval_results_file}")
+            print(f"[ OK ] Saved evaluation results to {eval_results_file}")
         except Exception as e:
-            print(f"⚠ Could not save evaluation results: {e}")
+            print(f"[ WARNING ] Could not save evaluation results: {e}")
         
         # Generate and log trajectory plots
         wandb_settings = settings.get_wandb_settings()
         max_samples = wandb_settings.get('trajectory_max_samples', 3)
-        trajectory_plots = generate_trajectory_plots(eval_results, run_dir, step, max_samples, current_model=current_model)
+        trajectory_plots = generate_trajectory_plots(eval_results, run_dir, step, max_samples, current_model=current_model, wandb_logger=wandb_logger)
         
         # Log all visualizations – ensure epoch is int for modulo check
         epoch_step = epoch if isinstance(epoch, int) else 0
         wandb_logger.log_visualizations(run_dir, step, eval_results, trajectory_plots)
         
     except Exception as e:
-        print(f"⚠ Error logging evaluation to wandb: {e}")
+        print(f"[ WARNING ] Error logging evaluation to wandb: {e}")
         import traceback
         traceback.print_exc() 

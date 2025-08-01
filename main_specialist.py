@@ -25,7 +25,7 @@ if run_dir_env is not None:
         with open(frozen_config_path, 'r') as f:
             frozen_config = json.load(f)
         settings.set_settings(frozen_config)
-        print(f"✓ Loaded frozen config from {frozen_config_path} for all modes")
+        print(f"[ OK ] Loaded frozen config from {frozen_config_path} for all modes")
 
 # Now import modules that rely on the global `settings`
 from train_specialist import main_specialist_training
@@ -42,7 +42,7 @@ try:
     from latent_validation import run_latent_validation_for_specialist
     LATENT_VALIDATION_AVAILABLE = True
 except ImportError as e:
-    print(f"⚠ Latent validation not available: {e}")
+    print(f"[ WARNING ] Latent validation not available: {e}")
     LATENT_VALIDATION_AVAILABLE = False
 
 # --------------------------------------------------
@@ -189,9 +189,9 @@ def main_args():
             )
             print(f"Latent validation result: {result}")
             if not result.get('success', True):
-                print(f"⚠ Latent validation failed or skipped: {result.get('reason', 'unknown reason')}")
+                print(f"[ WARNING ] Latent validation failed or skipped: {result.get('reason', 'unknown reason')}")
         else:
-            print("⚠ Latent validation skipped (scikit-learn not available)")
+            print("[ WARNING ] Latent validation skipped (scikit-learn not available)")
 
     # ----------------------
     # VISUALIZATION

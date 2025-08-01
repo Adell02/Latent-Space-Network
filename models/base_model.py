@@ -290,7 +290,7 @@ class TransformerEncoder(nn.Module):
         if self.use_vq_vae:
             # For VQ-VAE, we only need one projection to continuous space before quantization
             self.fc_latent = nn.Linear(hidden_dim, get_latent_dim())
-            print(f"✓ VQ-VAE enabled with {self.vq_vae.vq_layer.num_embeddings} embeddings")
+            print(f"[ OK ] VQ-VAE enabled with {self.vq_vae.vq_layer.num_embeddings} embeddings")
         else:
             # Standard VAE projections
             self.fc_mu = nn.Linear(hidden_dim, get_latent_dim())
@@ -417,12 +417,13 @@ class TransformerDecoder(nn.Module):
         self.latent_projection = nn.Linear(LATENT_DIM, hidden_dim)
 
         # Memory projection: latent_expanded -> memory
-        self.memory_projection = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim)
-        )
+        #self.memory_projection = nn.Sequential(
+        #    nn.Linear(hidden_dim, hidden_dim),
+        #    nn.LayerNorm(hidden_dim),
+        #    nn.ReLU(),
+        #    nn.Linear(hidden_dim, hidden_dim)
+        #)
+        self.memory_projection = nn.Linear(hidden_dim, hidden_dim)
 
         # Transformer decoder layers
         decoder_layer = nn.TransformerDecoderLayer(
@@ -449,6 +450,11 @@ class TransformerDecoder(nn.Module):
         """
         Expand the latent across sequence length and project into memory space.
         """
+        # Handle tensors with extra dimensions (e.g., from multi-encoder)
+        if z.dim() > 2:
+            # Flatten all dimensions except the last one to get [B, latent_dim]
+            z = z.flatten(start_dim=0, end_dim=-2)
+        
         # z: [B, latent_dim]
         latent_emb      = self.latent_projection(z)                # [B, hidden_dim]
         latent_expanded = latent_emb.unsqueeze(1).expand(-1, 902, -1)  # [B, 902, hidden_dim]
@@ -672,9 +678,9 @@ class MultiEncoderLPN(nn.Module):
         # Collect latent distributions from all encoders
         mu_list, logvar_list = [], []
         for (enc, (x, y)) in zip(self.encoders, input_views):
-            μ, logσ2, _ = enc(x, y)
-            mu_list.append(μ)
-            logvar_list.append(logσ2)
+            mu, logvar, _ = enc(x, y)
+            mu_list.append(mu)
+            logvar_list.append(logvar)
         
         mu_stack = torch.stack(mu_list)        # (K,B,D)
         logvar_stack = torch.stack(logvar_list)
@@ -820,82 +826,69 @@ def compute_bonnet_cross_pair_loss(
     use_independent_decoder: bool = True, latent_opt_steps: int = 0, latent_opt_lr: float = 0.1
 ) -> torch.Tensor:
     """
-    Compute Bonnet's cross-pair reconstruction loss exactly as in the LPN paper.
+    Compute Bonnet's cross-pair loss: -log p_θ(y_i | x_i, z̄_{-i})
+    where z̄_{-i} is the average latent from other samples in the batch.
     
-    For each target pair (x_i, y_i):
-    1. z_i' = mean{z_j : j≠i} (mean of OTHER latents)
-    2. Optionally: K gradient ascent steps on z_i'
-    3. L_rec^i = -log p_θ(y_i | x_i, z_i')
-    
-    Total: L_rec = sum_i L_rec^i
-    
-    Args:
-        model: The multi-encoder model
-        encoder_idx: Which encoder to use
-        input_seq: Input sequences [B, seq_len]
-        target_seq: Target sequences [B, seq_len]
-        use_independent_decoder: Whether to use independent or shared decoder
-        latent_opt_steps: Number of gradient ascent steps (K in paper)
-        latent_opt_lr: Learning rate for gradient ascent
-    
-    Returns:
-        torch.Tensor: Cross-pair reconstruction loss
+    This implements leave-one-out training as described in Bonnet's LPN paper.
     """
-    batch_size = input_seq.size(0)
     device = input_seq.device
+    batch_size = input_seq.size(0)
+    total_cross_pair_loss = torch.tensor(0.0, device=device)
     
-    # Need at least 2 samples for cross-pairs
-    if batch_size < 2:
-        return torch.tensor(0.0, device=device)
-    
-    # Encode all samples to get latent codes z_i
-    mu_all, logvar_all, _ = model.multi_encoder.encoders[encoder_idx](input_seq, target_seq)
-    z_all = model.multi_encoder._reparam(mu_all, logvar_all, sample=True)  # [B, latent_dim]
-    
-    total_cross_pair_loss = 0.0
-    
+    # For each sample i, compute loss using average latent from other samples
     for i in range(batch_size):
-        # For target (x_i, y_i), compute z_i' = mean{z_j : j≠i}
-        other_indices = [j for j in range(batch_size) if j != i]
-        if not other_indices:
-            continue
-            
-        z_other = z_all[other_indices]  # [B-1, latent_dim]
-        z_i_prime = z_other.mean(dim=0, keepdim=True)  # [1, latent_dim]
-        
-        # Optional: Gradient ascent optimization of z_i'
-        if latent_opt_steps > 0:
-            z_i_prime = z_i_prime.clone().detach().requires_grad_(True)
-            
-            for step in range(latent_opt_steps):
-                # Compute log likelihood for OTHER targets using current z_i'
-                step_loss = 0.0
-                for j in other_indices:
-                    x_j = input_seq[j:j+1]
-                    y_j = target_seq[j:j+1]
-                    
-                    if use_independent_decoder:
-                        shape_logits, grid_logits = model.multi_encoder.independent_decoders[encoder_idx](z_i_prime, x_j, target_seq=y_j)
-                    else:
-                        shape_logits, grid_logits = model.multi_encoder.shared_decoder(z_i_prime, x_j, target_seq=y_j)
-                    
-                    # Compute negative log likelihood (we want to maximize likelihood)
-                    shape_targets = y_j[:, 900:902].long()
-                    shape_nll = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1), reduction='sum')
-                    
-                    r, c = int(y_j[0, 900].item()), int(y_j[0, 901].item())
-                    n_pix = r * c
-                    if n_pix > 0:
-                        grid_nll = F.cross_entropy(grid_logits[0, :n_pix], y_j[0, :n_pix].long(), reduction='sum')
-                    else:
-                        grid_nll = torch.tensor(0.0, device=device)
-                    
-                    step_loss += shape_nll + grid_nll
+        # Compute average latent from other samples (leave-one-out)
+        other_latents = []
+        for j in range(batch_size):
+            if j != i:  # Exclude sample i
+                x_j = input_seq[j:j+1]
+                y_j = target_seq[j:j+1]
                 
-                # Gradient ascent step
-                if step_loss.requires_grad:
-                    grad = torch.autograd.grad(step_loss, z_i_prime, retain_graph=(step < latent_opt_steps - 1))[0]
-                    z_i_prime = z_i_prime - latent_opt_lr * grad  # Negative gradient for ascent
+                # Get latent for sample j
+                if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
+                    mu_j, logvar_j, _ = model.multi_encoder.encoders[encoder_idx](x_j, y_j)
+                else:
+                    mu_j, logvar_j, _ = model.encoder(x_j, y_j)
+                z_j = model.reparameterize(mu_j, logvar_j)
+                other_latents.append(z_j)
+        
+        if not other_latents:
+            continue  # Skip if no other samples
+        
+        # Average latent from other samples
+        z_avg = torch.stack(other_latents).mean(dim=0, keepdim=True)
+        
+        # Initialize z_i' with the average latent
+        z_i_prime = z_avg.clone().detach().requires_grad_(True)
+        
+        # Gradient optimization to maximize p(y_i | x_i, z_i')
+        for step in range(latent_opt_steps):
+            # CORRECT: Optimize for TARGET sample i
+            x_i = input_seq[i:i+1]
+            y_i = target_seq[i:i+1]
+            
+            if use_independent_decoder:
+                shape_logits, grid_logits = model.multi_encoder.independent_decoders[encoder_idx](z_i_prime, x_i, target_seq=y_i)
+            else:
+                shape_logits, grid_logits = model.multi_encoder.shared_decoder(z_i_prime, x_i, target_seq=y_i)
+            
+            # Compute loss for TARGET sample i
+            shape_targets = y_i[:, 900:902].long()
+            shape_nll = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1), reduction='sum')
+            
+            r, c = int(y_i[0, 900].item()), int(y_i[0, 901].item())
+            n_pix = r * c
+            if n_pix > 0:
+                grid_nll = F.cross_entropy(grid_logits[0, :n_pix], y_i[0, :n_pix].long(), reduction='sum')
+            else:
+                grid_nll = torch.tensor(0.0, device=device)
+            
+            step_loss = shape_nll + grid_nll
+            
+            # Gradient ascent to maximize p(y_i | x_i, z_i_prime)
+            if step_loss.requires_grad:
+                grad = torch.autograd.grad(step_loss, z_i_prime, retain_graph=(step < latent_opt_steps - 1))[0]
+            z_i_prime = z_i_prime - latent_opt_lr * grad
         
         # Now compute reconstruction loss for target i using optimized z_i'
         x_i = input_seq[i:i+1]
@@ -926,7 +919,7 @@ def compute_bonnet_cross_pair_loss(
 
 def get_beta_warmup(current_epoch: int, warmup_epochs: int, beta_max: float) -> float:
     """
-    Compute beta warmup schedule: β(t) = β_max * min(t/T_warm, 1)
+    Compute beta warmup schedule: beta(t) = beta_max * min(t/T_warm, 1)
     
     Args:
         current_epoch: Current training epoch (1-indexed)
@@ -945,7 +938,7 @@ def get_beta_warmup(current_epoch: int, warmup_epochs: int, beta_max: float) -> 
 
 def get_cyclical_beta(current_epoch: int, cycle_length: int, beta_max: float) -> float:
     """
-    Cyclical β-annealing: ramp β 0 → β_max over K epochs, then reset (repeat).
+    Cyclical beta-annealing: ramp beta 0 -> beta_max over K epochs, then reset (repeat).
     
     Args:
         current_epoch: Current training epoch (1-indexed)
@@ -967,8 +960,8 @@ def get_dynamic_anti_lambda(current_beta: float, beta_max: float,
                            high_phase_multiplier: float = 3.0, 
                            low_phase_base: float = 0.01) -> float:
     """
-    Dynamic λ scheduling: During high-β phases set λ = 2–5 × β_max; 
-    during low-β phases drop it to 0.01.
+    Dynamic lambda scheduling: During high-beta phases set lambda = 2-5 x beta_max; 
+    during low-beta phases drop it to 0.01.
     
     Args:
         current_beta: Current beta value
@@ -979,14 +972,14 @@ def get_dynamic_anti_lambda(current_beta: float, beta_max: float,
     Returns:
         float: Current anti-batch lambda value
     """
-    # Consider "high-β phase" when β > 0.5 * β_max
+    # Consider "high-beta phase" when beta > 0.5 * beta_max
     high_phase_threshold = 0.5 * beta_max
     
     if current_beta > high_phase_threshold:
-        # High-β phase: λ = multiplier × β_max
+        # High-beta phase: lambda = multiplier x beta_max
         return high_phase_multiplier * beta_max
     else:
-        # Low-β phase: use base value
+        # Low-beta phase: use base value
         return low_phase_base
 
 
@@ -995,18 +988,18 @@ def apply_free_bits_per_dimension(mu: torch.Tensor, logvar: torch.Tensor,
     """
     FIXED Free-bits mechanism: Apply per-dimension clamping to force every latent dimension active.
     
-    KL per dimension: kl_dim = 0.5*(μ² + σ² - 1 - log σ²)
-    Clamp each dimension: kl_dim = torch.clamp(kl_dim, min=δ)
+    KL per dimension: kl_dim = 0.5*(mu^2 + sigma^2 - 1 - log sigma^2)
+    Clamp each dimension: kl_dim = torch.clamp(kl_dim, min=delta)
     
     Args:
         mu: Mean tensor [batch_size, latent_dim]
         logvar: Log variance tensor [batch_size, latent_dim] 
-        delta_per_dim: Minimum rate per dimension (δ ≈ 0.07)
+        delta_per_dim: Minimum rate per dimension (delta ~= 0.07)
     
     Returns:
         tuple: (raw_kl_loss, clamped_kl_loss, kl_per_dim_mean)
     """
-    # Calculate per-dimension KL: 0.5*(μ² + σ² - 1 - log σ²)
+    # Calculate per-dimension KL: 0.5*(mu^2 + sigma^2 - 1 - log sigma^2)
     kl_per_dim = 0.5 * (mu.pow(2) + logvar.exp() - 1 - logvar)  # [batch_size, latent_dim]
     
     # Raw KL loss (before clamping) for monitoring
@@ -1029,7 +1022,7 @@ def compute_contrastive_kl_margin(in_slice_kl: torch.Tensor, anti_kl: torch.Tens
     """
     Contrastive KL "margin" mechanism:
     gap = kl_in.detach() - kl_anti        # >0 if encoder uses z for its own task
-    anti_loss = F.relu(tau - gap)         # tau ≈ 1–2 nats
+    anti_loss = F.relu(tau - gap)         # tau ~= 1-2 nats
     
     Args:
         in_slice_kl: KL divergence for in-slice samples
@@ -1090,20 +1083,24 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
                 use_free_bits: bool = True, free_bits_delta: float = 0.07,
                 use_dynamic_lambda: bool = True, lambda_high_multiplier: float = 3.0,
                 use_contrastive_margin: bool = True, margin_tau: float = 1.5,
-                debug_kl_metrics: bool = False) -> torch.Tensor:
+                debug_kl_metrics: bool = False,
+                # NEW: Repulsion loss parameters
+                use_repulsion_loss: bool = False, repulsion_lambda: float = 0.1,
+                repulsion_margin: float = 0.5, repulsion_logvar_min: float = -8.0) -> torch.Tensor:
     """
     Compute loss following Bonnet's LPN approach with enhanced mechanisms for specialist training.
     
     SUPPORTS VQ-VAE: When VQ-VAE is enabled, replaces KL divergence with VQ loss (commitment + codebook losses).
     
     ENHANCED MECHANISMS:
-    1. Cyclical β-annealing: Ramp β 0 → β_max over K epochs, then reset
+    1. Cyclical beta-annealing: Ramp beta 0 -> beta_max over K epochs, then reset
     2. Free-bits: Ensure minimum KL (δ ≈ 0.05-0.1 × latent_dim) to keep latents active
     3. Dynamic λ scheduling: Scale anti-batch penalty with β (λ = 2-5 × β_max during high-β)
     4. Contrastive KL margin: Enforce gap between in-slice and anti-batch KL losses
     5. VQ-VAE support: Use discrete latents to prevent posterior collapse
+    6. REPULSION LOSS: Pairwise hinge repulsion between encoders (for joint training)
     
-    L_total = L_rec + β * L_KL/VQ + λ * L_anti + margin_loss
+    L_total = L_rec + β * L_KL/VQ + λ * L_anti + margin_loss + λ_rep * L_repulsion
     
     Args:
         model: The model (single or multi-encoder)
@@ -1127,6 +1124,10 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
         use_contrastive_margin: Whether to use contrastive KL margin
         margin_tau: Target margin in nats for contrastive loss
         debug_kl_metrics: Whether to return debug KL metrics
+        use_repulsion_loss: Whether to add repulsion loss (for joint training)
+        repulsion_lambda: Weight for repulsion loss
+        repulsion_margin: Hinge margin for repulsion loss
+        repulsion_logvar_min: Minimum log variance for repulsion loss
     """
     device = input_seq.device
     
@@ -1141,12 +1142,29 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
         # Multi-encoder specialist training path
         # ----------------------------------------------------------
         if encoder_idx is None:
-            # PoE training with shared decoder (Phase B)
-            input_views = [(input_seq, target_seq) for _ in range(model.num_encoders)]
-            reconstruction, mu_star, logvar_star, _ = model.multi_encoder.forward_poe_with_shared_decoder(
-                input_views, sample_latent=True
-            )
-            shape_logits, grid_logits = reconstruction
+            # PoE training with shared decoder (Phase B) - INCLUDES REPULSION LOSS
+            K = model.num_encoders
+            
+            # Collect latent distributions from all encoders for repulsion loss
+            mus, logvars = [], []
+            for enc in model.multi_encoder.encoders:
+                mu, logvar, _ = enc(input_seq, target_seq)
+                logvar = logvar.clamp(min=repulsion_logvar_min)
+                mus.append(mu)
+                logvars.append(logvar)
+            
+            # PoE fusion
+            mu_stack = torch.stack(mus)        # (K,B,D)
+            logvar_stack = torch.stack(logvars)
+            mu_star, logvar_star = gaussian_poe(mu_stack, logvar_stack)
+            logvar_star = logvar_star.clamp(min=repulsion_logvar_min)
+            
+            # Reparameterization
+            eps = torch.randn_like(mu_star)
+            z = mu_star + eps * torch.exp(0.5*logvar_star)
+            
+            # Decode with shared decoder
+            shape_logits, grid_logits = model.multi_encoder.shared_decoder(z, input_seq, target_seq=target_seq)
             
             # Bonnet's reconstruction loss computation
             shape_targets = target_seq[:, 900:902].long()
@@ -1186,13 +1204,30 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
                     raw_kl_loss = latent_loss
                     kl_per_dim_mean = latent_loss / latent_dim
             
+            # REPULSION LOSS (pairwise hinge repulsion between encoders)
+            repulsion_loss = torch.tensor(0.0, device=device)
+            if use_repulsion_loss and K > 1:
+                pairs = []
+                D = mus[0].size(1)
+                for j in range(K):
+                    for k in range(j+1,K):
+                        muj, logvarj = mus[j], logvars[j]
+                        muk, logvark = mus[k], logvars[k]
+                        vj, vk = logvarj.exp(), logvark.exp()
+                        kl_jk = 0.5*((vj/vk).sum(1) + ((muk-muj).pow(2)/vk).sum(1) - D + (logvark-logvarj).sum(1))
+                        pairs.append(kl_jk)
+                if pairs:
+                    hinge = torch.stack([F.relu(repulsion_margin - p) for p in pairs])
+                    repulsion_loss = hinge.mean()
+            
             # Compute effective beta (cyclical annealing if enabled)
             if use_cyclical_beta and current_epoch is not None:
                 effective_beta = get_cyclical_beta(current_epoch, beta_cycle_length, beta)
             else:
                 effective_beta = beta
             
-            total_loss = reconstruction_loss + effective_beta * latent_loss
+            # TOTAL LOSS with repulsion
+            total_loss = reconstruction_loss + effective_beta * latent_loss + repulsion_lambda * repulsion_loss
             
             if return_components:
                 components = {
@@ -1201,6 +1236,8 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
                     'shape_loss': shape_loss,
                     'grid_loss': grid_loss,
                     'effective_beta': effective_beta,
+                    'repulsion_loss': repulsion_loss,
+                    'repulsion_lambda': repulsion_lambda,
                 }
                 
                 if is_vq_vae:
@@ -1376,7 +1413,7 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
                         'kl_loss': latent_loss,
                         'anti_kl_loss': anti_latent_loss,
                         'vq_loss': torch.tensor(0.0, device=device),
-                        'anti_vq_loss': torch.tensor(0.0, device=device),
+                        'anti_vq_loss': anti_vq_loss,
                         'raw_kl_loss': raw_kl_loss,
                         'kl_per_dim': kl_per_dim_mean,
                     })

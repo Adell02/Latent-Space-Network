@@ -278,7 +278,7 @@ def save_checkpoint(model, optimizer, epoch, loss, run_dir):
         if wandb_logger and wandb_logger.is_initialized:
             wandb_logger.upload_checkpoint(checkpoint_path, epoch)
     except Exception as e:
-        print(f"⚠ Could not upload checkpoint to wandb: {e}")
+        print(f"[ WARNING ] Could not upload checkpoint to wandb: {e}")
 
 
 ##############################
@@ -523,14 +523,14 @@ def load_model(run_dir, epoch=None, device='cuda', model_type='lpn'):
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     except (KeyError, ValueError) as e:
         if isinstance(e, KeyError):
-            print(f"⚠ Warning: Optimizer state dict not found in checkpoint: {e}")
+            print(f"[ WARNING ] Warning: Optimizer state dict not found in checkpoint: {e}")
         else:
-            print(f"⚠ Warning: Could not load optimizer state dict (possibly different parameter groups): {e}")
+            print(f"[ WARNING ] Warning: Could not load optimizer state dict (possibly different parameter groups): {e}")
         print("   Proceeding without loading optimizer state.")
     epoch = checkpoint['epoch']
     loss = checkpoint['loss']
     
-    print(f"✓ Successfully loaded epoch {epoch} (training loss: {loss:.6f})")
+    print(f"[ OK ] Successfully loaded epoch {epoch} (training loss: {loss:.6f})")
     
     # Set to evaluation mode
     model.eval()
@@ -584,7 +584,7 @@ def load_evaluation_results(run_dir):
 ##############################
 # Collect Latent Data Helper
 ##############################
-def collect_latent_data(model, dataloader, device, encoder_idx=None, max_samples=100, data_type=None):
+def collect_latent_data(model, dataloader, device, encoder_idx=None, max_samples=100, data_type=None, key_list=None):
     """Collect latent representations from a model.
 
     Args:
@@ -594,6 +594,7 @@ def collect_latent_data(model, dataloader, device, encoder_idx=None, max_samples
         encoder_idx: Optional index of the encoder to use (``None`` for PoE or single encoder).
         max_samples: Maximum number of samples to collect.
         data_type: Optional string describing the data being collected.
+        key_list: Optional list of keys for each sample (for coloring/splitting by key).
 
     Returns:
         dict: Dictionary containing latent statistics and metadata.
@@ -606,7 +607,8 @@ def collect_latent_data(model, dataloader, device, encoder_idx=None, max_samples
         'latent_zs': [],
         'input_samples': [],
         'output_samples': [],
-        'num_samples': 0
+        'num_samples': 0,
+        'keys': []
     }
 
     if encoder_idx is not None:
@@ -614,12 +616,20 @@ def collect_latent_data(model, dataloader, device, encoder_idx=None, max_samples
     if data_type is not None:
         latent_data['data_type'] = data_type
 
+    sample_count = 0
+    key_ptr = 0
     with torch.no_grad():
-        sample_count = 0
-        for batch_input, batch_target in dataloader:
+        for batch in dataloader:
             if sample_count >= max_samples:
                 break
-
+            
+            # Handle batch structure with keys
+            if len(batch) >= 3:
+                batch_input, batch_target, batch_keys = batch[:3]
+            else:
+                batch_input, batch_target = batch[:2]
+                batch_keys = None
+            
             batch_input = batch_input.to(device)
             batch_target = batch_target.to(device)
 
@@ -640,6 +650,15 @@ def collect_latent_data(model, dataloader, device, encoder_idx=None, max_samples
             latent_data['input_samples'].append(batch_input[:batch_size].cpu().numpy())
             latent_data['output_samples'].append(batch_target[:batch_size].cpu().numpy())
 
+            # Handle keys
+            if batch_keys is not None:
+                latent_data['keys'].extend(list(batch_keys)[:batch_size])
+            elif key_list is not None:
+                latent_data['keys'].extend(key_list[key_ptr:key_ptr+batch_size])
+            else:
+                latent_data['keys'].extend([None]*batch_size)
+            key_ptr += batch_size
+
             sample_count += batch_size
 
     if latent_data['latent_mus']:
@@ -649,5 +668,7 @@ def collect_latent_data(model, dataloader, device, encoder_idx=None, max_samples
         latent_data['input_samples'] = np.concatenate(latent_data['input_samples'], axis=0)
         latent_data['output_samples'] = np.concatenate(latent_data['output_samples'], axis=0)
         latent_data['num_samples'] = len(latent_data['latent_mus'])
+        if len(latent_data['keys']) > latent_data['num_samples']:
+            latent_data['keys'] = latent_data['keys'][:latent_data['num_samples']]
 
     return latent_data

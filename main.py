@@ -24,7 +24,7 @@ try:
     )
     LATENT_VALIDATION_AVAILABLE = True
 except ImportError as e:
-    print(f"⚠ Latent validation not available: {e}")
+    print(f"[WARNING] Latent validation not available: {e}")
     print("  To enable latent validation, install: pip install scikit-learn")
     LATENT_VALIDATION_AVAILABLE = False
 
@@ -45,7 +45,7 @@ def parse_args():
                       help='Specific epoch to load for evaluation')
     parser.add_argument('--visualize_n_values', type=int,
                       help='Numbers of input-output pairs to generate for visualization')
-    # Removed --use_reparameterized flag - always use mean vectors (μ) for consistency
+    # Removed --use_reparameterized flag - always use mean vectors (mu) for consistency
     return parser.parse_args()
 
 def main_args():
@@ -107,11 +107,11 @@ def main_args():
         print("WandB logging enabled")
         wandb_logger = init_wandb_for_mode('main', run_dir)
         if wandb_logger:
-            print(f"✓ WandB logging enabled for main.py: {wandb_logger.run.name}")
+            print(f"[OK] WandB logging enabled for main.py: {wandb_logger.run.name}")
         else:
-            print("⚠ WandB initialization failed, continuing without wandb")
+            print("[WARNING] WandB initialization failed, continuing without wandb")
     else:
-        print("⚠ WandB logging is DISABLED in settings")
+        print("[WARNING] WandB logging is DISABLED in settings")
 
     # Step counter for wandb logging (since main.py is orchestration, not training)
     step_counter = 0
@@ -132,9 +132,9 @@ def main_args():
                         'main_training/started': True,
                         'main_training/data_source': 'training_start'
                     }, step_hint=step_counter)
-                    print(f"✓ Training start logged to WandB at step {step_counter}")
+                    print(f"[OK] Training start logged to WandB at step {step_counter}")
                 except Exception as e:
-                    print(f"⚠ Failed to log training start: {e}")
+                    print(f"[WARNING] Failed to log training start: {e}")
             
             results, model = main_training(args.file_name)
             print("Training complete. Results saved in the run directory.")
@@ -151,9 +151,9 @@ def main_args():
                         'main_training/total_epochs': total_epochs,
                         'main_training/data_source': 'training_completion'
                     }, step_hint=step_counter)
-                    print(f"✓ Training completion logged to WandB at step {step_counter}")
+                    print(f"[OK] Training completion logged to WandB at step {step_counter}")
                 except Exception as e:
-                    print(f"⚠ Failed to log training completion: {e}")
+                    print(f"[WARNING] Failed to log training completion: {e}")
         
         if 'eval' in args.mode or 'all' in args.mode:
             # Load the model
@@ -178,16 +178,16 @@ def main_args():
                         'main_eval/n_queries': DEFAULT_EVAL_N_QUERIES,
                         'main_eval/data_source': f'evaluation_start_epoch_{DEFAULT_EVAL_EPOCH}'
                     }, step_hint=step_counter)
-                    print(f"✓ Evaluation start logged to WandB at step {step_counter}")
+                    print(f"[OK] Evaluation start logged to WandB at step {step_counter}")
                 except Exception as e:
-                    print(f"⚠ Failed to log evaluation start: {e}")
+                    print(f"[WARNING] Failed to log evaluation start: {e}")
             
             model, _, _, _ = load_model(run_dir, epoch=DEFAULT_EVAL_EPOCH, device=device)
             
             # Run evaluation (now includes training latent data collection)
             print("\n=== RUNNING EVALUATION ===")
-            # Always use mean vectors (μ) for consistency and efficiency
-            print("Using mean (μ) vectors for latent visualization")
+            # Always use mean vectors (mu) for consistency and efficiency
+            print("Using mean (mu) vectors for latent visualization")
             eval_results = main_test(model, DEFAULT_EVAL_KEYS, run_dir, DEFAULT_EVAL_N_SAMPLES, DEFAULT_EVAL_N_QUERIES, EVAL_SEED, device)
                     
             # Save evaluation results
@@ -246,16 +246,16 @@ def main_args():
                             'test_keys': eval_keys_for_latent
                         }
                         
-                        print(f"✓ Latent validation completed: {len(swap_results)} swaps, {len(zero_random_results['zero'])} zero/random tests")
+                        print(f"[OK] Latent validation completed: {len(swap_results)} swaps, {len(zero_random_results['zero'])} zero/random tests")
                     else:
-                        print("⚠ No data available for latent validation")
+                        print("[WARNING] No data available for latent validation")
                         
                 except Exception as e:
-                    print(f"⚠ Latent validation failed: {e}")
+                    print(f"[WARNING] Latent validation failed: {e}")
                     import traceback
                     traceback.print_exc()
             else:
-                print("⚠ Latent validation skipped (scikit-learn not available)")
+                print("[WARNING] Latent validation skipped (scikit-learn not available)")
             
             # Log evaluation results to wandb (including latent validation)
             step_counter += 1
@@ -332,7 +332,7 @@ def main_args():
                             if plot_path and os.path.exists(plot_path):
                                 log_dict[f'latent_validation/{plot_name}'] = wandb.Image(plot_path)
                             else:
-                                print(f"⚠ Warning: {plot_name}.png not found or not generated!")
+                                print(f"[WARNING] Warning: {plot_name}.png not found or not generated!")
                         
                         # Add interpretation guide
                         interpretation = """
@@ -365,13 +365,13 @@ def main_args():
                     #     except:
                     #         pass
                     
-                    log_message = f"✓ Evaluation results logged to WandB at step {step_counter} for {total_keys_evaluated} keys"
+                    log_message = f"[OK] Evaluation results logged to WandB at step {step_counter} for {total_keys_evaluated} keys"
                     if latent_validation_results:
                         log_message += f" + latent validation ({latent_validation_results['n_samples_tested']} samples)"
                     print(log_message)
                     
                 except Exception as e:
-                    print(f"⚠ Failed to log evaluation results: {e}")
+                    print(f"[WARNING] Failed to log evaluation results: {e}")
             
         if 'visualize' in args.mode or 'all' in args.mode:
             if DEFAULT_VISUALIZE_N_VALUES is None:
@@ -390,9 +390,9 @@ def main_args():
                         'main_visualization/n_values': DEFAULT_VISUALIZE_N_VALUES,
                         'main_visualization/data_source': f'visualization_start_epoch_{DEFAULT_EVAL_EPOCH}'
                     }, step_hint=step_counter)
-                    print(f"✓ Visualization start logged to WandB at step {step_counter}")
+                    print(f"[OK] Visualization start logged to WandB at step {step_counter}")
                 except Exception as e:
-                    print(f"⚠ Failed to log visualization start: {e}")
+                    print(f"[WARNING] Failed to log visualization start: {e}")
             
             # Also run visualization
             print("\nVisualizing stored results...")
@@ -408,9 +408,9 @@ def main_args():
                         'main_visualization/n_values': DEFAULT_VISUALIZE_N_VALUES,
                         'main_visualization/data_source': f'visualization_epoch_{DEFAULT_EVAL_EPOCH}'
                     }, step_hint=step_counter)
-                    print(f"✓ Visualization completion logged to WandB at step {step_counter}")
+                    print(f"[OK] Visualization completion logged to WandB at step {step_counter}")
                 except Exception as e:
-                    print(f"⚠ Failed to log visualization completion: {e}")
+                    print(f"[WARNING] Failed to log visualization completion: {e}")
 
     except Exception as e:
         # Log error with step counter
@@ -421,9 +421,9 @@ def main_args():
                     'main/failed_mode': args.mode,
                     'main/error_step': step_counter
                 }, step_hint=step_counter + 1)
-                print(f"✓ Error logged to WandB at step {step_counter + 1}")
+                print(f"[OK] Error logged to WandB at step {step_counter + 1}")
             except Exception as log_error:
-                print(f"⚠ Failed to log error to WandB: {log_error}")
+                print(f"[WARNING] Failed to log error to WandB: {log_error}")
         raise
     
     finally:
@@ -431,9 +431,9 @@ def main_args():
         if wandb_logger:
             try:
                 wandb_logger.finish()
-                print("✓ WandB run finished")
+                print("[OK] WandB run finished")
             except Exception as e:
-                print(f"⚠ Failed to finish WandB run: {e}")
+                print(f"[WARNING] Failed to finish WandB run: {e}")
 
 if __name__ == "__main__":
     main_args()

@@ -48,10 +48,10 @@ class WandbLogger:
                 reinit=True
             )
             self.is_initialized = True
-            print(f"✓ Wandb initialized: {self.run.name}")
+            print(f"[OK] Wandb initialized: {self.run.name}")
             return True
         except Exception as e:
-            print(f"⚠ Wandb initialization failed: {e}")
+            print(f"[WARNING] Wandb initialization failed: {e}")
             self.is_initialized = False
             return False
         
@@ -61,32 +61,42 @@ class WandbLogger:
             return
  
         try:
-            # Only use step if it is numeric (int or float) AND greater than 0
-            # This prevents step=0 warnings when the current step is higher
-            if isinstance(step_hint, (int, float)) and step_hint > 0:
+            # Use step if it is numeric (int or float) AND greater than or equal to current step
+            # Get current step from wandb run
+            current_step = getattr(self.run, 'step', 0) if hasattr(self.run, 'step') else 0
+            
+            if isinstance(step_hint, (int, float)) and step_hint >= current_step:
                 self.run.log(data, step=int(step_hint))
             else:
                 # Fallback: no explicit step → wandb will auto-increment
                 # This avoids the monotonic step error
                 self.run.log(data)
         except Exception as e:
-            print(f"⚠ Wandb logging failed: {e}")
+            print(f"[WARNING] Wandb logging failed: {e}")
+            # If step-based logging fails, try without step as fallback
+            try:
+                print(f"[INFO] Retrying without explicit step...")
+                self.run.log(data)
+            except Exception as e2:
+                print(f"[WARNING] Wandb logging failed even without step: {e2}")
 
     def log_training_metrics(self, epoch: Any, metrics: Dict[str, float]):
         """Log training metrics (epoch may be int or str)."""
         if not self.is_initialized:
             return
-        # Only use epoch as step if it's a positive number to avoid step=0 warnings
-        step_hint = epoch if isinstance(epoch, (int, float)) and epoch > 0 else None
+        # Only use epoch as step if it's a non-negative number and >= current step
+        current_step = getattr(self.run, 'step', 0) if hasattr(self.run, 'step') else 0
+        step_hint = epoch if isinstance(epoch, (int, float)) and epoch >= current_step else None
         self._safe_log({**metrics, 'epoch': epoch}, step_hint=step_hint)
         
     def log_accuracy_metrics(self, epoch: int, accuracy_data: Dict[str, Any]):
-        """Log accuracy metrics."""
+        """Log accuracy metrics with proper step handling."""
         if not self.is_initialized:
             return
         
-        # Only use epoch as step if it's a positive number to avoid step=0 warnings    
-        step_hint = epoch if isinstance(epoch, (int, float)) and epoch > 0 else None
+        # Only use epoch as step if it's a non-negative number and >= current step
+        current_step = getattr(self.run, 'step', 0) if hasattr(self.run, 'step') else 0
+        step_hint = epoch if isinstance(epoch, (int, float)) and epoch >= current_step else None
             
         if 'individual_encoders' in accuracy_data:
             # Multi-encoder case
@@ -105,26 +115,55 @@ class WandbLogger:
             
         print(f"Logging visualizations for epoch {epoch}...")
         
-        # Only use epoch as step if it's a positive number to avoid step=0 warnings
-        step_hint = epoch if isinstance(epoch, (int, float)) and epoch > 0 else None
+        # Only use epoch as step if it's a non-negative number - allow epoch=1 
+        step_hint = epoch if isinstance(epoch, (int, float)) and epoch >= 0 else None
         
         try:
             # Import visualization function
             from utils.visualizers import plot_comprehensive_latent_space
             
             # Log latent space visualization during training (only on log intervals)
+            print(f"  Checking latent space logging: epoch={epoch}, log_interval={self.log_interval}, should_log={epoch % self.log_interval == 0}")
             if epoch % self.log_interval == 0:
                 try:
+                    print(f"  Creating latent space plot: eval_results={'available' if eval_results else 'None'}")
                     plot_comprehensive_latent_space(None, eval_results, run_dir)
                     latent_plot = os.path.join(run_dir, 'latent_space_visualization.png')
+                    print(f"  Looking for latent plot at: {latent_plot}")
                     if os.path.exists(latent_plot):
                         # Use safe step parameter for slider visualization
                         self._safe_log({'latent_space': wandb.Image(latent_plot)}, step_hint=step_hint)
-                        print("  ✓ Logged latent space visualization")
+                        print("  [OK] Logged latent space visualization")
                     else:
-                        print("  ⚠ Latent space plot not found")
+                        print("  [WARNING] Latent space plot not found - checking if visualization function completed")
+                        # List files in run_dir to see what's available
+                        import glob
+                        available_plots = glob.glob(os.path.join(run_dir, '*.png'))
+                        print(f"  Available PNG files in {run_dir}: {[os.path.basename(f) for f in available_plots]}")
                 except Exception as e:
-                    print(f"  ⚠ Could not create/log latent space visualization: {e}")
+                    print(f"  [WARNING] Could not create/log latent space visualization: {e}")
+                    import traceback
+                    print(f"  Error details: {traceback.format_exc()}")
+            else:
+                print(f"  Skipping latent space logging (not on log interval)")
+            
+            # Check for and log evaluation latent space plots from latent_space_plots directory
+            try:
+                import glob
+                latent_plots_dir = os.path.join(run_dir, 'latent_space_plots')
+                if os.path.exists(latent_plots_dir):
+                    # Look for evaluation latent space plots
+                    eval_latent_plots = glob.glob(os.path.join(latent_plots_dir, 'latent_space_evaluation*.png'))
+                    for plot_path in eval_latent_plots:
+                        if os.path.exists(plot_path):
+                            plot_name = os.path.basename(plot_path)
+                            # Extract epoch if available for consistent naming
+                            if f'epoch_{epoch}' in plot_name or plot_name == 'latent_space_evaluation.png':
+                                wandb_key = 'latent_space_evaluation'
+                                self._safe_log({wandb_key: wandb.Image(plot_path)}, step_hint=step_hint)
+                                print(f"  [OK] Logged evaluation latent space plot: {plot_name}")
+            except Exception as e:
+                print(f"  [WARNING] Could not upload evaluation latent space plots: {e}")
             
             # Log trajectory plots if available - ALWAYS log trajectory plots when available
             if trajectory_plots:
@@ -142,27 +181,30 @@ class WandbLogger:
                             # Log with safe step parameter for slider visualization
                             self._safe_log({wandb_key: wandb.Image(plot_path)}, step_hint=step_hint)
                             trajectory_logged += 1
-                            print(f"    ✓ Logged {wandb_key} at step {step_hint if step_hint else 'auto'}")
+                            print(f"    [OK] Logged {wandb_key} at step {step_hint if step_hint else 'auto'}")
                         except Exception as e:
-                            print(f"    ⚠ Failed to log {plot_key}: {e}")
+                            print(f"    [WARNING] Failed to log {plot_key}: {e}")
                     else:
-                        print(f"    ⚠ Trajectory plot not found: {plot_path}")
+                        print(f"    [WARNING] Trajectory plot not found: {plot_path}")
                 
-                print(f"  ✓ Successfully logged {trajectory_logged}/{len(trajectory_plots)} trajectory plots")
+                print(f"  [OK] Successfully logged {trajectory_logged}/{len(trajectory_plots)} trajectory plots")
                 
             else:
                 print("  No trajectory plots to log for this epoch")
             
         except Exception as e:
-            print(f"⚠ Error logging visualizations: {e}")
+            print(f"[WARNING] Error logging visualizations: {e}")
     
     def upload_all_plots(self, run_dir: str, epoch: int = None):
-        """Upload all existing plots to wandb when running visualize command. Only upload plots for the latest epoch to avoid WandB step warnings."""
+        """Upload all existing plots to wandb when running visualize command."""
         if not self.is_initialized:
-            print("⚠ Wandb not initialized, cannot upload plots")
+            print("[WARNING] Wandb not initialized, cannot upload plots")
             return
             
         print(f"Uploading all plots from {run_dir} to wandb...")
+        
+        # FIX: Use consistent step value - always use epoch as step if available
+        step_hint = epoch if isinstance(epoch, (int, float)) and epoch >= 0 else None
         
         # Define plot files to look for and their wandb keys
         plot_files = [
@@ -181,23 +223,30 @@ class WandbLogger:
         # Only upload the latest epoch's plots
         import glob
         import re
-        trajectory_plots = glob.glob(os.path.join(run_dir, 'multi_encoder_trajectory_reconstruction_sample_*.png'))
-        epoch_trajectory_plots = glob.glob(os.path.join(run_dir, 'trajectory_epoch*_*.png'))
+        # Look for trajectory plots in the dedicated folder
+        trajectory_plots_dir = os.path.join(run_dir, 'trajectory_plots')
+        if os.path.exists(trajectory_plots_dir):
+            trajectory_plots = glob.glob(os.path.join(trajectory_plots_dir, 'multi_encoder_trajectory_reconstruction_sample_*.png'))
+            epoch_trajectory_plots = glob.glob(os.path.join(trajectory_plots_dir, 'trajectory_epoch*_*.png'))
+        else:
+            # Fallback to old location
+            trajectory_plots = glob.glob(os.path.join(run_dir, 'multi_encoder_trajectory_reconstruction_sample_*.png'))
+            epoch_trajectory_plots = glob.glob(os.path.join(run_dir, 'trajectory_epoch*_*.png'))
         
         uploaded_count = 0
-        # Use a valid step or let WandB auto-increment to avoid step=0 warnings
-        step = epoch if epoch and epoch > 0 else None
+        # Use a valid step or let WandB auto-increment - allow epoch=1
+        # step = epoch if epoch and epoch >= 0 else None # This line is removed
         
         # Upload standard plots (not epoch-specific)
         for filename, wandb_key in plot_files:
             plot_path = os.path.join(run_dir, filename)
             if os.path.exists(plot_path):
                 try:
-                    self._safe_log({wandb_key: wandb.Image(plot_path)}, step_hint=step)
-                    print(f"  ✓ Uploaded {filename}")
+                    self._safe_log({wandb_key: wandb.Image(plot_path)}, step_hint=step_hint)
+                    print(f"  [OK] Uploaded {filename}")
                     uploaded_count += 1
                 except Exception as e:
-                    print(f"  ⚠ Failed to upload {filename}: {e}")
+                    print(f"  [WARNING] Failed to upload {filename}: {e}")
         
         # Upload only the latest trajectory reconstruction plots
         def extract_epoch_from_filename(filename):
@@ -209,11 +258,11 @@ class WandbLogger:
             if os.path.exists(traj_plot):
                 try:
                     wandb_key = f'trajectory_reconstruction_{os.path.basename(traj_plot)}'
-                    self._safe_log({wandb_key: wandb.Image(traj_plot)}, step_hint=step)
-                    print(f"  ✓ Uploaded {os.path.basename(traj_plot)}")
+                    self._safe_log({wandb_key: wandb.Image(traj_plot)}, step_hint=step_hint)
+                    print(f"  [OK] Uploaded {os.path.basename(traj_plot)}")
                     uploaded_count += 1
                 except Exception as e:
-                    print(f"  ⚠ Failed to upload {os.path.basename(traj_plot)}: {e}")
+                    print(f"  [WARNING] Failed to upload {os.path.basename(traj_plot)}: {e}")
         
         # For epoch_trajectory_plots, only upload the latest epoch for each key_sample
         epoch_trajectory_dict = {}
@@ -235,16 +284,31 @@ class WandbLogger:
             latest_epoch, latest_path = max(epoch_paths, key=lambda x: x[0])
             try:
                 wandb_key = f'trajectory_{plot_key}'
-                self._safe_log({wandb_key: wandb.Image(latest_path)}, step_hint=step)
-                print(f"  ✓ Uploaded {os.path.basename(latest_path)} (latest epoch {latest_epoch})")
+                self._safe_log({wandb_key: wandb.Image(latest_path)}, step_hint=step_hint)
+                print(f"  [OK] Uploaded {os.path.basename(latest_path)} (latest epoch {latest_epoch})")
                 uploaded_count += 1
             except Exception as e:
-                print(f"  ⚠ Failed to upload {os.path.basename(latest_path)}: {e}")
+                print(f"  [WARNING] Failed to upload {os.path.basename(latest_path)}: {e}")
+        
+        # Upload evaluation latent space plots from latent_space_plots directory
+        latent_plots_dir = os.path.join(run_dir, 'latent_space_plots')
+        if os.path.exists(latent_plots_dir):
+            eval_latent_plots = glob.glob(os.path.join(latent_plots_dir, 'latent_space_evaluation*.png'))
+            for plot_path in eval_latent_plots:
+                if os.path.exists(plot_path):
+                    try:
+                        plot_name = os.path.basename(plot_path)
+                        wandb_key = 'latent_space_evaluation'
+                        self._safe_log({wandb_key: wandb.Image(plot_path)}, step_hint=step_hint)
+                        print(f"  [OK] Uploaded evaluation latent space plot: {plot_name}")
+                        uploaded_count += 1
+                    except Exception as e:
+                        print(f"  [WARNING] Failed to upload {plot_name}: {e}")
         
         print(f"  📊 Total plots uploaded: {uploaded_count}")
         
         if uploaded_count == 0:
-            print("  ⚠ No plots found to upload. Make sure to run visualizations first.")
+            print("  [WARNING] No plots found to upload. Make sure to run visualizations first.")
             
         return uploaded_count
     
@@ -289,10 +353,10 @@ class WandbLogger:
             # Log the artifact (no training step associated)
             wandb.log_artifact(artifact)
             
-            print(f"✓ Uploaded checkpoint for epoch {epoch} to wandb")
+            print(f"[OK] Uploaded checkpoint for epoch {epoch} to wandb")
             
         except Exception as e:
-            print(f"⚠ Failed to upload checkpoint to wandb: {e}")
+            print(f"[WARNING] Failed to upload checkpoint to wandb: {e}")
     
     def upload_final_model(self, model_path: str, config_path: str = None):
         """Upload final trained model and configuration as WandB artifact."""
@@ -318,27 +382,27 @@ class WandbLogger:
             # Add the model file
             if os.path.exists(model_path):
                 artifact.add_file(model_path, name="final_model.pt")
-                print(f"✓ Added model file: {model_path}")
+                print(f"[OK] Added model file: {model_path}")
             
             # Add configuration file if provided
             if config_path and os.path.exists(config_path):
                 artifact.add_file(config_path, name="model_config.json")
-                print(f"✓ Added config file: {config_path}")
+                print(f"[OK] Added config file: {config_path}")
             
             # Log the artifact (no training step associated)
             wandb.log_artifact(artifact)
             
-            print(f"✓ Uploaded final model to wandb")
+            print(f"[OK] Uploaded final model to wandb")
             
         except Exception as e:
-            print(f"⚠ Failed to upload final model to wandb: {e}")
+            print(f"[WARNING] Failed to upload final model to wandb: {e}")
     
     def finish(self):
         """Finish wandb run."""
         if self.is_initialized and self.run:
             self.run.finish()
             self.is_initialized = False
-            print("✓ Wandb run finished")
+            print("[OK] Wandb run finished")
 
 # Global logger instance
 _global_logger = None
@@ -373,7 +437,7 @@ def init_wandb_for_mode(mode: str, run_dir: str = None) -> Optional[WandbLogger]
     
     # If already initialized, return existing logger
     if _global_logger and _global_logger.is_initialized:
-        print(f"✓ Using existing wandb session for {mode}")
+        print(f"[OK] Using existing wandb session for {mode}")
         return _global_logger
     
     # Try to get wandb settings from settings manager
@@ -382,7 +446,7 @@ def init_wandb_for_mode(mode: str, run_dir: str = None) -> Optional[WandbLogger]
         wandb_settings = settings.get_wandb_settings()
         
         if not wandb_settings.get('enabled', False):
-            print(f"⚠ Wandb not enabled in settings for {mode}")
+            print(f"[WARNING] Wandb not enabled in settings for {mode}")
             return None
             
         # Always first try the value from model_settings.json
@@ -421,12 +485,12 @@ def init_wandb_for_mode(mode: str, run_dir: str = None) -> Optional[WandbLogger]
         )
         
         if wandb_logger:
-            print(f"✓ Wandb initialized for {mode}: project={project_name}, run={run_name}")
+            print(f"[OK] Wandb initialized for {mode}: project={project_name}, run={run_name}")
         
         return wandb_logger
         
     except Exception as e:
-        print(f"⚠ Could not initialize wandb for {mode}: {e}")
+        print(f"[WARNING] Could not initialize wandb for {mode}: {e}")
         return None 
 
 # --------------------------------------------------

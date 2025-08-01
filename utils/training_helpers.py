@@ -99,12 +99,13 @@ class InfiniteARCDataset(IterableDataset):
     """Iterable dataset that generates or loads ARC examples on-the-fly."""
 
     def __init__(self, task_keys: List[str], batch_size: int, batches_per_epoch: int,
-                 seed: int = 42, data_dir: str = None):
+                 seed: int = 42, data_dir: str = None, return_keys: bool = True):
         self.task_keys = task_keys
         self.batch_size = batch_size
         self.batches_per_epoch = batches_per_epoch
         self.seed = seed
         self.data_dir = data_dir
+        self.return_keys = return_keys
 
         # Load pre-generated examples if available
         self.pre_generated = {}
@@ -129,25 +130,54 @@ class InfiniteARCDataset(IterableDataset):
         examples = self.pre_generated.get(key)
         if examples:
             return rng.choice(examples)
-        generator = self.generators[key]
-        return generator(0, 1)
+        
+        # FIX: Ensure generator uses the RNG state
+        import random
+        original_state = random.getstate()
+        random.setstate(rng.getstate())
+        
+        try:
+            generator = self.generators[key]
+            result = generator(0, 1)
+        finally:
+            random.setstate(original_state)
+        
+        return result
 
     def __iter__(self):
         rng = random.Random(self.seed + self._epoch)
         self._epoch += 1
-        for _ in range(len(self)):
+        
+        # FIXED: Return individual samples, let DataLoader handle batching
+        for i in range(len(self)):
             key = rng.choice(self.task_keys)
             example = self._sample_example(key, rng)
             input_seq = transform_grid_to_sequence(np.array(example['input']))
             output_seq = transform_grid_to_sequence(np.array(example['output']))
-            yield torch.tensor(input_seq, dtype=torch.float32), torch.tensor(output_seq, dtype=torch.float32)
+            
+            if self.return_keys:
+                yield torch.tensor(input_seq, dtype=torch.float32), torch.tensor(output_seq, dtype=torch.float32), key
+            else:
+                yield torch.tensor(input_seq, dtype=torch.float32), torch.tensor(output_seq, dtype=torch.float32)
 
 
 def create_infinite_dataloader(task_keys: List[str], batch_size: int, batches_per_epoch: int,
-                               seed: int = 42, data_dir: str = None) -> DataLoader:
+                               seed: int = 42, data_dir: str = None, return_keys: bool = True) -> DataLoader:
     """Helper to create a DataLoader backed by ``InfiniteARCDataset``."""
-    dataset = InfiniteARCDataset(task_keys, batch_size, batches_per_epoch, seed=seed, data_dir=data_dir)
-    return DataLoader(dataset, batch_size=batch_size, shuffle=False)
+    dataset = InfiniteARCDataset(task_keys, batch_size, batches_per_epoch, seed=seed, data_dir=data_dir, return_keys=return_keys)
+    
+    # ADD: Custom collate function to handle keys
+    def collate_fn(batch):
+        if return_keys and len(batch[0]) == 3:
+            # Batch contains (input, output, key) tuples
+            inputs, outputs, keys = zip(*batch)
+            return torch.stack(inputs), torch.stack(outputs), list(keys)
+        else:
+            # Batch contains (input, output) tuples
+            inputs, outputs = zip(*batch)
+            return torch.stack(inputs), torch.stack(outputs)
+    
+    return DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
 
 
 def freeze_all_parameters(model: nn.Module) -> None:
@@ -345,8 +375,8 @@ def load_encoder_checkpoint(model: nn.Module, encoder_idx: int, run_dir: str, de
             model.multi_encoder.encoders[encoder_idx].load_state_dict(encoder_state, strict=True)
         except RuntimeError as e:
             if "size mismatch" in str(e) or "Missing key(s)" in str(e):
-                print(f"⚠ Architecture mismatch for encoder {encoder_idx}: {str(e)[:100]}...")
-                print(f"⚠ This indicates config was changed between Phase A and Phase B")
+                print(f"[ WARNING ] Architecture mismatch for encoder {encoder_idx}: {str(e)[:100]}...")
+                print(f"[ WARNING ] This indicates config was changed between Phase A and Phase B")
                 raise RuntimeError(f"Architecture mismatch when loading encoder {encoder_idx}. "
                                  f"This suggests the model configuration changed between phases. "
                                  f"Ensure the same frozen config is used for all phases.")
@@ -366,9 +396,9 @@ def load_all_encoder_checkpoints(model: nn.Module, run_dir: str, device: str = '
     for encoder_idx in range(num_encoders):
         try:
             load_encoder_checkpoint(model, encoder_idx, run_dir, device)
-            print(f"✓ Loaded encoder {encoder_idx} checkpoint")
+            print(f"[ OK ] Loaded encoder {encoder_idx} checkpoint")
         except FileNotFoundError:
-            print(f"⚠ Encoder {encoder_idx} checkpoint not found - will start from random initialization")
+            print(f"[ WARNING ] Encoder {encoder_idx} checkpoint not found - will start from random initialization")
         except RuntimeError as e:
             if "Architecture mismatch" in str(e):
                 # This is our custom architecture mismatch error
@@ -377,7 +407,7 @@ def load_all_encoder_checkpoints(model: nn.Module, run_dir: str, device: str = '
                 raise e  # Re-raise to stop execution and force user to fix config
             else:
                 # Other runtime errors
-                print(f"⚠ Failed to load encoder {encoder_idx}: {e}")
+                print(f"[ WARNING ] Failed to load encoder {encoder_idx}: {e}")
                 raise e
 
 
@@ -443,9 +473,9 @@ def load_independent_decoder_checkpoint(model: nn.Module, encoder_idx: int, run_
         except RuntimeError as e:
             if "size mismatch" in str(e) or "Missing key(s)" in str(e):
                 # Architecture mismatch - this happens when config changes between phases
-                print(f"⚠ Architecture mismatch for independent decoder {encoder_idx}: {str(e)[:100]}...")
-                print(f"⚠ This indicates config was changed between Phase A and Phase B")
-                print(f"⚠ Skipping checkpoint loading - decoder will use random initialization")
+                print(f"[ WARNING ] Architecture mismatch for independent decoder {encoder_idx}: {str(e)[:100]}...")
+                print(f"[ WARNING ] This indicates config was changed between Phase A and Phase B")
+                print(f"[ WARNING ] Skipping checkpoint loading - decoder will use random initialization")
                 raise RuntimeError(f"Architecture mismatch when loading independent decoder {encoder_idx}. "
                                  f"This suggests the model configuration changed between phases. "
                                  f"Ensure the same frozen config is used for all phases.")
@@ -481,9 +511,9 @@ def load_all_independent_decoder_checkpoints(model: nn.Module, run_dir: str, dev
     for encoder_idx in range(num_encoders):
         try:
             load_independent_decoder_checkpoint(model, encoder_idx, run_dir, device)
-            print(f"✓ Loaded independent decoder {encoder_idx} checkpoint")
+            print(f"[ OK ] Loaded independent decoder {encoder_idx} checkpoint")
         except FileNotFoundError:
-            print(f"⚠ Independent decoder {encoder_idx} checkpoint not found - will start from random initialization")
+            print(f"[ WARNING ] Independent decoder {encoder_idx} checkpoint not found - will start from random initialization")
         except RuntimeError as e:
             if "Architecture mismatch" in str(e):
                 # This is our custom architecture mismatch error
@@ -492,7 +522,7 @@ def load_all_independent_decoder_checkpoints(model: nn.Module, run_dir: str, dev
                 raise e  # Re-raise to stop execution and force user to fix config
             else:
                 # Other runtime errors
-                print(f"⚠ Failed to load independent decoder {encoder_idx}: {e}")
+                print(f"[ WARNING ] Failed to load independent decoder {encoder_idx}: {e}")
                 raise e
 
 
@@ -537,16 +567,16 @@ def initialize_shared_decoder_from_independent_decoders(model: nn.Module, run_di
             # Stack tensors from all independent decoders and compute mean
             stacked_weights = torch.stack([state[key] for state in independent_states])
             averaged_state[key] = torch.mean(stacked_weights, dim=0)
-            print(f"  ✓ Averaged parameter: {key} (shape: {averaged_state[key].shape})")
+            print(f"  [ OK ] Averaged parameter: {key} (shape: {averaged_state[key].shape})")
         else:
             # Keep original weights if not found in independent decoders
             averaged_state[key] = shared_decoder_state[key]
-            print(f"  ⚠ Kept original parameter: {key} (not found in independent decoders)")
+            print(f"  [ WARNING ] Kept original parameter: {key} (not found in independent decoders)")
     
     # Load the averaged weights into the shared decoder
     model.multi_encoder.shared_decoder.load_state_dict(averaged_state)
     
-    print("✓ Shared decoder initialized with averaged weights from independent decoders")
+    print("[ OK ] Shared decoder initialized with averaged weights from independent decoders")
     print("  This provides a warm start for Phase B training based on Phase A knowledge")
 
 
