@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Base Model for Latent Program Network (LPN)
 
@@ -206,26 +205,6 @@ def gaussian_poe(mu: torch.Tensor, logvar: torch.Tensor, debug=False) -> Tuple[t
         print(f"PoE Debug: fused_mu stats - min: {fused_mu.min():.4f}, max: {fused_mu.max():.4f}, mean: {fused_mu.mean():.4f}")
     
     return fused_mu, fused_logvar
-
-def compute_encoder_covariance_traces(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-    """
-    Compute trace of covariance matrix (sum of variances) for each encoder.
-    
-    Args:
-        mu (torch.Tensor): Encoder means, shape (K, B, D) [unused but kept for compatibility]
-        logvar (torch.Tensor): Encoder log variances, shape (K, B, D)
-    
-    Returns:
-        torch.Tensor: Covariance traces for each encoder, shape (K, B)
-    """
-    with torch.no_grad():
-        # Trace of diagonal covariance = sum of variances = sum of exp(log_var)
-        variances = torch.exp(logvar)  # Shape (K, B, D)
-        traces = variances.sum(dim=2)  # Sum over latent dimensions, shape (K, B)
-        return traces
-
-# Backward compatibility alias
-compute_encoder_influence_metrics = compute_encoder_covariance_traces
 
 ##############################
 # Define Model Components
@@ -1162,6 +1141,7 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
             # Reparameterization
             eps = torch.randn_like(mu_star)
             z = mu_star + eps * torch.exp(0.5*logvar_star)
+            latent_magnitude = z.norm(dim=1).mean().item()  # Mean L2 norm per sample
             
             # Decode with shared decoder
             shape_logits, grid_logits = model.multi_encoder.shared_decoder(z, input_seq, target_seq=target_seq)
@@ -1238,6 +1218,7 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
                     'effective_beta': effective_beta,
                     'repulsion_loss': repulsion_loss,
                     'repulsion_lambda': repulsion_lambda,
+                    'latent_magnitude': latent_magnitude
                 }
                 
                 if is_vq_vae:
@@ -1518,5 +1499,3 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
             return components
         
         return total_loss
-
-

@@ -131,8 +131,8 @@ class WandbLogger:
                     latent_plot = os.path.join(run_dir, 'latent_space_visualization.png')
                     print(f"  Looking for latent plot at: {latent_plot}")
                     if os.path.exists(latent_plot):
-                        # Use safe step parameter for slider visualization
-                        self._safe_log({'latent_space': wandb.Image(latent_plot)}, step_hint=step_hint)
+                        # Use consistent key for single panel with epoch as step
+                        self._safe_log({'latent_space_training': wandb.Image(latent_plot)}, step_hint=step_hint)
                         print("  [OK] Logged latent space visualization")
                     else:
                         print("  [WARNING] Latent space plot not found - checking if visualization function completed")
@@ -159,8 +159,8 @@ class WandbLogger:
                             plot_name = os.path.basename(plot_path)
                             # Extract epoch if available for consistent naming
                             if f'epoch_{epoch}' in plot_name or plot_name == 'latent_space_evaluation.png':
-                                wandb_key = 'latent_space_evaluation'
-                                self._safe_log({wandb_key: wandb.Image(plot_path)}, step_hint=step_hint)
+                                # Use consistent key for single panel with epoch as step
+                                self._safe_log({'latent_space_evaluation': wandb.Image(plot_path)}, step_hint=step_hint)
                                 print(f"  [OK] Logged evaluation latent space plot: {plot_name}")
             except Exception as e:
                 print(f"  [WARNING] Could not upload evaluation latent space plots: {e}")
@@ -170,15 +170,27 @@ class WandbLogger:
                 print(f"  Logging {len(trajectory_plots)} trajectory plots...")
                 trajectory_logged = 0
                 
-                # Log each trajectory plot with consistent key and proper epoch step
+                # Log each trajectory plot with key-specific panel names
                 for plot_key, plot_path in trajectory_plots.items():
                     if os.path.exists(plot_path):
                         try:
-                            # Use consistent key naming for slider visualization across epochs
-                            # Format: trajectory_{key}_sample{idx} 
-                            wandb_key = f'trajectory_{plot_key}'
+                            # Extract key from plot_key (format: {key}_sample{sample_idx} or {key}_sample{sample_idx}_latent_space)
+                            if '_sample' in plot_key:
+                                key_part = plot_key.split('_sample')[0]
+                                sample_part = plot_key.split('_sample')[1]
+                                
+                                # Determine if this is a latent space plot or main trajectory plot
+                                if '_latent_space' in plot_key:
+                                    # This is a latent space plot
+                                    wandb_key = f'trajectory_latent_space_{key_part}'
+                                else:
+                                    # This is a main trajectory plot
+                                    wandb_key = f'trajectory_plots_{key_part}'
+                            else:
+                                # Fallback for other plot types
+                                wandb_key = f'trajectory_plots_{plot_key}'
                             
-                            # Log with safe step parameter for slider visualization
+                            # Log with safe step parameter for single panel visualization
                             self._safe_log({wandb_key: wandb.Image(plot_path)}, step_hint=step_hint)
                             trajectory_logged += 1
                             print(f"    [OK] Logged {wandb_key} at step {step_hint if step_hint else 'auto'}")
@@ -208,7 +220,7 @@ class WandbLogger:
         
         # Define plot files to look for and their wandb keys
         plot_files = [
-            ('latent_space_visualization.png', 'latent_space'),
+            ('latent_space_visualization.png', 'latent_space_training'),
             ('comprehensive_latent_space.png', 'latent_space_comprehensive'),
             ('epoch_accuracies.png', 'epoch_accuracies'),
             ('z_optimization_losses.png', 'z_optimization_losses'),
@@ -217,7 +229,7 @@ class WandbLogger:
             ('training_reconstruction_analysis.png', 'training_reconstruction_analysis'),
             ('evaluation_reconstruction_analysis.png', 'evaluation_reconstruction_analysis'),
             ('poe_reconstruction_analysis.png', 'poe_reconstruction_analysis'),  # Keep for backward compatibility
-            ('encoder_influence_analysis.png', 'encoder_influence_analysis'),
+
         ]
         
         # Only upload the latest epoch's plots
@@ -253,11 +265,12 @@ class WandbLogger:
             match = re.search(r'epoch(\d+)', filename)
             return int(match.group(1)) if match else -1
         
-        # For multi_encoder_trajectory_reconstruction_sample_*.png, just upload all (no epoch info)
+        # For multi_encoder_trajectory_reconstruction_sample_*.png, use consistent key for single panel
         for traj_plot in trajectory_plots:
             if os.path.exists(traj_plot):
                 try:
-                    wandb_key = f'trajectory_reconstruction_{os.path.basename(traj_plot)}'
+                    # Use consistent key for single panel visualization
+                    wandb_key = 'trajectory_reconstruction'
                     self._safe_log({wandb_key: wandb.Image(traj_plot)}, step_hint=step_hint)
                     print(f"  [OK] Uploaded {os.path.basename(traj_plot)}")
                     uploaded_count += 1
@@ -283,7 +296,15 @@ class WandbLogger:
             # Find the latest epoch
             latest_epoch, latest_path = max(epoch_paths, key=lambda x: x[0])
             try:
-                wandb_key = f'trajectory_{plot_key}'
+                # Extract key from plot_key (format: {key}_sample{sample_idx})
+                if '_sample' in plot_key:
+                    key_part = plot_key.split('_sample')[0]
+                    # Use key-specific panel name for trajectory plots
+                    wandb_key = f'trajectory_plots_{key_part}'
+                else:
+                    # Fallback for other plot types
+                    wandb_key = f'trajectory_plots_{plot_key}'
+                
                 self._safe_log({wandb_key: wandb.Image(latest_path)}, step_hint=step_hint)
                 print(f"  [OK] Uploaded {os.path.basename(latest_path)} (latest epoch {latest_epoch})")
                 uploaded_count += 1

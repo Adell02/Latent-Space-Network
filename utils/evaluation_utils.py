@@ -46,8 +46,7 @@ def generate_trajectory_plots(eval_results: Dict[str, Any], run_dir: str, epoch:
     try:
         # Import trajectory visualization functions
         from LPN_reproduction.evaluate_trajectory import (
-            visualize_comprehensive_trajectory,
-            visualize_multi_encoder_comprehensive_trajectory
+            visualize_comprehensive_trajectory
         )
         
         # Get the model - prioritize in-memory model to avoid disk loading issues
@@ -90,7 +89,7 @@ def generate_trajectory_plots(eval_results: Dict[str, Any], run_dir: str, epoch:
                     os.makedirs(trajectory_plots_dir, exist_ok=True)
                     
                     # Create descriptive filename - include epoch for file uniqueness
-                    plot_filename = f'trajectory_epoch{epoch}_{key}_sample{sample_idx}.png'
+                    plot_filename = f'trajectory_epoch{epoch if epoch is not None else 0}_{key}_sample{sample_idx}.png'
                     plot_path = os.path.join(trajectory_plots_dir, plot_filename)
                     
                     # Debug: Print the exact path being used
@@ -101,22 +100,22 @@ def generate_trajectory_plots(eval_results: Dict[str, Any], run_dir: str, epoch:
                     # Check if this is multi-encoder
                     is_multi_encoder = trajectory_info.get('is_multi_encoder', False)
                     
-                    if is_multi_encoder:
-                        plot_data = visualize_multi_encoder_comprehensive_trajectory(
-                            trajectory_info, model, plot_path, run_dir, device='cuda'
-                        )
-                        
-                        # Create standalone latent space plot for this trajectory
-                        from utils.visualizers import create_standalone_latent_space_plot
-                        latent_space_path = create_standalone_latent_space_plot(trajectory_info, model, run_dir, epoch, sample_idx, key, device='cuda', wandb_logger=wandb_logger)
-                    else:
+                    # Use the general visualization function with error handling
+                    try:
                         plot_data = visualize_comprehensive_trajectory(
                             trajectory_info, model, plot_path, run_dir, device='cuda'
                         )
-                        
-                        # Create standalone latent space plot for this trajectory
-                        from utils.visualizers import create_standalone_latent_space_plot
-                        latent_space_path = create_standalone_latent_space_plot(trajectory_info, model, run_dir, epoch, sample_idx, key, device='cuda', wandb_logger=wandb_logger)
+                    except KeyboardInterrupt:
+                        print(f"  [ WARNING ] Trajectory visualization interrupted for {key} sample {sample_idx}")
+                        continue
+                    except Exception as e:
+                        print(f"  [ WARNING ] Trajectory visualization failed for {key} sample {sample_idx}: {e}")
+                        # Continue with next sample instead of failing completely
+                        continue
+                    
+                    # Create standalone latent space plot for this trajectory
+                    from utils.visualizers import create_standalone_latent_space_plot
+                    latent_space_path = create_standalone_latent_space_plot(trajectory_info, model, run_dir, epoch, sample_idx, key, device='cuda', wandb_logger=wandb_logger)
                     
                     # Store plot path with consistent key for slider visualization
                     # Use key_sample format without epoch in the key for consistent naming across epochs

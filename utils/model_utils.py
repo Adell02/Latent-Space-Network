@@ -159,11 +159,16 @@ def create_run_directory(file_store_name=None, base_dir: str = None):
     """
     if base_dir is None:
         base_dir = RUN_BASE_DIR
+    
+    # Always create a timestamped directory
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    
     if file_store_name is None:
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         run_dir = os.path.join(base_dir, f"run_{timestamp}")
     else:
-        run_dir = os.path.join(base_dir, file_store_name)
+        # Combine the provided name with timestamp for uniqueness
+        run_dir = os.path.join(base_dir, f"{file_store_name}_{timestamp}")
+    
     os.makedirs(run_dir, exist_ok=True)
     print(f"Creating run directory at: {run_dir}")
     return run_dir

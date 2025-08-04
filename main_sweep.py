@@ -103,7 +103,6 @@ def create_sweep_configurations(specialist_mode: bool = False) -> List[Tuple[str
             configurations.append((config_name, config_combo))
             
     else:
-        # Original non-specialist configurations
         # Load base configuration from model_settings.json
         with open("model_settings.json", "r") as f:
             base_config = json.load(f)
@@ -111,14 +110,92 @@ def create_sweep_configurations(specialist_mode: bool = False) -> List[Tuple[str
         print("Base config loaded from model_settings.json")
         print(f"  Base num_encoders: {base_config.get('model_architecture', {}).get('num_encoders', 'NOT FOUND')}")
         print(f"  Base encoder_layers: {base_config.get('model_architecture', {}).get('encoder_layers', 'NOT FOUND')}")
+        print(f"  Base latent_dim: {base_config.get('model_architecture', {}).get('latent_dim', 'NOT FOUND')}")
         
-        # Different repulsion loss values
-        for i in range(1,10):
-            config_i_rl = copy.deepcopy(base_config)
-            config_i_rl["training_settings"]["repulsion_loss"]["schedule"]["start"] = 10**(-i)
-            config_i_rl["training_settings"]["repulsion_loss"]["schedule"]["end"] = 10**(-i)
-            print(f"Config {i}_rl: repulsion_loss={10**(-i)}")
-            configurations.append((f"{i}_repulsion_loss", config_i_rl))
+        # Training configurations: 3 different latent dimensions
+        training_latent_dims = [64, 256, 512]  # 3 models to train
+        
+        # Create training configurations
+        for latent_dim in training_latent_dims:
+            config_train = copy.deepcopy(base_config)
+            
+            # Update latent dimension for training
+            config_train["model_architecture"]["latent_dim"] = latent_dim
+            
+            # Set default optimization method for training (will be overridden during evaluation)
+            config_train["latent_optimization"]["method"] = "gradient"
+            
+            config_name = f"train_latent_dim_{latent_dim}"
+            print(f"Config {config_name}: latent_dim={latent_dim} (training)")
+            configurations.append((config_name, config_train))
+        
+        # Evaluation configurations: Each trained model with both optimization methods
+        eval_latent_dims = [64, 256, 512]  # Same as training
+        optimization_methods = ['gradient', 'evolutionary']
+        
+        # Base parameters for gradient ascent
+        base_learning_rate = 0.1
+        base_steps = 100
+        
+        for latent_dim in eval_latent_dims:
+            for opt_method in optimization_methods:
+                config_eval = copy.deepcopy(base_config)
+                
+                # Set latent dimension (should match trained model)
+                config_eval["model_architecture"]["latent_dim"] = latent_dim
+                
+                # Set optimization method for evaluation
+                config_eval["latent_optimization"]["method"] = opt_method
+                
+                # Configure optimization-specific settings using mathematical relationships
+                if opt_method == 'gradient':
+                    config_eval["latent_optimization"]["inference"] = {
+                        "enabled": True,
+                        "num_steps": base_steps,
+                        "learning_rate": base_learning_rate
+                    }
+                elif opt_method == 'evolutionary':
+                    # Apply mathematical relationships from cheat-sheet:
+                    # σ ≈ √(2η), G ≈ S, λ ≥ c·d/σ²
+                    mutation_std = (2 * base_learning_rate) ** 0.5  # σ ≈ √(2η)
+                    num_generations = base_steps  # G ≈ S
+                    
+                    # Population size: λ ≥ c·d/σ² where c≈4-10, d=latent_dim
+                    c = 6  # middle value between 4-10
+                    min_population = int(c * latent_dim / (mutation_std ** 2))
+                    population_size = max(min_population, 25)  # ensure minimum reasonable size
+                    
+                    config_eval["latent_optimization"]["evolutionary"] = {
+                        "population_size": population_size,
+                        "num_generations": num_generations,
+                        "mutation_std": mutation_std
+                    }
+                    
+                    # Debug print for verification
+                    print(f"  Evolutionary params for {latent_dim}D: σ={mutation_std:.3f}, G={num_generations}, λ={population_size}")
+                
+                config_name = f"eval_latent_dim_{latent_dim}_opt_{opt_method}"
+                print(f"Config {config_name}: latent_dim={latent_dim}, optimization={opt_method} (evaluation)")
+                configurations.append((config_name, config_eval))
+        
+        # Also include some repulsion loss variations for comparison
+        repulsion_values = [1e-3, 1e-4, 1e-5]
+        for i, repulsion_val in enumerate(repulsion_values):
+            config_rl = copy.deepcopy(base_config)
+            
+            # Check if repulsion_loss_settings exists, if not create it
+            if "repulsion_loss_settings" not in config_rl:
+                config_rl["repulsion_loss_settings"] = {}
+            
+            # Ensure the schedule structure exists
+            if "schedule" not in config_rl["repulsion_loss_settings"]:
+                config_rl["repulsion_loss_settings"]["schedule"] = {}
+            
+            config_rl["repulsion_loss_settings"]["schedule"]["start"] = repulsion_val
+            config_rl["repulsion_loss_settings"]["schedule"]["end"] = repulsion_val
+            config_name = f"repulsion_loss_{repulsion_val}"
+            print(f"Config {config_name}: repulsion_loss={repulsion_val}")
+            configurations.append((config_name, config_rl))
 
     return configurations
 
@@ -131,6 +208,8 @@ def save_configuration(config_name: str, config: Dict[str, Any], run_number: int
     print(f"Saving config for run {run_number}:")
     print(f"  num_encoders: {config.get('model_architecture', {}).get('num_encoders', 'NOT FOUND')}")
     print(f"  encoder_layers: {config.get('model_architecture', {}).get('encoder_layers', 'NOT FOUND')}")
+    print(f"  latent_dim: {config.get('model_architecture', {}).get('latent_dim', 'NOT FOUND')}")
+    print(f"  optimization_method: {config.get('latent_optimization', {}).get('method', 'NOT FOUND')}")
     
     with open(config_path, 'w') as f:
         json.dump(config, f, indent=2)
@@ -146,6 +225,8 @@ def update_settings_with_config(config: Dict[str, Any]):
     print(f"Applying config to settings:")
     print(f"  num_encoders: {config.get('model_architecture', {}).get('num_encoders', 'NOT FOUND')}")
     print(f"  encoder_layers: {config.get('model_architecture', {}).get('encoder_layers', 'NOT FOUND')}")
+    print(f"  latent_dim: {config.get('model_architecture', {}).get('latent_dim', 'NOT FOUND')}")
+    print(f"  optimization_method: {config.get('latent_optimization', {}).get('method', 'NOT FOUND')}")
     
     # Create a temporary settings file with the new configuration
     temp_settings_file = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False)
@@ -173,6 +254,8 @@ def update_settings_with_config(config: Dict[str, Any]):
         print(f"Settings after update:")
         print(f"  num_encoders: {settings.get_model_architecture().get('num_encoders', 'NOT FOUND')}")
         print(f"  encoder_layers: {settings.get_model_architecture().get('encoder_layers', 'NOT FOUND')}")
+        print(f"  latent_dim: {settings.get_model_architecture().get('latent_dim', 'NOT FOUND')}")
+        print(f"  optimization_method: {settings.get_latent_optimization().get('method', 'NOT FOUND')}")
         
         # Clean up temporary file
         os.unlink(temp_settings_file.name)
@@ -339,7 +422,9 @@ def run_sweep(modes: List[str], start_run: int = 1, end_run: int = None,
     # Debug: Print all configurations after creation
     print(f"\nDEBUG: All configurations after creation:")
     for i, (name, config) in enumerate(configurations):
-        print(f"  {i}: {name} - num_encoders={config['model_architecture']['num_encoders']}, encoder_layers={config['model_architecture']['encoder_layers']}")
+        latent_dim = config['model_architecture'].get('latent_dim', 'NOT FOUND')
+        opt_method = config.get('latent_optimization', {}).get('method', 'NOT FOUND')
+        print(f"  {i}: {name} - num_encoders={config['model_architecture']['num_encoders']}, encoder_layers={config['model_architecture']['encoder_layers']}, latent_dim={latent_dim}, opt_method={opt_method}")
     
     if end_run is None:
         end_run = len(configurations)
@@ -350,7 +435,9 @@ def run_sweep(modes: List[str], start_run: int = 1, end_run: int = None,
     # Debug: Print filtered configurations
     print(f"\nDEBUG: Filtered configurations (runs {start_run}-{end_run}):")
     for i, (name, config) in enumerate(configurations):
-        print(f"  {i}: {name} - num_encoders={config['model_architecture']['num_encoders']}, encoder_layers={config['model_architecture']['encoder_layers']}")
+        latent_dim = config['model_architecture'].get('latent_dim', 'NOT FOUND')
+        opt_method = config.get('latent_optimization', {}).get('method', 'NOT FOUND')
+        print(f"  {i}: {name} - num_encoders={config['model_architecture']['num_encoders']}, encoder_layers={config['model_architecture']['encoder_layers']}, latent_dim={latent_dim}, opt_method={opt_method}")
     
     print(f"Running {len(configurations)} experiments (runs {start_run}-{end_run})")
     
@@ -369,6 +456,8 @@ def run_sweep(modes: List[str], start_run: int = 1, end_run: int = None,
             print(f"\nDEBUG: Run {run_number} using config '{config_name}'")
             print(f"  Config num_encoders: {config['model_architecture']['num_encoders']}")
             print(f"  Config encoder_layers: {config['model_architecture']['encoder_layers']}")
+            print(f"  Config latent_dim: {config['model_architecture'].get('latent_dim', 'NOT FOUND')}")
+            print(f"  Config optimization_method: {config.get('latent_optimization', {}).get('method', 'NOT FOUND')}")
             
             if parallel:
                 # For parallel execution, we'd need to implement subprocess calls
@@ -427,6 +516,8 @@ def main():
             print(f"     - Encoders: {config['model_architecture']['num_encoders']}")
             print(f"     - LR: {config['training_settings']['learning_rate']}")
             print(f"     - Beta: {config['training_settings']['beta']}")
+            print(f"     - Latent Dim: {config['model_architecture'].get('latent_dim', 'N/A')}")
+            print(f"     - Optimization: {config.get('latent_optimization', {}).get('method', 'N/A')}")
             
             if args.specialist:
                 # Show specialist-specific info

@@ -22,6 +22,7 @@ from utils.model_utils import (
     count_model_parameters,
     save_model_params,
     collect_latent_data,
+    save_evaluation_results,
 )
 
 from utils.wandb_logger import init_wandb_for_mode, get_wandb_logger
@@ -43,100 +44,7 @@ def build_model(device, wandb_logger=None, global_step=None):
     
     return model
 
-##############################
-# Latent Data Collection Functions
-##############################
 
-def collect_multi_encoder_latent_data(model, encoder_dataloaders, device, max_samples_per_encoder=50):
-    """Collect latent representations from each encoder for visualization."""    
-    encoder_latent_data = {}
-    
-    for encoder_idx, dataloader in enumerate(encoder_dataloaders):
-        print(f"  Collecting from Encoder {encoder_idx}...")
-
-        latent_data = collect_latent_data(
-            model,
-            dataloader,
-            device,
-            encoder_idx=encoder_idx,
-            max_samples=max_samples_per_encoder,
-            data_type=f"training_encoder_{encoder_idx}",
-        )
-
-        if latent_data.get('num_samples', 0) > 0:
-            print(
-                f"    [OK] Collected {latent_data['num_samples']} samples from Encoder {encoder_idx}"
-            )
-
-        encoder_latent_data[f"encoder_{encoder_idx}"] = latent_data
-    
-    return encoder_latent_data
-
-def collect_single_encoder_latent_data(model, dataloader, device, max_samples=100, data_type='training'):
-    """
-    Collect latent representations from single encoder for visualization.
-    
-    Args:
-        model: Single encoder model
-        dataloader: Data loader
-        device: Device to run on
-        max_samples: Maximum samples to collect
-        data_type: Type of data being collected
-        
-    Returns:
-        dict: Latent data
-    """
-    model.eval()
-    latent_data = {
-        'latent_mus': [],
-        'latent_log_vars': [],
-        'latent_zs': [],
-        'input_samples': [],
-        'output_samples': [],
-        'data_type': data_type,
-        'num_samples': 0
-    }
-    
-    with torch.no_grad():
-        sample_count = 0
-        for batch in dataloader:
-            # Handle batch structure with keys
-            if len(batch) >= 3:
-                batch_input, batch_target, batch_keys = batch[:3]
-            else:
-                batch_input, batch_target = batch[:2]
-                batch_keys = None
-            
-            if sample_count >= max_samples:
-                break
-                
-            batch_input = batch_input.to(device)
-            batch_target = batch_target.to(device)
-            
-            # Get latent representations - always use mean vectors
-            mu, log_var,_ = model.encoder(batch_input, batch_target)
-            z = model.reparameterize(mu, log_var)
-            
-            # Store data
-            batch_size = min(batch_input.size(0), max_samples - sample_count)
-            latent_data['latent_mus'].append(mu[:batch_size].cpu().numpy())
-            latent_data['latent_log_vars'].append(log_var[:batch_size].cpu().numpy())
-            latent_data['latent_zs'].append(z[:batch_size].cpu().numpy())
-            latent_data['input_samples'].append(batch_input[:batch_size].cpu().numpy())
-            latent_data['output_samples'].append(batch_target[:batch_size].cpu().numpy())
-            
-            sample_count += batch_size
-    
-    # Concatenate all batches
-    if latent_data['latent_mus']:
-        latent_data['latent_mus'] = np.concatenate(latent_data['latent_mus'], axis=0)
-        latent_data['latent_log_vars'] = np.concatenate(latent_data['latent_log_vars'], axis=0)
-        latent_data['latent_zs'] = np.concatenate(latent_data['latent_zs'], axis=0)
-        latent_data['input_samples'] = np.concatenate(latent_data['input_samples'], axis=0)
-        latent_data['output_samples'] = np.concatenate(latent_data['output_samples'], axis=0)
-        latent_data['num_samples'] = len(latent_data['latent_mus'])
-    
-    return latent_data
 
 ##############################
 # Main Training Function
@@ -265,6 +173,14 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler,
     model.train()
     device = next(model.parameters()).device
 
+    # DETERMINE IF THIS IS A MULTI-ENCODER MODEL
+    is_multi_encoder = hasattr(model, 'is_multi_encoder') and model.is_multi_encoder
+    
+    # Reset training latents at the beginning of each epoch (only keep last epoch's data)
+    if hasattr(model, 'epoch_optimized_latents'):
+        print(f"  [DEBUG] Resetting training latents for epoch {current_epoch_num}")
+        model.epoch_optimized_latents = None
+
     # Get unified settings for ALL training types
     enhanced_training = settings.get_enhanced_training()
     training_settings = settings.get_training_settings()
@@ -305,6 +221,23 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler,
     epoch_total_loss = 0.0
     epoch_shape = epoch_grid = epoch_kl = epoch_repulsion = 0.0
 
+    # STORE OPTIMIZED LATENTS FOR VISUALIZATION (only from current epoch)
+    optimized_latents = []
+    optimized_keys = []
+    optimized_encoder_indices = []
+    
+    # Get latent optimization settings
+    latent_optimization = settings.get_latent_optimization()
+    num_steps = latent_optimization['training']['num_steps']
+    lr = latent_optimization['training']['learning_rate']
+    
+    # Calculate max latents to store (for infinite dataloader: batch_size * batches_per_epoch)
+    training_settings = settings.get_training_settings()
+    batch_size = training_settings.get('batch_size', 4)
+    batches_per_epoch = training_settings.get('batches_per_epoch', 10)
+    max_latents_to_store = batch_size * batches_per_epoch
+    print(f"  [DEBUG] Will store max {max_latents_to_store} latents per encoder (batch_size={batch_size} * batches_per_epoch={batches_per_epoch})")
+
     # Zero gradients before epoch
     optimizer.zero_grad()
 
@@ -341,6 +274,8 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler,
                 repulsion_margin=repulsion_margin,
                 repulsion_logvar_min=repulsion_logvar_min
             )
+            if 'latent_magnitude' in comp:
+                logger.info(f"[DEBUG] Latent magnitude (mean L2 norm): {comp['latent_magnitude']:.4f} | KL: {comp.get('kl_loss', 0):.4f} | Repulsion: {comp.get('repulsion_loss', 0):.4f}")
             
             loss = comp['total_loss']
             shape_comp = comp.get('shape_loss', torch.tensor(0.0, device=device))
@@ -360,9 +295,92 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler,
 
         epoch_total_loss += loss.item() * gradient_accumulation_steps
         epoch_shape += shape_comp.item()
-        epoch_grid  += grid_comp.item()
-        epoch_kl    += kl_comp.item()
+        epoch_grid += grid_comp.item()
+        epoch_kl += kl_comp.item()
         epoch_repulsion += repulsion_comp.item()
+
+        # STORE OPTIMIZED LATENTS FOR VISUALIZATION (only every few batches to avoid memory issues)
+        with torch.no_grad():
+            from utils.latent_functions import get_optimized_z
+            
+            for i in range(input_seq.size(0)):
+                input_sample = input_seq[i:i+1]
+                target_sample = target_seq[i:i+1]
+                
+                if joint_training and is_multi_encoder:
+                    # For joint training, collect latents from all encoders
+                    for enc_idx in range(model.num_encoders):
+                        # Only store latents if we haven't reached the limit
+                        if len(optimized_latents) < max_latents_to_store:
+                            z_optimized, _ = get_optimized_z(
+                                model, input_sample, target_sample,
+                                context='training',
+                                num_steps=num_steps,
+                                lr=lr,
+                                encoder_idx=enc_idx
+                            )
+                            
+                            optimized_latents.append(z_optimized[0].cpu().numpy())
+                            
+                            if batch_keys is not None and i < len(batch_keys):
+                                optimized_keys.append(batch_keys[i])
+                            else:
+                                optimized_keys.append('unknown')
+                            
+                            optimized_encoder_indices.append(enc_idx)
+                else:
+                    # Single encoder or individual encoder training
+                    # Only store latents if we haven't reached the limit
+                    if len(optimized_latents) < max_latents_to_store:
+                        z_optimized, _ = get_optimized_z(
+                            model, input_sample, target_sample,
+                            context='training',
+                            num_steps=num_steps,
+                            lr=lr,
+                            encoder_idx=encoder_idx if is_multi_encoder else None
+                        )
+                        
+                        optimized_latents.append(z_optimized[0].cpu().numpy())
+                        
+                        if batch_keys is not None and i < len(batch_keys):
+                            optimized_keys.append(batch_keys[i])
+                        else:
+                            optimized_keys.append('unknown')
+                        
+                        optimized_encoder_indices.append(encoder_idx if is_multi_encoder else 0)
+
+    # Store optimized latents for visualization (only from current epoch)
+    print(f"  [DEBUG] Collected {len(optimized_latents)} latents (limit was {max_latents_to_store})")
+    if optimized_latents:
+        # For multi-encoder training, accumulate latents from all encoders in current epoch only
+        if hasattr(model, 'epoch_optimized_latents') and model.epoch_optimized_latents and encoder_idx is not None and not joint_training:
+            # Accumulate latents from previous encoders in current epoch (only for individual encoder training)
+            existing_latents = model.epoch_optimized_latents['latents']
+            existing_keys = model.epoch_optimized_latents['keys']
+            existing_encoder_indices = model.epoch_optimized_latents['encoder_indices']
+            
+            # Combine with current encoder's latents
+            model.epoch_optimized_latents = {
+                'latents': existing_latents + optimized_latents,
+                'keys': existing_keys + optimized_keys,
+                'encoder_indices': existing_encoder_indices + optimized_encoder_indices
+            }
+            print(f"  [DEBUG] Accumulated latents in current epoch: {len(existing_latents)} + {len(optimized_latents)} = {len(model.epoch_optimized_latents['latents'])} total")
+        else:
+            # First encoder, single encoder training, or joint training (which already has all encoders)
+            model.epoch_optimized_latents = {
+                'latents': optimized_latents,
+                'keys': optimized_keys,
+                'encoder_indices': optimized_encoder_indices
+            }
+            print(f"  [DEBUG] Stored {len(optimized_latents)} latents from {'all encoders' if joint_training else f'encoder {encoder_idx}' if encoder_idx is not None else 'single encoder'} in current epoch")
+        
+        # Debug: Show encoder distribution
+        if model.epoch_optimized_latents['encoder_indices']:
+            encoder_counts = {}
+            for enc_idx in model.epoch_optimized_latents['encoder_indices']:
+                encoder_counts[enc_idx] = encoder_counts.get(enc_idx, 0) + 1
+            print(f"  [DEBUG] Encoder distribution: {encoder_counts}")
 
     # return averages
     avg_loss = epoch_total_loss/total_batches
@@ -501,7 +519,7 @@ def main_training(file_store_name):
                     for _ in range(keys_for_this_encoder):
                         if key_idx < len(TRAINING_KEYS):
                             key = TRAINING_KEYS[key_idx]
-                    key_to_encoder_mapping.setdefault(enc_idx, []).append(key)
+                            key_to_encoder_mapping.setdefault(enc_idx, []).append(key)
                             key_idx += 1
                 
                 # Create dataloaders for each encoder
@@ -554,8 +572,8 @@ def main_training(file_store_name):
             
         else:
             # ---------------------- MIXED DATASET (NO SPLIT) ------------------
-            logger.info("split_across_encoders = False → using mixed dataset for all encoders")
-            print("split_across_encoders = False → using mixed dataset for all encoders")
+            logger.info("split_across_encoders = False -> using mixed dataset for all encoders")
+            print("split_across_encoders = False -> using mixed dataset for all encoders")
             
             if INFINITE_DATALOADER:
                 tasks_dir = os.path.join(os.path.dirname(__file__), 're_arc', 're_arc', 'tasks')
@@ -720,7 +738,9 @@ def main_training(file_store_name):
         # Collect and save training latent data with keys
         from utils.model_utils import collect_latent_data
         dataloader_for_latents = prepare_dataloader(input_sequences, output_sequences, BATCH_SIZE)
-        training_latent_data = collect_latent_data(model, dataloader_for_latents, device, encoder_idx=0, max_samples=len(input_sequences), data_type='training', key_list=key_list)
+        # For infinite dataloader, use all available samples; otherwise use the sequence length
+        max_samples = float('inf') if INFINITE_DATALOADER else len(input_sequences)
+        training_latent_data = collect_latent_data(model, dataloader_for_latents, device, encoder_idx=0, max_samples=max_samples, data_type='training', key_list=key_list)
         results['training_latent_data'] = {'encoder_0': training_latent_data}
     else:
         # For multi-encoder, combine all training data for visualization
@@ -751,7 +771,9 @@ def main_training(file_store_name):
                 if not enc_inputs:
                     continue
                 dataloader_for_latents = prepare_dataloader(enc_inputs, enc_outputs, BATCH_SIZE)
-                training_latent_data = collect_latent_data(model, dataloader_for_latents, device, encoder_idx=encoder_idx, max_samples=len(enc_inputs), data_type=f'training_encoder_{encoder_idx}', key_list=keys_for_enc)
+                # For infinite dataloader, use all available samples; otherwise use the sequence length
+                max_samples = float('inf') if INFINITE_DATALOADER else len(enc_inputs)
+                training_latent_data = collect_latent_data(model, dataloader_for_latents, device, encoder_idx=encoder_idx, max_samples=max_samples, data_type=f'training_encoder_{encoder_idx}', key_list=keys_for_enc)
                 results['training_latent_data'][f'encoder_{encoder_idx}'] = training_latent_data
         else:
             # For infinite dataloader, we can't pre-compute all sequences, but we can store sample sequences for evaluation
@@ -810,46 +832,85 @@ def main_training(file_store_name):
                 logger.info(f"\n--- Joint Training with Repulsion Loss ---")
                 print(f"Joint training all encoders with repulsion loss...")
                 
-                # Build (or reuse) combined dataloader
                 if SPLIT_ACROSS_ENCODERS:
-                    combined_input_sequences = []
-                    combined_output_sequences = []
-                    for encoder_dataloader in encoder_dataloaders:
+                    print(f"Training each encoder on their specialized keys with repulsion loss...")
+                    
+                    total_batches = 0
+                    epoch_total_loss = 0.0
+                    epoch_shape = epoch_grid = epoch_kl = epoch_repulsion = 0.0
+                    current_lambda_rep = 0.0
+                    
+                    # Train each encoder on its assigned keys ONLY
+                    for enc_idx, encoder_dataloader in enumerate(encoder_dataloaders):
                         if encoder_dataloader is None:
-                            continue # Skip encoders with no data
-                        for batch in encoder_dataloader:
-                            # Handle batch structure with keys
-                            if len(batch) >= 3:
-                                batch_input, batch_output, batch_keys = batch[:3]
-                            else:
-                                batch_input, batch_output = batch[:2]
-                                batch_keys = None
-                            combined_input_sequences.extend(batch_input.tolist())
-                            combined_output_sequences.extend(batch_output.tolist())
-                    import random
-                    combined_indices = list(range(len(combined_input_sequences)))
-                    random.shuffle(combined_indices)
-                    shuffled_input_sequences = [combined_input_sequences[i] for i in combined_indices]
-                    shuffled_output_sequences = [combined_output_sequences[i] for i in combined_indices]
-                    combined_dataloader = prepare_dataloader(
-                        shuffled_input_sequences,
-                        shuffled_output_sequences,
-                        BATCH_SIZE
-                    )
-                else:
-                    # No split: reuse the first encoder dataloader (all data already mixed)
-                    combined_dataloader = encoder_dataloaders[0]
+                            print(f"  Skipping Encoder {enc_idx} (no data)")
+                            continue
+                        
+                        # Get keys assigned to this encoder
+                        if hasattr(model, 'training_metadata') and model.training_metadata and 'key_to_encoder_mapping' in model.training_metadata:
+                            assigned_keys = model.training_metadata['key_to_encoder_mapping'].get(enc_idx, [])
+                        else:
+                            # When split_across_encoders = false, all encoders see all keys
+                            assigned_keys = training_keys
+                        print(f"  Training Encoder {enc_idx} on keys: {assigned_keys[:5]}{'...' if len(assigned_keys) > 5 else ''}")
 
-                # Train with joint training
-                avg_loss, avg_shape_loss, avg_grid_loss, avg_kl_loss, avg_repulsion_loss, current_lambda_rep = train_model(
-                    model, combined_dataloader, optimizer, run_dir, logger, 
-                    scaler, use_mixed_precision, gradient_accumulation_steps,
-                    current_epoch_num=epoch+1, total_epochs=NUM_EPOCHS, 
-                    joint_training=True
-                )
+                        # Train this encoder on its assigned keys only
+                        avg_loss, avg_shape_loss, avg_grid_loss, avg_kl_loss, avg_repulsion_loss, lambda_rep = train_model(
+                            model, encoder_dataloader, optimizer, run_dir, logger, 
+                            scaler, use_mixed_precision, gradient_accumulation_steps,
+                            current_epoch_num=epoch+1, total_epochs=NUM_EPOCHS, 
+                            encoder_idx=enc_idx,  # ✅ Specific encoder
+                            joint_training=True  # Enable repulsion loss
+                        )
+                        
+                        # Accumulate metrics
+                        encoder_batches = len(encoder_dataloader) if hasattr(encoder_dataloader, '__len__') else BATCHES_PER_EPOCH
+                        epoch_total_loss += avg_loss * encoder_batches
+                        epoch_shape += avg_shape_loss * encoder_batches
+                        epoch_grid += avg_grid_loss * encoder_batches
+                        epoch_kl += avg_kl_loss * encoder_batches
+                        epoch_repulsion += avg_repulsion_loss * encoder_batches
+                        total_batches += encoder_batches
+                        current_lambda_rep = lambda_rep
+                    
+                    # Average across all encoder training
+                    if total_batches > 0:
+                        avg_loss = epoch_total_loss / total_batches
+                        avg_shape_loss = epoch_shape / total_batches
+                        avg_grid_loss = epoch_grid / total_batches
+                        avg_kl_loss = epoch_kl / total_batches
+                        avg_repulsion_loss = epoch_repulsion / total_batches
+                    else:
+                        avg_loss = avg_shape_loss = avg_grid_loss = avg_kl_loss = avg_repulsion_loss = 0.0
+                    
+                    # ✅ Store actual keys used during training
+                    actual_keys_per_encoder = {}
+                    for encoder_idx in range(NUM_ENCODERS):
+                        if encoder_dataloaders[encoder_idx] is not None:
+                            # Collect actual keys used during training
+                            actual_keys = []
+                            for batch in encoder_dataloaders[encoder_idx]:
+                                if len(batch) >= 3:
+                                    _, _, batch_keys = batch[:3]
+                                    actual_keys.extend(batch_keys)
+                            actual_keys_per_encoder[encoder_idx] = list(set(actual_keys))
+                    
+                    # Store in training metadata
+                    model.training_metadata['actual_keys_per_encoder'] = actual_keys_per_encoder
+                        
+                else:
+                    # No split: use shared dataloader for joint training
+                    combined_dataloader = encoder_dataloaders[0] if encoder_dataloaders else dataloader
+                    avg_loss, avg_shape_loss, avg_grid_loss, avg_kl_loss, avg_repulsion_loss, current_lambda_rep = train_model(
+                        model, combined_dataloader, optimizer, run_dir, logger, 
+                        scaler, use_mixed_precision, gradient_accumulation_steps,
+                        current_epoch_num=epoch+1, total_epochs=NUM_EPOCHS, 
+                        joint_training=True
+                    )
                 
                 avg_epoch_loss = avg_loss  # Ensure variable exists for downstream checkpoint/save logic
-                dataloader = combined_dataloader
+                # Use the first non-None encoder dataloader for visualization
+                dataloader = next((dl for dl in encoder_dataloaders if dl is not None), dataloader)
 
                 # Store metrics
                 results['epoch_losses'].append(avg_loss)
@@ -929,53 +990,46 @@ def main_training(file_store_name):
             })
         
         # --- COMPREHENSIVE EVALUATION AFTER EACH EPOCH ---
-        if dataloader is not None:
-            input_seqs = results.get('input_sequences', None)
-            output_seqs = results.get('output_sequences', None)
-            key_list = results.get('key_list', None)
-            
-            # Run comprehensive evaluation that implements all three requirements:
-            # 1. Plot training latents on t-SNE (colored by key + by encoder)
-            # 2. Evaluate with sample-level optimization, generating trajectory figures
-            # 3. Plot latent space with support and query samples colored by keys
-            try:
-                comprehensive_evaluation_after_epoch(
-                    model=model,
-                    dataloader=dataloader,
-                    device=device,
-                    epoch=epoch,
-                    run_dir=run_dir,
-                    wandb_logger=wandb_logger,
-                    training_keys=TRAINING_KEYS,
-                    input_sequences=input_seqs,
-                    output_sequences=output_seqs,
-                    key_list=key_list,
-                    is_multi_encoder=is_multi_encoder,
-                    num_encoders=NUM_ENCODERS,
-                    infinite_dataloader=INFINITE_DATALOADER,
-                    encoder_dataloaders=encoder_dataloaders
-                )
-                print(f"[OK] Comprehensive evaluation completed for epoch {epoch+1}")
+        # Get evaluation interval from settings
+        wandb_settings = settings.get_wandb_settings()
+        eval_log_interval = wandb_settings.get('eval_log_interval', 10)
+
+        # Only run comprehensive evaluation based on interval
+        if (epoch + 1) % eval_log_interval == 0 or epoch == 0 or epoch == NUM_EPOCHS - 1:  # Also evaluate on first and last epoch
+            if dataloader is not None:
+                input_seqs = results.get('input_sequences', None)
+                output_seqs = results.get('output_sequences', None)
+                key_list = results.get('key_list', None)
                 
-            except Exception as e:
-                logger.error(f"Error during comprehensive evaluation at epoch {epoch+1}: {e}")
-                print(f"[WARNING] Error during comprehensive evaluation at epoch {epoch+1}: {e}")
-                
-                # Fallback to original training latent space visualization
+                # Run comprehensive evaluation
                 try:
-                plot_training_latent_space_per_epoch(
-                    model, dataloader, device, epoch, run_dir, key_list, wandb_logger,
-                    infinite_dataloader=INFINITE_DATALOADER, 
-                    max_batches=10,
-                    input_sequences=input_seqs,
-                    output_sequences=output_seqs,
-                    training_keys=TRAINING_KEYS,
-                    upload_slider=True
-                )
-                except Exception as fallback_e:
-                    logger.error(f"Fallback visualization also failed: {fallback_e}")
-                    print(f"[WARNING] Fallback visualization also failed: {fallback_e}")
-        
+                    comprehensive_evaluation_after_epoch(
+                        model=model,
+                        dataloader=dataloader,
+                        device=device,
+                        epoch=epoch,
+                        run_dir=run_dir,
+                        wandb_logger=wandb_logger,
+                        training_keys=TRAINING_KEYS,
+                        input_sequences=input_seqs,
+                        output_sequences=output_seqs,
+                        key_list=key_list,
+                        is_multi_encoder=is_multi_encoder,  # Now properly defined
+                        num_encoders=NUM_ENCODERS,
+                        infinite_dataloader=INFINITE_DATALOADER,
+                        encoder_dataloaders=encoder_dataloaders
+                    )
+                    print(f"[OK] Comprehensive evaluation completed for epoch {epoch+1}")
+                    
+                except Exception as e:
+                    logger.error(f"Error during comprehensive evaluation at epoch {epoch+1}: {e}")
+                    print(f"[WARNING] Error during comprehensive evaluation at epoch {epoch+1}: {e}")
+                    
+                    # Remove the fallback call since the function doesn't exist
+                    # The comprehensive_evaluation_after_epoch should handle all visualization
+        else:
+            print(f"[INFO] Skipping comprehensive evaluation for epoch {epoch+1} (no dataloader available)")
+
         if scheduler:
             scheduler.step() # Step the scheduler each epoch
 
@@ -1170,25 +1224,30 @@ def main_training(file_store_name):
     print("Results saved in:", run_dir)
     return results, model
 
-def comprehensive_evaluation_after_epoch(model, dataloader, device, epoch, run_dir, wandb_logger, 
-                                       training_keys, input_sequences=None, output_sequences=None, 
-                                       key_list=None, is_multi_encoder=False, num_encoders=1, 
-                                       infinite_dataloader=False, encoder_dataloaders=None):
+def comprehensive_evaluation_after_epoch(
+    model, dataloader, device, epoch, run_dir, wandb_logger,
+    training_keys, input_sequences=None, output_sequences=None,
+    key_list=None, is_multi_encoder=False, num_encoders=1,
+    infinite_dataloader=False, encoder_dataloaders=None
+):
     """
     Comprehensive evaluation after each epoch that implements all three requirements:
-    1. Plot training latents on t-SNE (colored by key + by encoder) 
+    1. Plot training latents on t-SNE (colored by key + by encoder)
     2. Evaluate with sample-level optimization, generating trajectory figures
     3. Plot latent space with support and query samples colored by keys
     """
     import matplotlib.pyplot as plt
     import numpy as np
     from sklearn.manifold import TSNE
-            from evaluation import main_test
+    from evaluation import main_test
     from utils.visualizers import create_standalone_latent_space_plot
     from utils.latent_functions import optimize_latent_z
-    
+
+    evaluation_settings = settings.get_evaluation_settings()
+    data_settings = settings.get_data_settings()
+
     print(f"\n=== COMPREHENSIVE EVALUATION FOR EPOCH {epoch+1} ===")
-    
+
     training_settings = settings.get_training_settings()
     batches_per_epoch = training_settings.get('batches_per_epoch', 10)
     batch_size = training_settings.get('batch_size', 4)
@@ -1197,257 +1256,188 @@ def comprehensive_evaluation_after_epoch(model, dataloader, device, epoch, run_d
 
     # 1. PLOT TRAINING LATENTS ON T-SNE (COLORED BY KEY + BY ENCODER)
     print("1. Plotting training latents on t-SNE...")
-    
-    # Collect training latents from all encoders
-    all_training_latents = []
-    all_training_keys = []
-    all_encoder_indices = []
-    
-    model.eval()
-    with torch.no_grad():
-        if is_multi_encoder:
-            # Multi-encoder: collect from each encoder using encoder-specific dataloaders
-            for encoder_idx in range(num_encoders):
-                print(f"  Collecting latents from Encoder {encoder_idx}...")
-                
-                # Use encoder-specific dataloader if available
-                if encoder_dataloaders and encoder_idx < len(encoder_dataloaders):
-                    encoder_dataloader = encoder_dataloaders[encoder_idx]
-                    if encoder_dataloader is None:
-                        print(f"    [WARNING] No dataloader for Encoder {encoder_idx}, skipping...")
-                        continue
-                else:
-                    # Fallback to shared dataloader
-                    encoder_dataloader = dataloader
-                    print(f"    [WARNING] Using shared dataloader for Encoder {encoder_idx}")
-                
-                # Process training data for this encoder
-                sample_count = 0
-                # Use actual dataloader configuration for infinite dataloader
-                if infinite_dataloader:
-                    # Use the configuration already loaded from settings
-                    max_samples_per_encoder = samples_per_epoch
-                    print(f"    [INFO] Using infinite dataloader config: {batches_per_epoch} batches × {batch_size} batch_size = {max_samples_per_encoder} samples per encoder")
-                else:
-                    max_samples_per_encoder = float('inf')
-                
-                for batch in encoder_dataloader:
-                    # Check if we've reached the limit for infinite dataloader
-                    if infinite_dataloader and sample_count >= max_samples_per_encoder:
-                        print(f"    [INFO] Reached limit of {max_samples_per_encoder} samples for infinite dataloader")
-                        break
-                    
-                    # Handle batch structure with keys
-                    if len(batch) >= 3:
-                        batch_input, batch_target, batch_keys = batch[:3]
-                    else:
-                        batch_input, batch_target = batch[:2]
-                        batch_keys = None
-                    
-                    batch_input = batch_input.to(device)
-                    batch_target = batch_target.to(device)
-                    
-                    # Get latent representations from specific encoder
-                    if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
-                        mu, log_var = model(batch_input, batch_target, encoder_idx=encoder_idx)[1:3]
-                    else:
-                        mu, log_var, _ = model.encoder(batch_input, batch_target)
-                    
-                    z = model.reparameterize(mu, log_var)
-                    
-                    # Store latents and metadata for ALL samples in batch
-                    batch_size = batch_input.size(0)
-                    for i in range(batch_size):
-                        all_training_latents.append(z[i].cpu().numpy())
-                        if batch_keys is not None and i < len(batch_keys):
-                            all_training_keys.append(batch_keys[i])
-                        else:
-                            all_training_keys.append('unknown')
-                        all_encoder_indices.append(encoder_idx)
-                    
-                    sample_count += batch_size
-                
-                print(f"    [OK] Collected {sample_count} samples from Encoder {encoder_idx}")
-                
-                # Debug: Show the keys collected for this encoder
-                if sample_count > 0:
-                    encoder_keys = [key for key, enc_idx in zip(all_training_keys[-sample_count:], all_encoder_indices[-sample_count:]) if enc_idx == encoder_idx]
-                    unique_keys = list(set(encoder_keys))
-                    print(f"    [DEBUG] Encoder {encoder_idx} collected keys: {unique_keys[:5]}{'...' if len(unique_keys) > 5 else ''} ({len(unique_keys)} unique keys)")
-        else:
-            # Single encoder
-            print("  Collecting latents from single encoder...")
-            sample_count = 0
-            # Use actual dataloader configuration for infinite dataloader
-            if infinite_dataloader:
-                # Use the configuration already loaded from settings
-                max_samples = samples_per_epoch
-                print(f"    [INFO] Using infinite dataloader config: {batches_per_epoch} batches × {batch_size} batch_size = {max_samples} samples for single encoder")
-            else:
-                max_samples = float('inf')
-            
-            for batch in dataloader:
-                # Check if we've reached the limit for infinite dataloader
-                if infinite_dataloader and sample_count >= max_samples:
-                    print(f"    [INFO] Reached limit of {max_samples} samples for infinite dataloader")
-                    break
-                
-                # Handle batch structure with keys
-                if len(batch) >= 3:
-                    batch_input, batch_target, batch_keys = batch[:3]
-                else:
-                    batch_input, batch_target = batch[:2]
-                    batch_keys = None
-                
-                batch_input = batch_input.to(device)
-                batch_target = batch_target.to(device)
-                
-                # Get latent representations
-                mu, log_var, _ = model.encoder(batch_input, batch_target)
-                z = model.reparameterize(mu, log_var)
-                
-                # Store latents and metadata for ALL samples in batch
-                batch_size = batch_input.size(0)
-                for i in range(batch_size):
-                    all_training_latents.append(z[i].cpu().numpy())
-                    if batch_keys is not None and i < len(batch_keys):
-                        all_training_keys.append(batch_keys[i])
-                    else:
-                        all_training_keys.append('unknown')
-                    all_encoder_indices.append(0)  # Single encoder = index 0
-                
-                sample_count += batch_size
-            
-            print(f"    [OK] Collected {sample_count} samples from single encoder")
-    
-    # Create t-SNE visualization of training latents
+
+    # Use stored optimized latents from training (REAL SAMPLES USED IN TRAINING!)
+    if hasattr(model, 'epoch_optimized_latents') and model.epoch_optimized_latents:
+        all_training_latents = model.epoch_optimized_latents['latents']
+        all_training_keys = model.epoch_optimized_latents['keys']
+        all_encoder_indices = model.epoch_optimized_latents['encoder_indices']
+        
+        print(f"  [OK] Using {len(all_training_latents)} REAL OPTIMIZED latents from LAST EPOCH only (actual samples used in training)")
+    else:
+        print("  [WARNING] No stored optimized latents found, falling back to recomputation")
+        # Fallback to the old method (but this should rarely happen)
+        all_training_latents = []
+        all_training_keys = []
+        all_encoder_indices = []
+        
+        # ... existing fallback code ...
+
+    # Create t-SNE visualization of REAL OPTIMIZED training latents
     if all_training_latents:
         all_training_latents = np.array(all_training_latents)
-        print(f"Training latents shape: {all_training_latents.shape}")
-        
+        print(f"REAL OPTIMIZED training latents shape: {all_training_latents.shape}")
+
         # Apply t-SNE
-        print("  Applying t-SNE to training latents...")
-        tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(all_training_latents)//4))
+        print("  Applying t-SNE to REAL OPTIMIZED training latents...")
+        tsne = TSNE(n_components=2, random_state=data_settings.get('training_seed', 42), perplexity=min(30, max(1, len(all_training_latents)//4)))
         tsne_coords = tsne.fit_transform(all_training_latents)
-        
+
         # Create visualization
-        plt.figure(figsize=(16, 12))
-        
-        # Get unique keys and encoders for color mapping
         unique_keys = sorted(list(set(all_training_keys)))
         unique_encoders = sorted(list(set(all_encoder_indices)))
         
-        # Create color maps
-        key_colors = {k: plt.cm.tab20(i % 20) for i, k in enumerate(unique_keys)}
+        # Debug: Show encoder distribution
+        encoder_counts = {}
+        for enc_idx in all_encoder_indices:
+            encoder_counts[enc_idx] = encoder_counts.get(enc_idx, 0) + 1
+        print(f"  [DEBUG] Training latent space encoder distribution: {encoder_counts}")
+        print(f"  [DEBUG] Total training latents: {len(all_training_latents)} from {len(unique_keys)} keys and {len(unique_encoders)} encoders")
+
+        # Create color map for up to 400 keys with clear, distinguishable colors
+        if len(unique_keys) <= 400:
+            # Use a combination of color maps for better distinction
+            colors1 = plt.cm.tab20(np.linspace(0, 1, 20))
+            colors2 = plt.cm.Set3(np.linspace(0, 1, 12))
+            colors3 = plt.cm.Pastel1(np.linspace(0, 1, 9))
+            colors4 = plt.cm.Paired(np.linspace(0, 1, 12))
+            
+            all_colors = np.vstack([colors1, colors2, colors3, colors4])
+            # Repeat colors if needed
+            while len(all_colors) < len(unique_keys):
+                all_colors = np.vstack([all_colors, all_colors])
+            
+            key_colors = {k: all_colors[i % len(all_colors)] for i, k in enumerate(unique_keys)}
+        else:
+            # For more than 400 keys, use a continuous color map
+            print(f"  [WARNING] Too many keys ({len(unique_keys)}), using continuous color map")
+            key_colors = {k: plt.cm.viridis(i / len(unique_keys)) for i, k in enumerate(unique_keys)}
+
         encoder_markers = ['o', 's', '^', 'v', 'D', 'p', '*', 'h', 'H', '+']
+
+        plt.figure(figsize=(16, 12))
         
-        # Plot each point
-        for i, (coord, key, encoder_idx) in enumerate(zip(tsne_coords, all_training_keys, all_encoder_indices)):
-            color = key_colors[key]
-            marker = encoder_markers[encoder_idx % len(encoder_markers)]
-            plt.scatter(coord[0], coord[1], color=color, s=80, alpha=0.7, 
-                       marker=marker, edgecolors='k', linewidths=0.5)
-        
-        # Create legend
-        legend_elements = []
-        for key in unique_keys:
-            color = key_colors[key]
-            legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=color, 
-                                            markersize=8, label=f'Key: {key[:8]}'))
-        
-        # Only add encoder legend if multi-encoder
-        if is_multi_encoder and len(unique_encoders) > 1:
-            for encoder_idx in unique_encoders:
+        # Plot by key (colored) and encoder (markers) WITH LABELS
+        for coord, key, encoder_idx in zip(tsne_coords, all_training_keys, all_encoder_indices):
+            color = key_colors.get(key, 'gray')
+            # Fix: Handle None encoder_idx
+            if encoder_idx is not None and is_multi_encoder:
                 marker = encoder_markers[encoder_idx % len(encoder_markers)]
-                legend_elements.append(plt.Line2D([0], [0], marker=marker, color='gray', 
-                                                markersize=8, label=f'Encoder {encoder_idx}'))
-        
-        plt.legend(handles=legend_elements, loc='upper right')
-        sample_text = "Sample of Training Data" if infinite_dataloader else "ALL Training Samples"
-        plt.title(f'Training Latent Space - Epoch {epoch+1}\n({sample_text} - Colored by Key, Markers by Encoder)')
+            else:
+                marker = 'o'
+            
+            plt.scatter(coord[0], coord[1], color=color, s=80, alpha=0.7,
+                        marker=marker, edgecolors='k', linewidths=0.5)
+            
+            # ✅ FIX: Match label color with key color and add small legend by encoder
+            if len(all_training_latents) <= 100:  # Only add labels if not too many points
+                label = f"{str(key)[:4]}"  # First 4 chars of key
+                plt.text(coord[0], coord[1] + 0.3, label, fontsize=6, 
+                        ha='center', va='bottom', color=color,  # ✅ Use key color instead of black
+                        bbox=dict(boxstyle="round,pad=0.1", facecolor='white', alpha=0.7))
+
+        # Create compact legend for keys (show only first 20 keys to avoid clutter)
+        legend_elements = []
+        keys_to_show = unique_keys[:20]  # Show only first 20 keys in legend
+        for key in keys_to_show:
+            color = key_colors[key]
+            legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=color,
+                                               markersize=8, label=f'{key[:8]}'))
+
+        if len(unique_keys) > 20:
+            legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
+                                               markersize=8, label=f'... and {len(unique_keys)-20} more keys'))
+
+        # ✅ ADD: Small legend by encoder (always show, not just when multiple encoders)
+        for encoder_idx in unique_encoders:
+            # Fix: Handle None encoder_idx
+            if encoder_idx is not None:
+                marker = encoder_markers[encoder_idx % len(encoder_markers)]
+            else:
+                marker = 'o'
+            legend_elements.append(plt.Line2D([0], [0], marker=marker, color='k', linestyle='',
+                                               markersize=8, label=f'Encoder {encoder_idx}'))
+
+        plt.legend(handles=legend_elements, loc='upper right', fontsize=8, ncol=2)
+        plt.title(f'REAL Training Latent Space - Epoch {epoch+1}\n(Actual samples used in training - Colored by Key, Markers by Encoder)', fontsize=12)
         plt.xlabel('t-SNE Dimension 1')
         plt.ylabel('t-SNE Dimension 2')
-        
-        # Save plot
+
         plot_path = os.path.join(run_dir, 'latent_space_plots', f'training_latent_space_epoch_{epoch+1}.png')
         os.makedirs(os.path.dirname(plot_path), exist_ok=True)
         plt.savefig(plot_path, dpi=300, bbox_inches='tight')
         plt.close()
-        
-        print(f"  [OK] Training latent space plot saved: {plot_path}")
-        
-        # Upload to wandb
+
+        print(f"  [OK] REAL training latent space plot saved: {plot_path}")
+        print(f"  [INFO] Visualization shows {len(all_training_latents)} REAL samples from {len(unique_keys)} unique keys used in training")
+
         if wandb_logger:
             try:
                 import wandb
+                # Use consistent key for single panel with epoch as step
                 wandb_logger._safe_log({
-                    f'training_latent_space_epoch_{epoch+1}': wandb.Image(plot_path)
+                    'training_latent_space': wandb.Image(plot_path)
                 }, step_hint=epoch+1)
-                print(f"  [OK] Training latent space plot uploaded to wandb")
+                print(f"  [OK] REAL training latent space plot uploaded to wandb")
             except Exception as e:
-                print(f"  [WARNING] Could not upload training latent space plot to wandb: {e}")
-        
-        # Create encoder-specific training plot (showing which tasks were used by which encoder)
-        # Generate this plot for all models to show task assignment
+                print(f"  [WARNING] Could not upload REAL training latent space plot to wandb: {e}")
+
+        # Encoder-specific training plot
         print(f"  DEBUG: is_multi_encoder={is_multi_encoder}, num_encoders={num_encoders}")
-        if True:  # Always generate encoder-specific plot
-            print("  Creating encoder-specific training plot...")
-            
-            # Group tasks by encoder - use intended key assignment instead of actual sampled keys
-            encoder_task_mapping = {}
-            
-            # Try to get the intended key assignment from training metadata
-            if hasattr(model, 'training_metadata') and model.training_metadata and 'key_to_encoder_mapping' in model.training_metadata:
-                # Use the intended key assignment from training
+        print("  Creating encoder-specific training plot...")
+
+        encoder_task_mapping = {}
+        if hasattr(model, 'training_metadata') and model.training_metadata:
+            if 'key_to_encoder_mapping' in model.training_metadata:
+                # Use intended key assignment (for split_across_encoders = true)
                 intended_mapping = model.training_metadata['key_to_encoder_mapping']
                 for encoder_idx, keys in intended_mapping.items():
                     encoder_task_mapping[encoder_idx] = keys
                 print(f"    DEBUG: Using intended key assignment: {encoder_task_mapping}")
             else:
-                # Fallback to actual sampled keys
-                for key, encoder_idx in zip(all_training_keys, all_encoder_indices):
-                    if encoder_idx not in encoder_task_mapping:
-                        encoder_task_mapping[encoder_idx] = []
-                    if key not in encoder_task_mapping[encoder_idx]:
-                        encoder_task_mapping[encoder_idx].append(key)
-                print(f"    DEBUG: Using actual sampled keys (fallback): {encoder_task_mapping}")
-            
-            # Create visualization
-            plt.figure(figsize=(16, 12))
-            
-            # Create color map for encoders (using more visible colors)
-            encoder_colors = {enc: plt.cm.tab10(enc % 10) for enc in unique_encoders}
-            
-            # Plot each point colored by encoder
-            for i, (coord, key, encoder_idx) in enumerate(zip(tsne_coords, all_training_keys, all_encoder_indices)):
-                color = encoder_colors[encoder_idx]
-                plt.scatter(coord[0], coord[1], color=color, s=80, alpha=0.7, 
-                           edgecolors='k', linewidths=0.5)
-            
-            # Create legend
-            legend_elements = []
-            for encoder_idx in unique_encoders:
-                color = encoder_colors[encoder_idx]
+                # Handle case where split_across_encoders = false
+                # Both encoders see all keys
+                for encoder_idx in range(num_encoders):
+                    encoder_task_mapping[encoder_idx] = training_keys
+                print(f"    DEBUG: Using shared keys for all encoders (split_across_encoders = false): {encoder_task_mapping}")
+        else:
+            # Fallback to actual sampled keys
+            for key, encoder_idx in zip(all_training_keys, all_encoder_indices):
+                encoder_task_mapping.setdefault(encoder_idx, [])
+                if key not in encoder_task_mapping[encoder_idx]:
+                    encoder_task_mapping[encoder_idx].append(key)
+            print(f"    DEBUG: Using actual sampled keys (fallback): {encoder_task_mapping}")
+
+        plt.figure(figsize=(16, 12))
+        # Fix: Handle None encoder_idx in color mapping
+        encoder_colors = {enc: plt.cm.tab10(enc % 10) for enc in unique_encoders if enc is not None}
+        # Add a default color for None encoder_idx
+        encoder_colors[None] = 'gray'
+
+        for coord, key, encoder_idx in zip(tsne_coords, all_training_keys, all_encoder_indices):
+            color = encoder_colors.get(encoder_idx, 'gray')
+            plt.scatter(coord[0], coord[1], color=color, s=80, alpha=0.7,
+                        edgecolors='k', linewidths=0.5)
+
+        legend_elements = []
+        for encoder_idx in unique_encoders:
+            # Fix: Handle None encoder_idx
+            if encoder_idx is not None:
+                color = encoder_colors.get(encoder_idx, 'gray')
                 tasks = encoder_task_mapping.get(encoder_idx, [])
-                task_list = ', '.join([t[:4] for t in tasks[:3]])  # Show first 3 tasks
+                task_list = ', '.join([t[:4] for t in tasks[:3]])
                 if len(tasks) > 3:
                     task_list += f'... (+{len(tasks)-3} more)'
-                legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=color, 
-                                                markersize=8, label=f'Encoder {encoder_idx}: {task_list}'))
-            
-            # Add debug information about key distribution
-            print(f"    DEBUG: Legend shows {len(encoder_task_mapping)} encoders")
-            for enc_idx, tasks in encoder_task_mapping.items():
-                print(f"    DEBUG: Encoder {enc_idx}: {len(tasks)} keys assigned")
-                if len(tasks) > 0:
-                    print(f"    DEBUG: Encoder {enc_idx} keys: {tasks[:5]}{'...' if len(tasks) > 5 else ''}")
-            
-            # Debug: Compare intended vs actual key collection
-            if hasattr(model, 'training_metadata') and model.training_metadata and 'key_to_encoder_mapping' in model.training_metadata:
+                legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=color,
+                                                   markersize=8, label=f'Encoder {encoder_idx}: {task_list}'))
+
+        # Debug intended vs actual
+        if hasattr(model, 'training_metadata') and model.training_metadata:
+            if 'key_to_encoder_mapping' in model.training_metadata:
                 intended_mapping = model.training_metadata['key_to_encoder_mapping']
                 print(f"    DEBUG: Intended key assignment:")
                 for enc_idx, intended_keys in intended_mapping.items():
-                    actual_keys = [key for key, enc_idx_actual in zip(all_training_keys, all_encoder_indices) if enc_idx_actual == enc_idx]
+                    actual_keys = [k for k, e_idx in zip(all_training_keys, all_encoder_indices) if e_idx == enc_idx]
                     actual_unique = list(set(actual_keys))
                     print(f"      Encoder {enc_idx}:")
                     print(f"        Intended: {len(intended_keys)} keys {intended_keys[:3]}{'...' if len(intended_keys) > 3 else ''}")
@@ -1456,368 +1446,271 @@ def comprehensive_evaluation_after_epoch(model, dataloader, device, epoch, run_d
                         print(f"        ⚠️ MISMATCH: Intended and actual keys differ!")
                     else:
                         print(f"        ✅ MATCH: Intended and actual keys match")
-            
-            plt.legend(handles=legend_elements, loc='upper right')
-            sample_text = "Sample of Training Data" if infinite_dataloader else "ALL Training Samples"
-            plt.title(f'Encoder-Specific Training Latent Space - Epoch {epoch+1}\n({sample_text} - Colored by Encoder, Tasks Listed in Legend)')
-            plt.xlabel('t-SNE Dimension 1')
-            plt.ylabel('t-SNE Dimension 2')
-            
-            # Save plot
-            encoder_plot_path = os.path.join(run_dir, 'latent_space_plots', f'encoder_training_latent_space_epoch_{epoch+1}.png')
-            os.makedirs(os.path.dirname(encoder_plot_path), exist_ok=True)
-            plt.savefig(encoder_plot_path, dpi=300, bbox_inches='tight')
-            plt.close()
-            
-            print(f"  [OK] Encoder-specific training latent space plot saved: {encoder_plot_path}")
-            
-            # Upload to wandb
-            if wandb_logger:
-                try:
-                    import wandb
-                    wandb_logger._safe_log({
-                        f'encoder_training_latent_space_epoch_{epoch+1}': wandb.Image(encoder_plot_path)
-                    }, step_hint=epoch+1)
-                    print(f"  [OK] Encoder-specific training latent space plot uploaded to wandb")
-                except Exception as e:
-                    print(f"  [WARNING] Could not upload encoder-specific training latent space plot to wandb: {e}")
-        else:
-            print("  [WARNING] Skipping encoder-specific training plot")
-    
+            else:
+                print(f"    DEBUG: split_across_encoders = false - all encoders see all keys")
+                for enc_idx in range(num_encoders):
+                    actual_keys = [k for k, e_idx in zip(all_training_keys, all_encoder_indices) if e_idx == enc_idx]
+                    actual_unique = list(set(actual_keys))
+                    print(f"      Encoder {enc_idx}: {len(actual_unique)} unique keys sampled")
+
+        plt.legend(handles=legend_elements, loc='upper right')
+        plt.title(f'REAL Encoder-Specific Training Latent Space - Epoch {epoch+1}\n(Actual samples used in training - Colored by Encoder, Tasks Listed in Legend)')
+        plt.xlabel('t-SNE Dimension 1')
+        plt.ylabel('t-SNE Dimension 2')
+
+        encoder_plot_path = os.path.join(run_dir, 'latent_space_plots', f'encoder_training_latent_space_epoch_{epoch+1}.png')
+        os.makedirs(os.path.dirname(encoder_plot_path), exist_ok=True)
+        plt.savefig(encoder_plot_path, dpi=300, bbox_inches='tight')
+        plt.close()
+
+        print(f"  [OK] REAL encoder-specific training latent space plot saved: {encoder_plot_path}")
+
+        if wandb_logger:
+            try:
+                import wandb
+                # Use consistent key for single panel with epoch as step
+                wandb_logger._safe_log({
+                    'encoder_training_latent_space': wandb.Image(encoder_plot_path)
+                }, step_hint=epoch+1)
+                print(f"  [OK] REAL encoder-specific training latent space plot uploaded to wandb")
+            except Exception as e:
+                print(f"  [WARNING] Could not upload REAL encoder-specific training latent space plot to wandb: {e}")
+    else:
+        print("  [WARNING] Skipping training latent space plot because no REAL latents were collected")
+
     # 2. EVALUATE WITH SAMPLE-LEVEL OPTIMIZATION, GENERATING TRAJECTORY FIGURES
     print("2. Running evaluation with sample-level optimization...")
-    
-    # Use subset of training keys for evaluation
-    eval_keys = training_keys[:2] if len(training_keys) >= 2 else training_keys
 
-    # Get correct evaluation settings from configuration
-    evaluation_settings = settings.get_evaluation_settings()
-    n_samples = evaluation_settings.get('eval_n_samples', 2)  # Number of support samples per key
-    n_queries = evaluation_settings.get('eval_n_queries', 10)  # Number of query samples per key
+    eval_results = None
+    # Use evaluation keys from settings instead of hardcoded selection
+    eval_keys = evaluation_settings.get('eval_keys', training_keys[:2] if len(training_keys) >= 2 else training_keys)
+    n_samples = evaluation_settings.get('eval_n_samples', 2)
+    n_queries = evaluation_settings.get('eval_n_queries', 10)
+    eval_seed = data_settings.get('eval_seed', 42)
 
     print(f"  Using evaluation settings: {n_samples} support samples, {n_queries} query samples per key")
-            
+    print(f"  Evaluation keys: {eval_keys}")
+    print(f"  Evaluation seed: {eval_seed}")
+
+    try:
+        eval_results = main_test(
+            model=model,
+            keys=eval_keys,
+            run_dir=run_dir,
+            n_samples=n_samples,
+            n_queries=n_queries,
+            seed=eval_seed,
+            device=device,
+            encoder_idx=None,
+            use_independent_decoder=False
+        )
+
+        # Save evaluation results for trajectory visualization
+        if eval_results:
             try:
-                # Run evaluation using original Bonnet approach
-                eval_results = main_test(
-                    model=model,
-                    keys=eval_keys,
-                    run_dir=run_dir,
-                    n_samples=n_samples,
-                    n_queries=n_queries,
-            seed=42,  # Use fixed seed for reproducibility
-                    device=device,
-                    encoder_idx=None,  # Use PoE inference
-                    use_independent_decoder=False,  # Use shared decoder
-                    use_task_optimization=False,  # Disable task-level optimization
-                    use_original_bonnet=True  # Enable original Bonnet approach
-                )
-                
-                if eval_results and 'key_results' in eval_results:
+                save_evaluation_results(eval_results, run_dir)
+                print("  [OK] Evaluation results saved for trajectory visualization")
+            except Exception as e:
+                print(f"  [WARNING] Could not save evaluation results: {e}")
+
+        if eval_results and 'key_results' in eval_results:
             print("  [OK] Evaluation completed successfully")
-            
-            # Generate trajectory plots for each key
-                    for key, key_results in eval_results['key_results'].items():
+            for key, key_results in eval_results['key_results'].items():
                 if 'trajectory_info' in key_results and key_results['trajectory_info']:
                     print(f"  Generating trajectory plot for key '{key}'...")
-                    
-                    # Create standalone latent space plot for trajectory
                     trajectory_info = key_results['trajectory_info']
-                    
-                    # Debug: Print trajectory info structure
-                    print(f"    DEBUG: Trajectory info keys: {list(trajectory_info.keys())}")
-                    print(f"    DEBUG: Trajectory info type: {type(trajectory_info)}")
-                    
-                    # Extract the actual trajectory data from the nested structure
-                    if key in trajectory_info:
-                        actual_trajectory = trajectory_info[key]
-                        print(f"    DEBUG: Found trajectory for key '{key}'")
-                        print(f"    DEBUG: Actual trajectory keys: {list(actual_trajectory.keys())}")
-                        if 'z_vectors' in actual_trajectory:
-                            print(f"    DEBUG: z_vectors length: {len(actual_trajectory['z_vectors'])}")
-                        if 'losses' in actual_trajectory:
-                            print(f"    DEBUG: losses length: {len(actual_trajectory['losses'])}")
-                        
-                        # Create trajectory plot with the actual trajectory data
-                        trajectory_plot_path = create_standalone_latent_space_plot(
-                            trajectory_info=actual_trajectory,
-                            model=model,
-                        save_dir=run_dir,
-                        epoch=epoch,
-                            sample_idx=0,  # First sample
-                            evaluated_key=key,
-                            device=device,
-                            wandb_logger=wandb_logger,
-                            eval_results=eval_results
-                        )
-                        
-                        if trajectory_plot_path:
-                            print(f"    [OK] Trajectory plot saved: {trajectory_plot_path}")
-                            
-                            # Upload to wandb
-                            if wandb_logger:
-                                try:
-                                    import wandb
-                            wandb_logger._safe_log({
-                                        f'trajectory_plot_{key}_epoch_{epoch+1}': wandb.Image(trajectory_plot_path)
-                            }, step_hint=epoch+1)
-                                    print(f"    [OK] Trajectory plot uploaded to wandb")
-                                except Exception as e:
-                                    print(f"    [WARNING] Could not upload trajectory plot to wandb: {e}")
+
+                    # Handle trajectory_info structure - could be list or dict
+                    if isinstance(trajectory_info, list):
+                        print(f"    DEBUG: Trajectory info is a list with {len(trajectory_info)} items")
+                        if len(trajectory_info) > 0:
+                            # Use the first trajectory for this key
+                            actual_trajectory = trajectory_info[0]
+                            print(f"    DEBUG: Using first trajectory from list")
                         else:
-                            print(f"    [WARNING] Failed to create trajectory plot for key '{key}'")
-                            
-                        # Generate main reconstruction plot with trajectory
-                        print(f"    Generating main reconstruction plot with trajectory for key '{key}'...")
-                        try:
-                            from LPN_reproduction.evaluate_trajectory import visualize_comprehensive_trajectory
-                            
-                            # Create main reconstruction plot path
-                            main_reconstruction_path = os.path.join(run_dir, 'trajectory_plots', f'main_reconstruction_{key}_epoch_{epoch+1}.png')
-                            os.makedirs(os.path.dirname(main_reconstruction_path), exist_ok=True)
-                            
-                            # Debug what's in the trajectory_info before passing to visualization
-                            print(f"    DEBUG: actual_trajectory keys: {list(actual_trajectory.keys())}")
-                            if 'poe_trajectory_reconstructions' in actual_trajectory:
-                                print(f"    DEBUG: poe_trajectory_reconstructions keys: {list(actual_trajectory['poe_trajectory_reconstructions'].keys())}")
-                else:
-                                print(f"    DEBUG: poe_trajectory_reconstructions NOT FOUND in actual_trajectory")
-                            
-                            # Generate main reconstruction plot
-                            visualize_comprehensive_trajectory(
-                                trajectory_info=actual_trajectory,
-                                model=model,
-                                save_path=main_reconstruction_path,
-                                run_dir=run_dir,
-                                device=device
-                            )
-                            
-                            if os.path.exists(main_reconstruction_path):
-                                print(f"    [OK] Main reconstruction plot saved: {main_reconstruction_path}")
-                                
-                                # Upload to wandb
-                                if wandb_logger:
-                                    try:
-                                        import wandb
-                                        wandb_logger._safe_log({
-                                            f'main_reconstruction_{key}_epoch_{epoch+1}': wandb.Image(main_reconstruction_path)
-                                        }, step_hint=epoch+1)
-                                        print(f"    [OK] Main reconstruction plot uploaded to wandb")
-            except Exception as e:
-                                        print(f"    [WARNING] Could not upload main reconstruction plot to wandb: {e}")
-                else:
-                                print(f"    [WARNING] Failed to create main reconstruction plot for key '{key}'")
-                        except Exception as e:
-                            print(f"    [WARNING] Error generating main reconstruction plot for key '{key}': {e}")
+                            print(f"    [WARNING] Empty trajectory_info list for key '{key}'")
+                            continue
+                    elif isinstance(trajectory_info, dict):
+                        print(f"    DEBUG: Trajectory info is a dict with keys: {list(trajectory_info.keys())}")
+                        if key in trajectory_info:
+                            actual_trajectory = trajectory_info[key]
+                            print(f"    DEBUG: Found trajectory for key '{key}'")
+                        else:
+                            print(f"    [WARNING] Key '{key}' not found in trajectory_info dict")
+                            continue
                     else:
-                        print(f"    [WARNING] Key '{key}' not found in trajectory_info")
-                else:
-                    print(f"  [WARNING] No trajectory info found for key '{key}'")
-                    
-            # Also check for trajectory info in the main eval_results
-            if 'trajectory_info' in eval_results and eval_results['trajectory_info']:
-                print(f"  Generating trajectory plots from main evaluation results...")
-                for key, trajectory_info in eval_results['trajectory_info'].items():
-                    print(f"    Generating trajectory plot for key '{key}'...")
-                    
-                    # Debug: Print trajectory info structure
-                    print(f"      DEBUG: Trajectory info keys: {list(trajectory_info.keys())}")
-                    print(f"      DEBUG: Trajectory info type: {type(trajectory_info)}")
-                    
-                    # Extract the actual trajectory data from the nested structure
-                    if key in trajectory_info:
-                        actual_trajectory = trajectory_info[key]
-                        print(f"      DEBUG: Found trajectory for key '{key}'")
-                        print(f"      DEBUG: Actual trajectory keys: {list(actual_trajectory.keys())}")
-                        if 'z_vectors' in actual_trajectory:
-                            print(f"      DEBUG: z_vectors length: {len(actual_trajectory['z_vectors'])}")
-                        if 'losses' in actual_trajectory:
-                            print(f"      DEBUG: losses length: {len(actual_trajectory['losses'])}")
-                        
-                        # Create trajectory plot with the actual trajectory data
+                        print(f"    [WARNING] Unexpected trajectory_info type: {type(trajectory_info)}")
+                        continue
+
+                    print(f"    DEBUG: Actual trajectory keys: {list(actual_trajectory.keys())}")
+                    if 'z_vectors' in actual_trajectory:
+                        print(f"    DEBUG: z_vectors length: {len(actual_trajectory['z_vectors'])}")
+                    if 'losses' in actual_trajectory:
+                        print(f"    DEBUG: losses length: {len(actual_trajectory['losses'])}")
+
+                    try:
                         trajectory_plot_path = create_standalone_latent_space_plot(
                             trajectory_info=actual_trajectory,
                             model=model,
                             save_dir=run_dir,
                             epoch=epoch,
-                            sample_idx=0,  # First sample
+                            sample_idx=0,
                             evaluated_key=key,
                             device=device,
                             wandb_logger=wandb_logger,
                             eval_results=eval_results
                         )
-                        
-                        if trajectory_plot_path:
-                            print(f"      [OK] Trajectory plot saved: {trajectory_plot_path}")
-                            
-                            # Upload to wandb
-                            if wandb_logger:
-                                try:
-                                    import wandb
-                                    wandb_logger._safe_log({
-                                        f'trajectory_plot_{key}_epoch_{epoch+1}': wandb.Image(trajectory_plot_path)
-                                    }, step_hint=epoch+1)
-                                    print(f"      [OK] Trajectory plot uploaded to wandb")
-                                except Exception as e:
-                                    print(f"      [WARNING] Could not upload trajectory plot to wandb: {e}")
+                        if trajectory_plot_path and os.path.exists(trajectory_plot_path):
+                            print(f"[OK] Trajectory plot saved: {trajectory_plot_path}")
                         else:
-                            print(f"      [WARNING] Failed to create trajectory plot for key '{key}'")
-                            
-                        # Generate main reconstruction plot with trajectory
-                        print(f"      Generating main reconstruction plot with trajectory for key '{key}'...")
-                        try:
-                            from LPN_reproduction.evaluate_trajectory import visualize_comprehensive_trajectory
-                            
-                            # Create main reconstruction plot path
-                            main_reconstruction_path = os.path.join(run_dir, 'trajectory_plots', f'main_reconstruction_{key}_epoch_{epoch+1}.png')
-                            os.makedirs(os.path.dirname(main_reconstruction_path), exist_ok=True)
-                            
-                            # Generate main reconstruction plot
-                            visualize_comprehensive_trajectory(
-                                trajectory_info=actual_trajectory,
-                                model=model,
-                                save_path=main_reconstruction_path,
-                                run_dir=run_dir,
-                                device=device
-                            )
-                            
-                            if os.path.exists(main_reconstruction_path):
-                                print(f"      [OK] Main reconstruction plot saved: {main_reconstruction_path}")
-                                
-                                # Upload to wandb
-    if wandb_logger:
-                                    try:
-                                        import wandb
-                                        wandb_logger._safe_log({
-                                            f'main_reconstruction_{key}_epoch_{epoch+1}': wandb.Image(main_reconstruction_path)
-                                        }, step_hint=epoch+1)
-                                        print(f"      [OK] Main reconstruction plot uploaded to wandb")
-                                    except Exception as e:
-                                        print(f"      [WARNING] Could not upload main reconstruction plot to wandb: {e}")
-                            else:
-                                print(f"      [WARNING] Failed to create main reconstruction plot for key '{key}'")
-                        except Exception as e:
-                            print(f"      [WARNING] Error generating main reconstruction plot for key '{key}': {e}")
-                    else:
-                        print(f"      [WARNING] Key '{key}' not found in trajectory_info")
+                            print(f"[WARNING] Trajectory plot was not saved for key {key}")
+                    except Exception as e:
+                        print(f"[WARNING] Trajectory plot generation failed for key {key}: {e}")
+                    
+                    # ✅ ADD: Generate and upload main trajectory plot with reconstructions
+                    try:
+                        from LPN_reproduction.evaluate_trajectory import visualize_comprehensive_trajectory
+                        main_reconstruction_path = os.path.join(
+                            run_dir, "trajectory_plots", f"main_reconstruction_{key}_epoch_{epoch+1}.png"
+                        )
+                        visualize_comprehensive_trajectory(
+                            actual_trajectory, model, main_reconstruction_path, run_dir, device=device
+                        )
+                        print(f"[OK] Main trajectory plot with reconstructions saved: {main_reconstruction_path}")
+                        
+                        # ✅ ADD: Upload main trajectory plot to WandB with key-specific panel
+                        if wandb_logger:
+                            try:
+                                import wandb
+                                wandb_logger._safe_log({
+                                    f'main_reconstruction_{key}': wandb.Image(main_reconstruction_path),
+                                    'epoch': epoch+1  # ✅ ADD: Explicit epoch field
+                                }, step_hint=epoch+1)
+                                print(f"[OK] Main trajectory plot uploaded to wandb panel 'main_reconstruction_{key}' (step={epoch+1})")
+                            except Exception as e:
+                                print(f"[WARNING] Could not upload main trajectory plot to wandb: {e}")
+                    except Exception as e:
+                        print(f"[WARNING] Main trajectory plot generation failed for key {key}: {e}")
+                else:
+                    print(f"    [WARNING] Key '{key}' not found in trajectory_info")
         else:
             print("  [WARNING] Evaluation failed or no results returned")
-            
     except Exception as e:
         print(f"  [ WARNING ] Error during evaluation: {e}")
-    
-    # 3. PLOT LATENT SPACE WITH SUPPORT AND QUERY SAMPLES COLORED BY KEYS
-    print("3. Plotting evaluation latent space with support and query samples...")
-    
-    try:
-        # Collect evaluation latent data
-        all_eval_latents = []
-        all_eval_keys = []
-        all_sample_types = []  # 'support' or 'query'
-        
-        if eval_results and 'key_results' in eval_results:
-            for key, key_results in eval_results['key_results'].items():
-                if 'latent_data' in key_results and key_results['latent_data']:
-                    latent_data = key_results['latent_data']
-                    
-                    # Add support latents
-                    if 'support_latents' in latent_data and latent_data['support_latents']:
-                        support_latents = np.array(latent_data['support_latents'])
-                        support_keys = latent_data['support_keys']
-                        
-                        all_eval_latents.extend(support_latents)
-                        all_eval_keys.extend(support_keys)
-                        all_sample_types.extend(['support'] * len(support_latents))
-                        
-                        print(f"    Added {len(support_latents)} support latents for key '{key}'")
-                    
-                    # Add query latents
-                    if 'query_latents' in latent_data and latent_data['query_latents']:
-                        query_latents = np.array(latent_data['query_latents'])
-                        query_keys = latent_data['query_keys']
-                        
-                        all_eval_latents.extend(query_latents)
-                        all_eval_keys.extend(query_keys)
-                        all_sample_types.extend(['query'] * len(query_latents))
-                        
-                        print(f"    Added {len(query_latents)} query latents for key '{key}'")
-        
-        # Create evaluation latent space visualization
-        if all_eval_latents:
-            all_eval_latents = np.array(all_eval_latents)
-            print(f"  Evaluation latents shape: {all_eval_latents.shape}")
+
+    # 3. PLOT EVALUATION LATENT SPACE WITH SUPPORT AND QUERY SAMPLES, ENCODERS, POE, AND OPTIMIZED POSITIONS
+    print("3. Plotting evaluation latent space with support/query samples, encoders, PoE, and optimized positions...")
+
+    if eval_results:
+        try:
+            from utils.visualizers import plot_evaluation_latent_space_by_key_and_encoder
+            plot_evaluation_latent_space_by_key_and_encoder(
+                eval_results=eval_results, 
+                save_dir=run_dir, 
+                epoch=epoch, 
+                wandb_logger=wandb_logger,
+                use_task_optimization=False  # Use original Bonnet approach for per-sample visualization
+            )
+            print("  [ OK ] Evaluation latent space plot with encoders, PoE, and optimized positions completed")
+        except Exception as e:
+            print(f"  [ WARNING ] Could not plot evaluation latent space with encoders/PoE: {e}")
             
-            # Apply t-SNE
-            print("  Applying t-SNE to evaluation latents...")
-            tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(all_eval_latents)//4))
-            tsne_coords = tsne.fit_transform(all_eval_latents)
-            
-            # Create visualization
-            plt.figure(figsize=(16, 12))
-            
-            # Get unique keys for color mapping
-            unique_keys = sorted(list(set(all_eval_keys)))
-            key_colors = {k: plt.cm.tab20(i % 20) for i, k in enumerate(unique_keys)}
-            
-            # Plot support samples
-            support_mask = np.array(all_sample_types) == 'support'
-            if np.any(support_mask):
-                support_coords = tsne_coords[support_mask]
-                support_keys_subset = [all_eval_keys[i] for i in range(len(all_eval_keys)) if all_sample_types[i] == 'support']
-                
-                for i, (coord, key) in enumerate(zip(support_coords, support_keys_subset)):
-                    plt.scatter(coord[0], coord[1], color=key_colors[key], s=100, alpha=0.7, 
-                               marker='o', edgecolors='k', linewidths=0.5, label=f'Support: {key[:4]}' if i == 0 else "")
-            
-            # Plot query samples
-            query_mask = np.array(all_sample_types) == 'query'
-            if np.any(query_mask):
-                query_coords = tsne_coords[query_mask]
-                query_keys_subset = [all_eval_keys[i] for i in range(len(all_eval_keys)) if all_sample_types[i] == 'query']
-                
-                for i, (coord, key) in enumerate(zip(query_coords, query_keys_subset)):
-                    plt.scatter(coord[0], coord[1], color=key_colors[key], s=150, alpha=0.8, 
-                               marker='s', edgecolors='k', linewidths=1.0, label=f'Query: {key[:4]}' if i == 0 else "")
-            
-            # Create legend
-            legend_elements = []
-            for key in unique_keys:
-                color = key_colors[key]
-                # Add support legend element
-                legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=color, 
-                                                markersize=8, label=f'Support: {key[:8]}'))
-                # Add query legend element  
-                legend_elements.append(plt.Line2D([0], [0], marker='s', color='w', markerfacecolor=color, 
-                                                markersize=10, label=f'Query: {key[:8]}'))
-            
-            plt.legend(handles=legend_elements, loc='upper right')
-            plt.title(f'Evaluation Latent Space - Epoch {epoch+1}\n(Support: circles, Query: squares)')
-            plt.xlabel('t-SNE Dimension 1')
-            plt.ylabel('t-SNE Dimension 2')
-            
-            # Save plot
-            plot_path = os.path.join(run_dir, 'latent_space_plots', f'evaluation_latent_space_epoch_{epoch+1}.png')
-            os.makedirs(os.path.dirname(plot_path), exist_ok=True)
-            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-            plt.close()
-            
-            print(f"  [ OK ] Evaluation latent space plot saved: {plot_path}")
-            
-            # Upload to wandb
-    if wandb_logger:
-                try:
-                    import wandb
-                    wandb_logger._safe_log({
-                        f'evaluation_latent_space_epoch_{epoch+1}': wandb.Image(plot_path)
-                    }, step_hint=epoch+1)
-                    print(f"  [ OK ] Evaluation latent space plot uploaded to wandb")
-                except Exception as e:
-                    print(f"  [ WARNING ] Could not upload evaluation latent space plot to wandb: {e}")
-        else:
-            print("  [ WARNING ] No evaluation latent data available")
-            
-    except Exception as e:
-        print(f"  [ WARNING ] Error during evaluation latent space plotting: {e}")
-    
+            # Fallback to basic evaluation latent space plotting
+            try:
+                all_eval_latents = []
+                all_eval_keys = []
+                all_sample_types = []
+
+                if eval_results and 'key_results' in eval_results:
+                    for key, key_results in eval_results['key_results'].items():
+                        if 'latent_data' in key_results and key_results['latent_data']:
+                            latent_data = key_results['latent_data']
+
+                            if 'support_latents' in latent_data and latent_data['support_latents']:
+                                support_latents = np.array(latent_data['support_latents'])
+                                support_keys = latent_data.get('support_keys', [])
+                                all_eval_latents.extend(support_latents)
+                                all_eval_keys.extend(support_keys)
+                                all_sample_types.extend(['support'] * len(support_latents))
+                                print(f"    Added {len(support_latents)} support latents for key '{key}'")
+
+                            if 'query_latents' in latent_data and latent_data['query_latents']:
+                                query_latents = np.array(latent_data['query_latents'])
+                                query_keys = latent_data.get('query_keys', [])
+                                all_eval_latents.extend(query_latents)
+                                all_eval_keys.extend(query_keys)
+                                all_sample_types.extend(['query'] * len(query_latents))
+                                print(f"    Added {len(query_latents)} query latents for key '{key}'")
+
+                if all_eval_latents:
+                    all_eval_latents = np.array(all_eval_latents)
+                    print(f"  Evaluation latents shape: {all_eval_latents.shape}")
+
+                    print("  Applying t-SNE to evaluation latents...")
+                    tsne = TSNE(n_components=2, random_state=data_settings.get('eval_seed', 42), perplexity=min(30, max(1, len(all_eval_latents)//4)))
+                    tsne_coords = tsne.fit_transform(all_eval_latents)
+
+                    plt.figure(figsize=(16, 12))
+
+                    unique_keys = sorted(list(set(all_eval_keys)))
+                    key_colors = {k: plt.cm.tab20(i % 20) for i, k in enumerate(unique_keys)}
+
+                    support_mask = np.array(all_sample_types) == 'support'
+                    if np.any(support_mask):
+                        support_coords = tsne_coords[support_mask]
+                        support_keys_subset = [
+                            all_eval_keys[i] for i in range(len(all_eval_keys)) if all_sample_types[i] == 'support'
+                        ]
+                        for i, (coord, key) in enumerate(zip(support_coords, support_keys_subset)):
+                            plt.scatter(coord[0], coord[1], color=key_colors.get(key, 'gray'), s=100, alpha=0.7,
+                                        marker='o', edgecolors='k', linewidths=0.5, label=f'Support: {key[:4]}' if i == 0 else "")
+
+                    query_mask = np.array(all_sample_types) == 'query'
+                    if np.any(query_mask):
+                        query_coords = tsne_coords[query_mask]
+                        query_keys_subset = [
+                            all_eval_keys[i] for i in range(len(all_eval_keys)) if all_sample_types[i] == 'query'
+                        ]
+                        for i, (coord, key) in enumerate(zip(query_coords, query_keys_subset)):
+                            plt.scatter(coord[0], coord[1], color=key_colors.get(key, 'gray'), s=150, alpha=0.8,
+                                        marker='s', edgecolors='k', linewidths=1.0, label=f'Query: {key[:4]}' if i == 0 else "")
+
+                    legend_elements = []
+                    for key in unique_keys:
+                        color = key_colors[key]
+                        legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=color,
+                                                          markersize=8, label=f'Support: {key[:8]}'))
+                        legend_elements.append(plt.Line2D([0], [0], marker='s', color='w', markerfacecolor=color,
+                                                          markersize=10, label=f'Query: {key[:8]}'))
+
+                    plt.legend(handles=legend_elements, loc='upper right')
+                    plt.title(f'Evaluation Latent Space - Epoch {epoch+1}\n(Support: circles, Query: squares)')
+                    plt.xlabel('t-SNE Dimension 1')
+                    plt.ylabel('t-SNE Dimension 2')
+
+                    plot_path = os.path.join(run_dir, 'latent_space_plots', f'evaluation_latent_space_epoch_{epoch+1}.png')
+                    os.makedirs(os.path.dirname(plot_path), exist_ok=True)
+                    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+                    plt.close()
+
+                    print(f"  [ OK ] Basic evaluation latent space plot saved: {plot_path}")
+
+                    if wandb_logger:
+                        try:
+                            import wandb
+                            # Use consistent key for single panel with epoch as step
+                            wandb_logger._safe_log({
+                                'evaluation_latent_space': wandb.Image(plot_path)
+                            }, step_hint=epoch+1)
+                            print(f"  [ OK ] Basic evaluation latent space plot uploaded to wandb")
+                        except Exception as e:
+                            print(f"  [ WARNING ] Could not upload basic evaluation latent space plot to wandb: {e}")
+                else:
+                    print("  [ WARNING ] No evaluation latent data available")
+            except Exception as e:
+                print(f"  [ WARNING ] Error during basic evaluation latent space plotting: {e}")
+    else:
+        print("  [ WARNING ] No evaluation results available for latent space plotting")
+
     print(f"=== COMPREHENSIVE EVALUATION COMPLETED FOR EPOCH {epoch+1} ===")
     return True

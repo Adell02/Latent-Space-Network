@@ -75,6 +75,7 @@ Usage:
 
 import torch
 from torch.optim import Adam
+import torch.nn.functional as F
 import json
 import numpy as np
 import os
@@ -99,6 +100,7 @@ from utils.training_helpers import (
     save_independent_decoder_checkpoint,
     load_all_independent_decoder_checkpoints,
     initialize_shared_decoder_from_independent_decoders,
+    create_infinite_dataloader,
 )
 
 from utils.model_utils import (
@@ -111,11 +113,191 @@ from utils.model_utils import (
     count_model_parameters,
     save_model_params,
     collect_latent_data,
+    save_evaluation_results,
 )
 
 from utils.wandb_logger import init_wandb_for_mode, get_wandb_logger
 from utils.evaluation_utils import run_quick_evaluation, should_run_evaluation, log_evaluation_to_wandb
-from utils.visualizers import generate_per_dimension_kl_plot
+from utils.visualizers import generate_per_dimension_kl_plot, plot_evaluation_latent_space_by_key_and_encoder
+from evaluation import main_test
+
+
+def comprehensive_evaluation_after_epoch_specialist(
+    model, dataloader, device, epoch, run_dir, wandb_logger,
+    training_keys, is_multi_encoder=False, num_encoders=1,
+    infinite_dataloader=False, encoder_dataloaders=None,
+    phase_name="A", encoder_idx=None
+):
+    """
+    Comprehensive evaluation after each epoch for specialist training.
+    Similar to main training but adapted for specialist phases.
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from sklearn.manifold import TSNE
+    from utils.visualizers import create_standalone_latent_space_plot
+
+    evaluation_settings = settings.get_evaluation_settings()
+    data_settings = settings.get_data_settings()
+
+    print(f"\n=== COMPREHENSIVE EVALUATION FOR {phase_name} EPOCH {epoch+1} ===")
+
+    # 1. PLOT TRAINING LATENTS ON T-SNE (COLORED BY KEY + BY ENCODER)
+    print("1. Plotting training latents on t-SNE...")
+    
+    # Collect training latents from current phase
+    all_training_latents = []
+    all_training_keys = []
+    all_encoder_indices = []
+    
+    # Collect latents from current encoder/phase
+    model.eval()
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(dataloader):
+            if batch_idx >= 20:  # Limit for efficiency
+                break
+                
+            if len(batch) >= 3:
+                input_seq, target_seq, batch_keys = batch[:3]
+            else:
+                input_seq, target_seq = batch[:2]
+                batch_keys = None
+            
+            input_seq = input_seq.to(device)
+            target_seq = target_seq.to(device)
+            
+            # Get latent representation based on phase
+            if phase_name == "A" and encoder_idx is not None:
+                # Phase A: specific encoder + independent decoder
+                mu, log_var, _ = model.multi_encoder.encoders[encoder_idx](input_seq, target_seq)
+                z = model.reparameterize(mu, log_var)
+            else:
+                # Phase B: PoE inference
+                mu, log_var = model(input_seq, target_seq)[1:3]
+                z = model.reparameterize(mu, log_var)
+            
+            all_training_latents.append(z.cpu().numpy())
+            # Handle batch_keys properly - if None, create default keys
+            if batch_keys is not None:
+                all_training_keys.extend(batch_keys)
+            else:
+                # Create default keys based on encoder_idx and batch size
+                default_keys = [f"encoder_{encoder_idx}_sample_{i}" for i in range(len(z))]
+                all_training_keys.extend(default_keys)
+            all_encoder_indices.extend([encoder_idx if encoder_idx is not None else -1] * len(z))
+    
+    # Create t-SNE visualization
+    if all_training_latents:
+        all_training_latents = np.concatenate(all_training_latents, axis=0)
+        print(f"Training latents shape: {all_training_latents.shape}")
+
+        # Apply t-SNE
+        tsne = TSNE(n_components=2, random_state=data_settings.get('training_seed', 42), 
+                    perplexity=min(30, max(1, len(all_training_latents)//4)))
+        tsne_coords = tsne.fit_transform(all_training_latents)
+
+        # Create visualization
+        plt.figure(figsize=(12, 8))
+        unique_keys = sorted(list(set(all_training_keys)))
+        key_colors = {k: plt.cm.tab20(i % 20) for i, k in enumerate(unique_keys)}
+
+        for coord, key, enc_idx in zip(tsne_coords, all_training_keys, all_encoder_indices):
+            color = key_colors.get(key, 'gray')
+            plt.scatter(coord[0], coord[1], color=color, s=80, alpha=0.7,
+                        edgecolors='k', linewidths=0.5)
+
+        plt.title(f'Phase {phase_name} Training Latent Space - Epoch {epoch+1}\n(Colored by Key)')
+        plt.xlabel('t-SNE Dimension 1')
+        plt.ylabel('t-SNE Dimension 2')
+
+        plot_path = os.path.join(run_dir, 'latent_space_plots', f'phase_{phase_name.lower()}_latent_space_epoch_{epoch+1}.png')
+        os.makedirs(os.path.dirname(plot_path), exist_ok=True)
+        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+        plt.close()
+
+        print(f"  [OK] Phase {phase_name} training latent space plot saved: {plot_path}")
+
+        if wandb_logger:
+            try:
+                import wandb
+                wandb_logger._safe_log({
+                    f'phase_{phase_name.lower()}_latent_space': wandb.Image(plot_path)
+                }, step_hint=epoch+1)
+                print(f"  [OK] Phase {phase_name} training latent space plot uploaded to wandb")
+            except Exception as e:
+                print(f"  [WARNING] Could not upload Phase {phase_name} training latent space plot to wandb: {e}")
+
+    # 2. EVALUATE WITH SAMPLE-LEVEL OPTIMIZATION, GENERATING TRAJECTORY FIGURES
+    print("2. Running evaluation with sample-level optimization...")
+
+    eval_results = None
+    eval_keys = evaluation_settings.get('eval_keys', training_keys[:2] if len(training_keys) >= 2 else training_keys)
+    n_samples = evaluation_settings.get('eval_n_samples', 2)
+    n_queries = evaluation_settings.get('eval_n_queries', 10)
+    eval_seed = data_settings.get('eval_seed', 42)
+
+    try:
+        eval_results = main_test(
+            model=model,
+            keys=eval_keys,
+            run_dir=run_dir,
+            n_samples=n_samples,
+            n_queries=n_queries,
+            seed=eval_seed,
+            device=device,
+            encoder_idx=encoder_idx if phase_name == "A" else None,
+            use_independent_decoder=(phase_name == "A")
+        )
+
+        if eval_results:
+            try:
+                save_evaluation_results(eval_results, run_dir)
+                print("  [OK] Evaluation results saved for trajectory visualization")
+            except Exception as e:
+                print(f"  [WARNING] Could not save evaluation results: {e}")
+
+        # Generate trajectory plots
+        if eval_results and 'key_results' in eval_results:
+            for key, key_results in eval_results['key_results'].items():
+                if 'trajectory_info' in key_results and key_results['trajectory_info']:
+                    try:
+                        trajectory_plot_path = create_standalone_latent_space_plot(
+                            trajectory_info=key_results['trajectory_info'][0],
+                            model=model,
+                            save_dir=run_dir,
+                            epoch=epoch,
+                            sample_idx=0,
+                            evaluated_key=key,
+                            device=device,
+                            wandb_logger=wandb_logger,
+                            eval_results=eval_results
+                        )
+                        if trajectory_plot_path:
+                            print(f"[OK] Trajectory plot saved: {trajectory_plot_path}")
+                    except Exception as e:
+                        print(f"[WARNING] Trajectory plot generation failed for key {key}: {e}")
+
+    except Exception as e:
+        print(f"  [ WARNING ] Error during evaluation: {e}")
+
+    # 3. PLOT EVALUATION LATENT SPACE
+    print("3. Plotting evaluation latent space...")
+    
+    if eval_results:
+        try:
+            plot_evaluation_latent_space_by_key_and_encoder(
+                eval_results=eval_results, 
+                save_dir=run_dir, 
+                epoch=epoch, 
+                wandb_logger=wandb_logger,
+                use_task_optimization=False
+            )
+            print("  [ OK ] Evaluation latent space plot completed")
+        except Exception as e:
+            print(f"  [ WARNING ] Could not plot evaluation latent space: {e}")
+
+    print(f"=== COMPREHENSIVE EVALUATION COMPLETED FOR {phase_name} EPOCH {epoch+1} ===")
+    return True
 
 
 def generate_specialist_reconstruction_plot(model, dataloader, device, epoch, phase, encoder_idx=None, 
@@ -449,13 +631,25 @@ def _create_comprehensive_analysis_plot(model, data_source, device, data_type, n
         all_samples = []
         for enc_idx, (inputs, outputs) in enumerate(data_source):
             if inputs and outputs:
-                from utils.model_utils import prepare_dataloader
-                dataloader = prepare_dataloader(inputs, outputs, batch_size=1)
-                for i, (input_seq, target_seq) in enumerate(dataloader):
-                    if i >= n_samples_per_key:
-                        break
-                    input_seq, target_seq = input_seq.to(device), target_seq.to(device)
-                    all_samples.append((input_seq, target_seq, f"training_enc_{enc_idx}", i))
+                # Handle data conversion manually instead of using prepare_dataloader
+                try:
+                    # Convert to tensors if they're lists
+                    if isinstance(inputs, list):
+                        input_tensor = torch.FloatTensor(inputs)
+                        output_tensor = torch.FloatTensor(outputs)
+                    else:
+                        input_tensor = inputs
+                        output_tensor = outputs
+                    
+                    # Take first n_samples_per_key samples
+                    num_samples = min(n_samples_per_key, len(input_tensor))
+                    for i in range(num_samples):
+                        input_seq = input_tensor[i:i+1].to(device)
+                        target_seq = output_tensor[i:i+1].to(device)
+                        all_samples.append((input_seq, target_seq, f"training_enc_{enc_idx}", i))
+                except Exception as e:
+                    print(f"[ WARNING ] Could not process encoder {enc_idx} data: {e}")
+                    continue
     else:
         # Use evaluation data 
         all_samples = data_source
@@ -473,51 +667,59 @@ def _create_comprehensive_analysis_plot(model, data_source, device, data_type, n
         if sample_idx >= min(len(all_samples), n_samples_per_key * 4):  # Limit for visualization
             break
             
-        # Extract grids
-        input_grid, input_shape = extract_grid_from_sequence(input_seq[0].cpu().numpy())
-        target_grid, target_shape = extract_grid_from_sequence(target_seq[0].cpu().numpy())
-        
-        # Get encoder reconstructions
-        encoder_reconstructions = []
-        for enc_idx in range(num_encoders):
-            mu, log_var,_ = model.multi_encoder.encoders[enc_idx](input_seq, target_seq)
-            z = model.reparameterize(mu, log_var)
-            shape_logits, grid_logits = model.multi_encoder.independent_decoders[enc_idx](
-                z, input_seq, target_seq=target_seq
-            )
+        try:
+            # Extract grids
+            input_grid, input_shape = extract_grid_from_sequence(input_seq[0].cpu().numpy())
+            target_grid, target_shape = extract_grid_from_sequence(target_seq[0].cpu().numpy())
             
-            shape_pred = shape_logits[0].argmax(dim=-1).cpu().numpy()
-            grid_pred = grid_logits[0].argmax(dim=-1).cpu().numpy()
-            recon_seq = target_seq[0].cpu().numpy().copy()
-            recon_seq[900:902] = shape_pred
-            if len(shape_pred) >= 2 and shape_pred[0] > 0 and shape_pred[1] > 0:
-                recon_seq[:min(len(grid_pred), 900)] = grid_pred[:min(len(grid_pred), 900)]
-            recon_grid, recon_shape = extract_grid_from_sequence(recon_seq)
-            encoder_reconstructions.append((recon_grid, recon_shape))
-        
-        # Get PoE reconstruction
-        mu_poe, log_var_poe = model(input_seq, target_seq)[1:3]
-        z_poe = model.reparameterize(mu_poe, log_var_poe)
-        shape_logits_poe, grid_logits_poe = model.multi_encoder.shared_decoder(z_poe, input_seq, target_seq=target_seq)
-        
-        shape_pred_poe = shape_logits_poe[0].argmax(dim=-1).cpu().numpy()
-        grid_pred_poe = grid_logits_poe[0].argmax(dim=-1).cpu().numpy()
-        recon_seq_poe = target_seq[0].cpu().numpy().copy()
-        recon_seq_poe[900:902] = shape_pred_poe
-        if len(shape_pred_poe) >= 2 and shape_pred_poe[0] > 0 and shape_pred_poe[1] > 0:
-            recon_seq_poe[:min(len(grid_pred_poe), 900)] = grid_pred_poe[:min(len(grid_pred_poe), 900)]
-        poe_recon_grid, poe_recon_shape = extract_grid_from_sequence(recon_seq_poe)
-        
-        sample_data.append({
-            'input_grid': input_grid,
-            'input_shape': input_shape,
-            'target_grid': target_grid,
-            'target_shape': target_shape,
-            'encoder_reconstructions': encoder_reconstructions,
-            'poe_reconstruction': (poe_recon_grid, poe_recon_shape),
-            'source_key': source_key,
-            'sample_num': sample_num
-        })
+            # Get encoder reconstructions
+            encoder_reconstructions = []
+            for enc_idx in range(num_encoders):
+                mu, log_var,_ = model.multi_encoder.encoders[enc_idx](input_seq, target_seq)
+                z = model.reparameterize(mu, log_var)
+                shape_logits, grid_logits = model.multi_encoder.independent_decoders[enc_idx](
+                    z, input_seq, target_seq=target_seq
+                )
+                
+                shape_pred = shape_logits[0].argmax(dim=-1).cpu().numpy()
+                grid_pred = grid_logits[0].argmax(dim=-1).cpu().numpy()
+                recon_seq = target_seq[0].cpu().numpy().copy()
+                recon_seq[900:902] = shape_pred
+                if len(shape_pred) >= 2 and shape_pred[0] > 0 and shape_pred[1] > 0:
+                    recon_seq[:min(len(grid_pred), 900)] = grid_pred[:min(len(grid_pred), 900)]
+                recon_grid, recon_shape = extract_grid_from_sequence(recon_seq)
+                encoder_reconstructions.append((recon_grid, recon_shape))
+            
+            # Get PoE reconstruction
+            mu_poe, log_var_poe = model(input_seq, target_seq)[1:3]
+            z_poe = model.reparameterize(mu_poe, log_var_poe)
+            shape_logits_poe, grid_logits_poe = model.multi_encoder.shared_decoder(z_poe, input_seq, target_seq=target_seq)
+            
+            shape_pred_poe = shape_logits_poe[0].argmax(dim=-1).cpu().numpy()
+            grid_pred_poe = grid_logits_poe[0].argmax(dim=-1).cpu().numpy()
+            recon_seq_poe = target_seq[0].cpu().numpy().copy()
+            recon_seq_poe[900:902] = shape_pred_poe
+            if len(shape_pred_poe) >= 2 and shape_pred_poe[0] > 0 and shape_pred_poe[1] > 0:
+                recon_seq_poe[:min(len(grid_pred_poe), 900)] = grid_pred_poe[:min(len(grid_pred_poe), 900)]
+            poe_recon_grid, poe_recon_shape = extract_grid_from_sequence(recon_seq_poe)
+            
+            sample_data.append({
+                'input_grid': input_grid,
+                'input_shape': input_shape,
+                'target_grid': target_grid,
+                'target_shape': target_shape,
+                'encoder_reconstructions': encoder_reconstructions,
+                'poe_reconstruction': (poe_recon_grid, poe_recon_shape),
+                'source_key': source_key,
+                'sample_num': sample_num
+            })
+        except Exception as e:
+            print(f"[ WARNING ] Could not process sample {sample_idx}: {e}")
+            continue
+    
+    if not sample_data:
+        print(f"[ WARNING ] No valid samples for visualization")
+        return
     
     # Create visualization (without bar graph)
     fig = plt.figure(figsize=(4 * (num_encoders + 3), 8))
@@ -550,30 +752,24 @@ def _create_comprehensive_analysis_plot(model, data_source, device, data_type, n
         ax_poe = fig.add_subplot(gs[row, 2 + num_encoders])
         poe_recon_grid, poe_recon_shape = sample['poe_reconstruction']
         ax_poe.imshow(poe_recon_grid, cmap='viridis', interpolation='nearest')
-        ax_poe.set_title(f'PoE\n{poe_recon_shape[0]}×{poe_recon_shape[1]}', fontsize=10, fontweight='bold')
+        ax_poe.set_title(f'PoE\n{poe_recon_shape[0]}×{poe_recon_shape[1]}', fontsize=10)
         ax_poe.axis('off')
     
-    plt.suptitle(f'Comprehensive Encoder vs PoE Analysis\n{data_type.upper()} DATA', fontsize=16)
-    plt.tight_layout()
-    
-    # Save and log
-    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
-        plt.savefig(tmp_file.name, dpi=200, bbox_inches='tight')
-        temp_plot_path = tmp_file.name
+    # Save plot
+    plot_path = os.path.join(os.path.dirname(source_name), f'comprehensive_analysis_{data_type}.png')
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
     plt.close()
     
+    # Log to wandb
     if wandb_logger:
         try:
-            import wandb
             wandb_logger._safe_log({
-                f"phase_b_final/comprehensive_analysis_{source_name}": wandb.Image(temp_plot_path),
-                f"phase_b_final/{source_name}_samples_analyzed": len(sample_data)
+                f'comprehensive_analysis_{data_type}': wandb.Image(plot_path)
             }, step_hint=global_step)
-            print(f"[ OK ] Logged comprehensive analysis for {data_type} data")
         except Exception as e:
-            print(f"[ WARNING ] Failed to log {data_type} analysis: {e}")
-        finally:
-            os.unlink(temp_plot_path)
+            print(f"[ WARNING ] Could not log comprehensive analysis plot to wandb: {e}")
+    
+    print(f"[ OK ] Comprehensive analysis plot saved: {plot_path}")
 
 
 def _create_accuracy_matrix(model, eval_keys, num_encoders, device, wandb_logger, global_step):
@@ -783,6 +979,10 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
     gradient_accumulation_steps = training_settings.get('gradient_accumulation_steps', 1)
     
     num_encoders = len(encoder_datasets)
+    
+    # Get infinite dataloader setting
+    is_infinite_dataloader = data_settings.get('infinite_dataloader', False)
+    
     phase_a_results = {
         'encoder_losses': {i: [] for i in range(num_encoders)},
         'encoder_epochs': phase_epochs,
@@ -790,18 +990,31 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
     }
     
     for encoder_idx in range(num_encoders):
-        inputs, outputs = encoder_datasets[encoder_idx]
-        
-        if not inputs or not outputs:
-            logger.info(f"Encoder {encoder_idx}: No data available, skipping...")
-            continue
+        # Check if encoder_datasets contains dataloaders or (inputs, outputs) tuples
+        if hasattr(encoder_datasets[encoder_idx], '__iter__') and not isinstance(encoder_datasets[encoder_idx], (list, tuple)):
+            # encoder_datasets contains dataloaders (infinite dataloader case)
+            dataloader = encoder_datasets[encoder_idx]
+            if dataloader is None:
+                logger.info(f"Encoder {encoder_idx}: No dataloader available, skipping...")
+                continue
+                
+            logger.info(f"\n--- Training Encoder {encoder_idx} with Independent Decoder ---")
+            logger.info(f"Data: Infinite dataloader")
+            print(f"Training Encoder {encoder_idx} with independent decoder (infinite dataloader)...")
+        else:
+            # encoder_datasets contains (inputs, outputs) tuples (finite dataloader case)
+            inputs, outputs = encoder_datasets[encoder_idx]
             
-        logger.info(f"\n--- Training Encoder {encoder_idx} with Independent Decoder ---")
-        logger.info(f"Data: {len(inputs)} training samples")
-        print(f"Training Encoder {encoder_idx} with independent decoder ({len(inputs)} samples)...")
-        
-        # Create dataloader for this encoder
-        dataloader = prepare_dataloader(inputs, outputs, BATCH_SIZE)
+            if not inputs or not outputs:
+                logger.info(f"Encoder {encoder_idx}: No data available, skipping...")
+                continue
+                
+            logger.info(f"\n--- Training Encoder {encoder_idx} with Independent Decoder ---")
+            logger.info(f"Data: {len(inputs)} training samples")
+            print(f"Training Encoder {encoder_idx} with independent decoder ({len(inputs)} samples)...")
+            
+            # Create dataloader for this encoder
+            dataloader = prepare_dataloader(inputs, outputs, BATCH_SIZE)
         
         # Freeze all other encoders and decoders
         for other_idx in range(num_encoders):
@@ -835,7 +1048,12 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
         for epoch in range(phase_epochs):
             model.train()
             epoch_loss = 0.0
-            num_batches = len(dataloader)
+            # For infinite dataloader, we can't get the length, so use batches_per_epoch
+            try:
+                num_batches = len(dataloader)
+            except TypeError:
+                # Infinite dataloader doesn't have a defined length
+                num_batches = BATCHES_PER_EPOCH
             
             # Calculate consistent global step for this epoch (used for ALL logging)
             global_step = encoder_idx * phase_epochs + epoch + 1
@@ -845,7 +1063,13 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
             
             optimizer.zero_grad()
             
-            for batch_idx, (input_seq, target_seq) in enumerate(pbar):
+            for batch_idx, batch in enumerate(pbar):
+                # Handle batch structure with keys
+                if len(batch) >= 3:
+                    input_seq, target_seq, batch_keys = batch[:3]
+                else:
+                    input_seq, target_seq = batch[:2]
+                    batch_keys = None
                 input_seq = input_seq.to(device)
                 target_seq = target_seq.to(device)
                 
@@ -858,42 +1082,51 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                         # Create anti-batch: samples from OTHER encoders' domains
                         other_encoder_indices = [i for i in range(num_encoders) if i != encoder_idx]
                         if other_encoder_indices:
-                            # Sample from other encoders' datasets
-                            other_datasets = [encoder_datasets[i] for i in other_encoder_indices if encoder_datasets[i][0]]
-                            if other_datasets:
-                                # Combine other encoders' data
-                                all_other_inputs = []
-                                all_other_outputs = []
-                                for other_inputs, other_outputs in other_datasets:
-                                    all_other_inputs.extend(other_inputs[:anti_samples_count//len(other_datasets)+1])
-                                    all_other_outputs.extend(other_outputs[:anti_samples_count//len(other_datasets)+1])
-                                
-                                if len(all_other_inputs) >= anti_samples_count:
-                                    # Sample anti-batch
-                                    anti_indices = torch.randperm(len(all_other_inputs))[:anti_samples_count]
-                                    anti_inputs = [all_other_inputs[i] for i in anti_indices]
-                                    anti_outputs = [all_other_outputs[i] for i in anti_indices]
+                            # Check if we're using infinite dataloader (dataloaders instead of datasets)
+                            is_infinite_dataloader = hasattr(encoder_datasets[0], '__iter__') and not isinstance(encoder_datasets[0], (list, tuple))
+                            
+                            if is_infinite_dataloader:
+                                # For infinite dataloader, disable anti-batch training
+                                # (can't easily sample from other dataloaders during training)
+                                logger.warning(f"Anti-batch training disabled for infinite dataloader")
+                                anti_mask = None
+                            else:
+                                # For finite dataloader, sample from other encoders' datasets
+                                other_datasets = [encoder_datasets[i] for i in other_encoder_indices if encoder_datasets[i][0]]
+                                if other_datasets:
+                                    # Combine other encoders' data
+                                    all_other_inputs = []
+                                    all_other_outputs = []
+                                    for other_inputs, other_outputs in other_datasets:
+                                        all_other_inputs.extend(other_inputs[:anti_samples_count//len(other_datasets)+1])
+                                        all_other_outputs.extend(other_outputs[:anti_samples_count//len(other_datasets)+1])
                                     
-                                    # Convert to tensors
-                                    anti_input_seq = torch.stack([torch.tensor(seq, dtype=torch.float32) for seq in anti_inputs]).to(device)
-                                    anti_target_seq = torch.stack([torch.tensor(seq, dtype=torch.float32) for seq in anti_outputs]).to(device)
-                                    
-                                    # Combine in-slice and anti-batch samples
-                                    combined_input = torch.cat([input_seq, anti_input_seq], dim=0)
-                                    combined_target = torch.cat([target_seq, anti_target_seq], dim=0)
-                                    
-                                    # Create anti-mask: False for in-slice, True for anti-batch
-                                    anti_mask = torch.cat([
-                                        torch.zeros(batch_size, dtype=torch.bool, device=device),  # in-slice
-                                        torch.ones(anti_samples_count, dtype=torch.bool, device=device)  # anti-batch
-                                    ])
-                                    
-                                    # Use combined batch for training
-                                    input_seq, target_seq = combined_input, combined_target
+                                    if len(all_other_inputs) >= anti_samples_count:
+                                        # Sample anti-batch
+                                        anti_indices = torch.randperm(len(all_other_inputs))[:anti_samples_count]
+                                        anti_inputs = [all_other_inputs[i] for i in anti_indices]
+                                        anti_outputs = [all_other_outputs[i] for i in anti_indices]
+                                        
+                                        # Convert to tensors
+                                        anti_input_seq = torch.stack([torch.tensor(seq, dtype=torch.float32) for seq in anti_inputs]).to(device)
+                                        anti_target_seq = torch.stack([torch.tensor(seq, dtype=torch.float32) for seq in anti_outputs]).to(device)
+                                        
+                                        # Combine in-slice and anti-batch samples
+                                        combined_input = torch.cat([input_seq, anti_input_seq], dim=0)
+                                        combined_target = torch.cat([target_seq, anti_target_seq], dim=0)
+                                        
+                                        # Create anti-mask: False for in-slice, True for anti-batch
+                                        anti_mask = torch.cat([
+                                            torch.zeros(batch_size, dtype=torch.bool, device=device),  # in-slice
+                                            torch.ones(anti_samples_count, dtype=torch.bool, device=device)  # anti-batch
+                                        ])
+                                        
+                                        # Use combined batch for training
+                                        input_seq, target_seq = combined_input, combined_target
+                                    else:
+                                        anti_mask = None
                                 else:
                                     anti_mask = None
-                            else:
-                                anti_mask = None
                         else:
                             anti_mask = None
                     else:
@@ -1085,6 +1318,31 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                     logger.warning(f"Failed to generate reconstruction plot for Encoder {encoder_idx} at epoch {epoch+1}: {e}")
                 
                 model.train()
+            
+            # Add comprehensive evaluation after each epoch
+            if wandb_logger and should_run_evaluation(epoch + 1, eval_interval, phase_epochs):
+                try:
+                    # Get training keys for this encoder
+                    encoder_keys = splitting_statistics['keys_per_encoder'][encoder_idx] if 'splitting_statistics' in locals() else [TRAINING_KEYS[encoder_idx % len(TRAINING_KEYS)]]
+                    
+                    comprehensive_evaluation_after_epoch_specialist(
+                        model=model,
+                        dataloader=dataloader,
+                        device=device,
+                        epoch=epoch,
+                        run_dir=run_dir,
+                        wandb_logger=wandb_logger,
+                        training_keys=encoder_keys,
+                        is_multi_encoder=True,
+                        num_encoders=num_encoders,
+                        infinite_dataloader=is_infinite_dataloader,
+                        encoder_dataloaders=encoder_dataloaders,
+                        phase_name="A",
+                        encoder_idx=encoder_idx
+                    )
+                    print(f"[OK] Comprehensive evaluation completed for Phase A Encoder {encoder_idx} epoch {epoch+1}")
+                except Exception as e:
+                    logger.warning(f"Comprehensive evaluation failed for Phase A Encoder {encoder_idx} epoch {epoch+1}: {e}")
         
         # Save encoder checkpoint
         encoder_checkpoint_path = save_encoder_checkpoint(model, encoder_idx, run_dir)
@@ -1207,6 +1465,7 @@ def train_phase_b_decoder(model, encoder_datasets, device, logger, wandb_logger,
     BATCH_SIZE = training_settings['batch_size']
     LEARNING_RATE = training_settings['learning_rate']
     BETA = training_settings['beta']
+    BATCHES_PER_EPOCH = training_settings.get('batches_per_epoch', 10)
     
     # Use settings for phase epochs if not provided
     if phase_epochs is None:
@@ -1233,21 +1492,40 @@ def train_phase_b_decoder(model, encoder_datasets, device, logger, wandb_logger,
     
     print_parameter_status(model, 'decoder')
     
-    # Create mixed domains dataloader
-    num_encoders = len(encoder_datasets)
-    mixed_dataloader = create_mixed_domains_dataloader(
-        encoder_datasets, num_encoders, BATCH_SIZE, shuffle=True
-    )
+    # Check if encoder_datasets contains dataloaders or (inputs, outputs) tuples
+    is_infinite_dataloader = hasattr(encoder_datasets[0], '__iter__') and not isinstance(encoder_datasets[0], (list, tuple))
     
-    logger.info(f"Mixed dataloader created with {len(mixed_dataloader)} batches")
-    print(f"Training shared decoder with PoE on mixed data ({len(mixed_dataloader)} batches)...")
-    
-    # Log training data distribution for Phase B
-    total_samples = sum(len(inputs) for inputs, outputs in encoder_datasets)
-    logger.info(f"Phase B training data summary:")
-    logger.info(f"  Total samples across all encoders: {total_samples}")
-    for enc_idx, (inputs, outputs) in enumerate(encoder_datasets):
-        logger.info(f"  Encoder {enc_idx}: {len(inputs)} samples")
+    if is_infinite_dataloader:
+        # For infinite dataloader, use the first dataloader as mixed dataloader
+        # (all dataloaders are infinite, so we can use any of them)
+        mixed_dataloader = encoder_datasets[0]  # Use first dataloader
+        logger.info(f"Using infinite dataloader for Phase B training")
+        print(f"Training shared decoder with PoE on infinite dataloader...")
+        
+        # Log training data distribution for Phase B (infinite dataloader)
+        logger.info(f"Phase B training data summary:")
+        logger.info(f"  Infinite dataloader mode")
+        for enc_idx, dataloader in enumerate(encoder_datasets):
+            if dataloader is not None:
+                logger.info(f"  Encoder {enc_idx}: infinite dataloader")
+            else:
+                logger.info(f"  Encoder {enc_idx}: no dataloader")
+    else:
+        # For finite dataloader, create mixed dataloader from datasets
+        num_encoders = len(encoder_datasets)
+        mixed_dataloader = create_mixed_domains_dataloader(
+            encoder_datasets, num_encoders, BATCH_SIZE, shuffle=True
+        )
+        
+        logger.info(f"Mixed dataloader created with {len(mixed_dataloader)} batches")
+        print(f"Training shared decoder with PoE on mixed data ({len(mixed_dataloader)} batches)...")
+        
+        # Log training data distribution for Phase B
+        total_samples = sum(len(inputs) for inputs, outputs in encoder_datasets)
+        logger.info(f"Phase B training data summary:")
+        logger.info(f"  Total samples across all encoders: {total_samples}")
+        for enc_idx, (inputs, outputs) in enumerate(encoder_datasets):
+            logger.info(f"  Encoder {enc_idx}: {len(inputs)} samples")
     
     # Create optimizer for shared decoder only
     optimizer = Adam(model.multi_encoder.shared_decoder.parameters(), lr=LEARNING_RATE)
@@ -1266,12 +1544,26 @@ def train_phase_b_decoder(model, encoder_datasets, device, logger, wandb_logger,
     for epoch in range(phase_epochs):
         model.train()
         epoch_loss = 0.0
-        num_batches = len(mixed_dataloader)
+        # For infinite dataloader, we can't get the length, so use batches_per_epoch
+        try:
+            num_batches = len(mixed_dataloader)
+        except TypeError:
+            # Infinite dataloader doesn't have a defined length
+            num_batches = BATCHES_PER_EPOCH
         
         pbar = tqdm(mixed_dataloader, desc=f"Phase B Epoch {epoch+1}/{phase_epochs}")
         optimizer.zero_grad()
         
-        for batch_idx, (input_seq, target_seq, encoder_indices) in enumerate(pbar):
+        for batch_idx, batch in enumerate(pbar):
+            # Handle batch structure with keys
+            if len(batch) >= 3:
+                input_seq, target_seq, batch_keys = batch[:3]
+                # For infinite dataloader, we don't have encoder_indices, so we'll use a default
+                encoder_indices = torch.zeros(input_seq.size(0), dtype=torch.long, device=device)
+            else:
+                input_seq, target_seq = batch[:2]
+                batch_keys = None
+                encoder_indices = torch.zeros(input_seq.size(0), dtype=torch.long, device=device)
             input_seq = input_seq.to(device)
             target_seq = target_seq.to(device)
             encoder_indices = encoder_indices.to(device)
@@ -1427,6 +1719,33 @@ def train_phase_b_decoder(model, encoder_datasets, device, logger, wandb_logger,
     logger.info(f"PHASE B COMPLETE - Shared decoder training with PoE finished (final loss: {final_loss:.4f})")
     logger.info("=" * 60)
     
+    # Add comprehensive evaluation after each epoch for Phase B
+    if wandb_logger:
+        wandb_settings = settings.get_wandb_settings()
+        eval_log_interval = wandb_settings.get('eval_log_interval', 10)
+        
+        for epoch in range(phase_epochs):
+            if should_run_evaluation(epoch + 1, eval_log_interval, phase_epochs):
+                try:
+                    comprehensive_evaluation_after_epoch_specialist(
+                        model=model,
+                        dataloader=mixed_dataloader,
+                        device=device,
+                        epoch=epoch,
+                        run_dir=run_dir,
+                        wandb_logger=wandb_logger,
+                        training_keys=TRAINING_KEYS,
+                        is_multi_encoder=True,
+                        num_encoders=num_encoders,
+                        infinite_dataloader=is_infinite_dataloader,
+                        encoder_dataloaders=encoder_dataloaders,
+                        phase_name="B",
+                        encoder_idx=None  # PoE inference
+                    )
+                    print(f"[OK] Comprehensive evaluation completed for Phase B epoch {epoch+1}")
+                except Exception as e:
+                    logger.warning(f"Comprehensive evaluation failed for Phase B epoch {epoch+1}: {e}")
+    
     # Generate final comparison plot showing all encoder reconstructions vs PoE
     if wandb_logger:
         logger.info("Generating final Phase B encoder vs PoE comparison plot...")
@@ -1565,6 +1884,11 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
     
     N_EXAMPLES_PER_TASK = data_settings['n']
     
+    # Check for infinite dataloader setting
+    INFINITE_DATALOADER = training_settings.get('infinite_dataloader', False)
+    BATCHES_PER_EPOCH = training_settings.get('batches_per_epoch', 10)
+    BATCH_SIZE = training_settings.get('batch_size', 4)
+    
     print(f"Specialist training configuration:")
     print(f"- Number of encoders: {NUM_ENCODERS}")
     print(f"- Training keys: {TRAINING_KEYS}")
@@ -1573,6 +1897,9 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
     print(f"- Evaluation between phases: {evaluation_between_phases}")
     print(f"- Phase A epochs: {specialist_settings['phase_a']['epochs']}")
     print(f"- Phase B epochs: {specialist_settings['phase_b']['epochs']}")
+    print(f"- Infinite dataloader: {INFINITE_DATALOADER}")
+    if INFINITE_DATALOADER:
+        print(f"- Batches per epoch: {BATCHES_PER_EPOCH}")
     
     # Validate phases for new approach
     valid_phases = ['A', 'B']
@@ -1617,6 +1944,9 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
         TRAINING_KEYS = data_settings.get('training_keys', [data_settings.get('key', None)])
         NUM_ENCODERS = model_architecture.get('num_encoders', 1)
         N_EXAMPLES_PER_TASK = data_settings['n']
+        INFINITE_DATALOADER = training_settings.get('infinite_dataloader', False)
+        BATCHES_PER_EPOCH = training_settings.get('batches_per_epoch', 10)
+        BATCH_SIZE = training_settings.get('batch_size', 4)
         
         print(f"[ OK ] Loaded frozen config: {NUM_ENCODERS} encoders, decoder_hidden_dim={model_architecture.get('decoder_hidden_dim')}")
         
@@ -1660,15 +1990,81 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
     logger.info("Generating and splitting data for specialist training...")
     print("Generating and splitting data...")
     
-    dataset_splits, key_to_encoder_mapping, splitting_statistics = split_dataset_by_keys_for_multi_encoder(
-        TRAINING_KEYS, NUM_ENCODERS, N_EXAMPLES_PER_TASK, generate_and_process_tasks
-    )
+    if INFINITE_DATALOADER:
+        logger.info("INFINITE_DATALOADER = True")
+        print("INFINITE_DATALOADER = True")
+        
+        # Create infinite dataloaders for each encoder
+        tasks_dir = os.path.join(os.path.dirname(__file__), 're_arc', 're_arc', 'tasks')
+        encoder_dataloaders = []
+        key_to_encoder_mapping = {}
+        splitting_statistics = {'keys_per_encoder': {}}
+        
+        # Distribute keys across encoders
+        num_keys = len(TRAINING_KEYS)
+        keys_per_encoder = num_keys // NUM_ENCODERS
+        remaining_keys = num_keys % NUM_ENCODERS
+        
+        key_idx = 0
+        for enc_idx in range(NUM_ENCODERS):
+            # Calculate how many keys this encoder should get
+            keys_for_this_encoder = keys_per_encoder + (1 if enc_idx < remaining_keys else 0)
+            
+            # Assign keys to this encoder
+            encoder_keys = []
+            for _ in range(keys_for_this_encoder):
+                if key_idx < len(TRAINING_KEYS):
+                    key = TRAINING_KEYS[key_idx]
+                    encoder_keys.append(key)
+                    key_to_encoder_mapping.setdefault(enc_idx, []).append(key)
+                    key_idx += 1
+            
+            if encoder_keys:
+                dataloader = create_infinite_dataloader(
+                    encoder_keys, BATCH_SIZE, BATCHES_PER_EPOCH,
+                    seed=data_settings['training_seed'], data_dir=tasks_dir
+                )
+                encoder_dataloaders.append(dataloader)
+                splitting_statistics['keys_per_encoder'][enc_idx] = encoder_keys
+                logger.info(f"Encoder {enc_idx}: infinite loader for keys {encoder_keys}")
+                print(f"Encoder {enc_idx}: infinite loader for keys {encoder_keys}")
+            else:
+                encoder_dataloaders.append(None)
+                splitting_statistics['keys_per_encoder'][enc_idx] = []
+                logger.info(f"Encoder {enc_idx}: No keys assigned")
+                print(f"Encoder {enc_idx}: No keys assigned")
+        
+        # Store for later use
+        # For infinite dataloader, dataset_splits contains dataloaders, not (inputs, outputs) tuples
+        dataset_splits = encoder_dataloaders  # Reuse variable name for compatibility
+    else:
+        logger.info("INFINITE_DATALOADER = False")
+        print("INFINITE_DATALOADER = False")
+        
+        # Use existing dataset splitting logic
+        dataset_splits, key_to_encoder_mapping, splitting_statistics = split_dataset_by_keys_for_multi_encoder(
+            TRAINING_KEYS, NUM_ENCODERS, N_EXAMPLES_PER_TASK, generate_and_process_tasks
+        )
+        
+        # Create encoder_dataloaders for compatibility with comprehensive evaluation
+        encoder_dataloaders = []
+        for i, (enc_inputs, enc_outputs) in enumerate(dataset_splits):
+            if enc_inputs and enc_outputs:
+                dataloader = prepare_dataloader(enc_inputs, enc_outputs, BATCH_SIZE)
+                encoder_dataloaders.append(dataloader)
+            else:
+                encoder_dataloaders.append(None)
     
     # Log data splitting info
     logger.info(f"Data splitting complete:")
-    for encoder_idx, (inputs, outputs) in enumerate(dataset_splits):
-        encoder_keys = splitting_statistics['keys_per_encoder'][encoder_idx]
-        logger.info(f"  Encoder {encoder_idx}: {len(inputs)} samples from keys {encoder_keys}")
+    for encoder_idx in range(len(dataset_splits)):
+        if INFINITE_DATALOADER:
+            encoder_keys = splitting_statistics['keys_per_encoder'][encoder_idx]
+            logger.info(f"  Encoder {encoder_idx}: infinite loader for keys {encoder_keys}")
+        else:
+            inputs, outputs = dataset_splits[encoder_idx]
+            encoder_keys = splitting_statistics['keys_per_encoder'][encoder_idx]
+            logger.info(f"  Encoder {encoder_idx}: {len(inputs)} samples from keys {encoder_keys}")
     
     # Initialize model first so param_info is available
     logger.info("Initializing multi-encoder model...")
@@ -1677,10 +2073,15 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
     logger.info(f"Model initialized with {param_info['total_params']:,} parameters")
     
     # Collect **all** training sequences (needed for latent visualisation later)
-    all_inputs, all_outputs = [], []
-    for enc_inputs, enc_outputs in dataset_splits:
-        all_inputs.extend(enc_inputs)
-        all_outputs.extend(enc_outputs)
+    if not INFINITE_DATALOADER:
+        all_inputs, all_outputs = [], []
+        for enc_inputs, enc_outputs in dataset_splits:
+            all_inputs.extend(enc_inputs)
+            all_outputs.extend(enc_outputs)
+    else:
+        # For infinite dataloader, we can't pre-compute all sequences
+        # dataset_splits contains dataloaders, not (inputs, outputs) tuples
+        all_inputs = all_outputs = None
 
     results = {
         'specialist_training': True,
@@ -1690,13 +2091,63 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
             'splitting_statistics': splitting_statistics,
             'training_keys': TRAINING_KEYS,
             'num_encoders': NUM_ENCODERS,
-            'phases_planned': phases_to_run
+            'phases_planned': phases_to_run,
+            'infinite_dataloader': INFINITE_DATALOADER
         },
         'model_parameter_info': param_info,
-        # Flatten sequences to plain python lists for pickle safety
-        'input_sequences': [seq.tolist() if hasattr(seq, 'tolist') else seq for seq in all_inputs],
-        'output_sequences': [seq.tolist() if hasattr(seq, 'tolist') else seq for seq in all_outputs]
     }
+    
+    # Store training sequences for visualization
+    if not INFINITE_DATALOADER and all_inputs:
+        # Flatten sequences to plain python lists for pickle safety
+        results['input_sequences'] = [seq.tolist() if hasattr(seq, 'tolist') else seq for seq in all_inputs]
+        results['output_sequences'] = [seq.tolist() if hasattr(seq, 'tolist') else seq for seq in all_outputs]
+        
+        # Collect training latent data for visualization
+        results['training_latent_data'] = {}
+        for encoder_idx in range(NUM_ENCODERS):
+            if encoder_idx < len(dataset_splits):
+                enc_inputs, enc_outputs = dataset_splits[encoder_idx]
+                if enc_inputs and enc_outputs:
+                    dataloader_for_latents = prepare_dataloader(enc_inputs, enc_outputs, BATCH_SIZE)
+                    training_latent_data = collect_latent_data(
+                        model, dataloader_for_latents, device, 
+                        encoder_idx=encoder_idx, max_samples=len(enc_inputs), 
+                        data_type=f'training_encoder_{encoder_idx}'
+                    )
+                    results['training_latent_data'][f'encoder_{encoder_idx}'] = training_latent_data
+    else:
+        # For infinite dataloader, store sample sequences for evaluation
+        print("[WARNING] Infinite dataloader enabled - storing sample sequences for evaluation")
+        results['input_sequences'] = None
+        results['output_sequences'] = None
+        
+        # Generate sample sequences for evaluation (first few samples from each key)
+        sample_inputs = []
+        sample_outputs = []
+        sample_keys = []
+        
+        # Generate a few samples from each training key for evaluation
+        for task_key in TRAINING_KEYS:
+            try:
+                _, _, _, task_input_sequences, task_output_sequences = generate_and_process_tasks(task_key, min(5, N_EXAMPLES_PER_TASK))
+                sample_inputs.extend([seq.tolist() for seq in task_input_sequences])
+                sample_outputs.extend([seq.tolist() for seq in task_output_sequences])
+                sample_keys.extend([task_key] * len(task_input_sequences))
+            except Exception as e:
+                logger.error(f"Error generating sample data for task {task_key}: {e}")
+                continue
+        
+        if sample_inputs:
+            results['input_sequences'] = sample_inputs
+            results['output_sequences'] = sample_outputs
+            results['key_list'] = sample_keys
+            print(f"Saved {len(sample_inputs)} sample training sequences for evaluation")
+        else:
+            # Fallback: set empty sequences to force dataloader-based approach in plotting
+            results['input_sequences'] = None
+            results['output_sequences'] = None
+            results['key_list'] = None
     
     # Run phases
     phase_a_epochs = specialist_settings['phase_a']['epochs']
@@ -1707,9 +2158,17 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
             logger.info("STARTING PHASE A: ENCODER + INDEPENDENT DECODER PRE-TRAINING")
             logger.info("=" * 100)
             
-            phase_a_results = train_phase_a_pretraining(
-                model, dataset_splits, device, logger, wandb_logger, run_dir,phase_a_epochs
-            )
+            # Pass the correct data format based on infinite dataloader setting
+            if INFINITE_DATALOADER:
+                # For infinite dataloader, pass encoder_dataloaders (which contains dataloaders)
+                phase_a_results = train_phase_a_pretraining(
+                    model, encoder_dataloaders, device, logger, wandb_logger, run_dir, phase_a_epochs
+                )
+            else:
+                # For finite dataloader, pass dataset_splits (which contains (inputs, outputs) tuples)
+                phase_a_results = train_phase_a_pretraining(
+                    model, dataset_splits, device, logger, wandb_logger, run_dir, phase_a_epochs
+                )
             results['phase_a'] = phase_a_results
             results['phases_completed'].append('A')
             
@@ -1729,15 +2188,40 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
             results['phase_a']['poe_accuracies'] = [poe_accuracy]
             # Save results after each epoch
             save_results(results, run_dir)
+            
+            # Debug: Check what's in results
+            print(f"DEBUG: Results keys: {list(results.keys())}")
+            if 'input_sequences' in results:
+                print(f"DEBUG: input_sequences type: {type(results['input_sequences'])}, length: {len(results['input_sequences']) if results['input_sequences'] else 'None'}")
+            if 'output_sequences' in results:
+                print(f"DEBUG: output_sequences type: {type(results['output_sequences'])}, length: {len(results['output_sequences']) if results['output_sequences'] else 'None'}")
+            
+            # Verify results.pkl is being created
+            results_file = os.path.join(run_dir, 'results.pkl')
+            if os.path.exists(results_file):
+                print(f"DEBUG: results.pkl exists at {results_file}")
+                # Check file size
+                file_size = os.path.getsize(results_file)
+                print(f"DEBUG: results.pkl file size: {file_size} bytes")
+            else:
+                print(f"DEBUG: results.pkl NOT found at {results_file}")
         
         if 'B' in phases_to_run:
             logger.info("\n" + "=" * 100)
             logger.info("STARTING PHASE B: SHARED DECODER TRAINING WITH POE")
             logger.info("=" * 100)
             
-            phase_b_results = train_phase_b_decoder(
-                model, dataset_splits, device, logger, wandb_logger, run_dir,phase_b_epochs
-            )
+            # Pass the correct data format based on infinite dataloader setting
+            if INFINITE_DATALOADER:
+                # For infinite dataloader, pass encoder_dataloaders (which contains dataloaders)
+                phase_b_results = train_phase_b_decoder(
+                    model, encoder_dataloaders, device, logger, wandb_logger, run_dir, phase_b_epochs
+                )
+            else:
+                # For finite dataloader, pass dataset_splits (which contains (inputs, outputs) tuples)
+                phase_b_results = train_phase_b_decoder(
+                    model, dataset_splits, device, logger, wandb_logger, run_dir, phase_b_epochs
+                )
             results['phase_b'] = phase_b_results
             results['phases_completed'].append('B')
             
@@ -1771,6 +2255,23 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
             
             # Save results after each epoch
             save_results(results, run_dir)
+            
+            # Debug: Check what's in results
+            print(f"DEBUG: Results keys: {list(results.keys())}")
+            if 'input_sequences' in results:
+                print(f"DEBUG: input_sequences type: {type(results['input_sequences'])}, length: {len(results['input_sequences']) if results['input_sequences'] else 'None'}")
+            if 'output_sequences' in results:
+                print(f"DEBUG: output_sequences type: {type(results['output_sequences'])}, length: {len(results['output_sequences']) if results['output_sequences'] else 'None'}")
+            
+            # Verify results.pkl is being created
+            results_file = os.path.join(run_dir, 'results.pkl')
+            if os.path.exists(results_file):
+                print(f"DEBUG: results.pkl exists at {results_file}")
+                # Check file size
+                file_size = os.path.getsize(results_file)
+                print(f"DEBUG: results.pkl file size: {file_size} bytes")
+            else:
+                print(f"DEBUG: results.pkl NOT found at {results_file}")
     
     except Exception as e:
         logger.error(f"Training failed: {e}")

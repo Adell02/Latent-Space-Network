@@ -657,6 +657,8 @@ def get_optimized_z(lpn, input_seq, target_seq, num_steps=None, lr=None, context
     Returns an optimized latent z using either gradient-based, evolutionary, or Voronoi-inspired search,
     depending on the optimization method setting.
     
+    MEAN OPTIMIZATION: If num_steps=0, returns the mean of the posterior (no sampling).
+    
     Args:
         lpn: The model
         input_seq: Input sequence tensor
@@ -685,6 +687,39 @@ def get_optimized_z(lpn, input_seq, target_seq, num_steps=None, lr=None, context
     # Use provided parameters or fall back to context-appropriate defaults
     final_num_steps = num_steps if num_steps is not None else default_num_steps
     final_lr = lr if lr is not None else default_lr
+    
+    # MEAN OPTIMIZATION: If steps=0, return mean of posterior (no sampling)
+    if final_num_steps == 0:
+        print(f"    Mean optimization: num_steps=0, returning mean of posterior (no sampling)")
+        with torch.no_grad():
+            if hasattr(lpn, 'is_multi_encoder') and lpn.is_multi_encoder:
+                if encoder_idx is not None:
+                    # Use specific encoder
+                    mu, log_var, _ = lpn.multi_encoder.encoders[encoder_idx](input_seq, target_seq)
+                else:
+                    # Use PoE inference mode
+                    (shape_logits, grid_logits), mu, log_var, _ = lpn(input_seq, target_seq)
+                # Return mean directly (no sampling)
+                z = mu
+            else:
+                # For single encoder
+                mu, log_var, _ = lpn.encoder(input_seq, target_seq)
+                # Return mean directly (no sampling)
+                z = mu
+            
+            if return_trajectory:
+                # Create minimal trajectory for mean optimization
+                trajectory = {
+                    'z_vectors': [z.detach().clone()],
+                    'losses': [0.0],  # No optimization loss for mean
+                    'method': 'mean_optimization',
+                    'encoder_mu': mu.detach().clone(),
+                    'encoder_log_var': log_var.detach().clone(),
+                    'initial_z': z.detach().clone()
+                }
+                return z, 0.0, trajectory
+            else:
+                return z, 0.0
     
     if enabled:
         print(f"    Latent optimization ENABLED: method={optimization_method}, steps={final_num_steps}, lr={final_lr}")
@@ -808,7 +843,7 @@ def get_optimized_z_from_initial(lpn, input_seq, target_seq, initial_z, num_step
         else:
             return initial_z, None
 
-def optimize_task_latent(lpn, support_samples, task_key, num_steps=50, lr=0.1, encoder_idx=None, use_independent_decoder=False):
+def optimize_task_latent(lpn, support_samples, task_key, num_steps=None, lr=None, encoder_idx=None, use_independent_decoder=False):
     """
     Optimize ONE latent vector to explain ALL support samples for a given task.
     This is the key difference from per-sample optimization - it creates task-level clustering.
@@ -827,6 +862,15 @@ def optimize_task_latent(lpn, support_samples, task_key, num_steps=50, lr=0.1, e
         final_loss: Final reconstruction loss for all support samples
         trajectory: Optimization trajectory (optional)
     """
+    # Get settings from settings manager
+    latent_optimization = settings.get_latent_optimization()
+    
+    # Use settings if parameters are not provided
+    if num_steps is None:
+        num_steps = latent_optimization['training']['num_steps']
+    if lr is None:
+        lr = latent_optimization['training']['learning_rate']
+    
     if not support_samples:
         raise ValueError("No support samples provided for task optimization")
     
