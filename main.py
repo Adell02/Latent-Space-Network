@@ -96,10 +96,9 @@ def main_args():
     if not os.path.exists(run_dir):
         os.makedirs(run_dir, exist_ok=True)
     print(f"Run directory: {run_dir}")
-    
-    # Ensure run directory exists before initializing wandb
-    from utils.model_utils import create_run_directory
-    run_dir = create_run_directory(os.path.basename(run_dir))
+
+    # DON'T call create_run_directory again - use the existing run_dir
+    # run_dir = create_run_directory(args.file_name)  # ← REMOVE THIS LINE
 
     # Initialize wandb logging if enabled
     wandb_logger = None
@@ -136,7 +135,7 @@ def main_args():
                 except Exception as e:
                     print(f"[WARNING] Failed to log training start: {e}")
             
-            results, model = main_training(args.file_name)
+            results, model = main_training(args.file_name, run_dir=run_dir)
             print("Training complete. Results saved in the run directory.")
             
             # Log training completion metrics

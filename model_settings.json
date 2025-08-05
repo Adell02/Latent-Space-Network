@@ -1,7 +1,7 @@
 {
   "data_settings": {
       "training_keys": "all",
-      "n_max_keys": 2,
+      "n_max_keys": 10,
       "training_seed": 42,
       "eval_seed": 1,
       "n": 10,
@@ -24,7 +24,7 @@
       "_eval_keys_comment": "with 50 keys: key0 -> enc1, key1 -> enc2, key2 -> None, key3 -> enc0",
       "eval_n_samples": 2,
       "eval_n_queries": 2,
-      "eval_epoch": 1,
+      "eval_epoch": 30,
       "visualize_n_values": 1,
       "_comment_trajectory_decoder": "trajectory_decoder_type: 'shared' uses shared decoder for all reconstructions (good for PoE analysis), 'independent' uses each encoder's independent decoder (good for specialization analysis)",
       "trajectory_decoder_type": "shared"
@@ -37,7 +37,7 @@
       },
       "inference": {
           "enabled": true,
-          "num_steps": 5,
+          "num_steps": 50,
           "learning_rate": 0.1
       },
       "method": "gradient",
@@ -82,16 +82,16 @@
       }
   },
   "training_settings": {
-      "num_epochs": 1,
-      "batch_size": 4,
+      "num_epochs": 30,
+      "batch_size": 8,
       "gradient_accumulation_steps": 1,
       "learning_rate": 0.0004,
       "optimizer_weight_decay": 0.0,
-      "beta": 1e-4,
+      "beta": 0.001,
       "use_mixed_precision": true,
       "save_checkpoint_interval": 1,
       "infinite_dataloader": true,
-      "batches_per_epoch": 10,
+      "batches_per_epoch": 100,
       "return_task_keys": true,
       "cross_pair_loss": {
         "enabled": true,

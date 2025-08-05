@@ -387,7 +387,7 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler,
     return avg_loss, epoch_shape/total_batches, epoch_grid/total_batches,epoch_kl/total_batches, epoch_repulsion/total_batches, repulsion_lambda
 
 
-def main_training(file_store_name):
+def main_training(file_store_name, run_dir=None):  # ← ADD run_dir parameter
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
@@ -452,7 +452,11 @@ def main_training(file_store_name):
     NUM_ENCODERS = model_architecture.get('num_encoders', 1)
     is_multi_encoder = NUM_ENCODERS > 1
 
-    run_dir = create_run_directory(file_store_name)
+    # Use the run_dir passed from main.py
+    if run_dir is None:
+        # Fallback: create run directory only if not provided
+        run_dir = create_run_directory(file_store_name)
+    
     logger = setup_logging(run_dir)
     logger.info(f"Starting training for ARC problems {len(TRAINING_KEYS)} keys.")
     logger.info(f"Full settings dump: {json.dumps(settings.get_settings(), indent=2)}")
