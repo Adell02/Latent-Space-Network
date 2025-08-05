@@ -815,10 +815,14 @@ def generate_reconstruction_from_latent(z_vector, model, device, input_seq=None,
 
 
 
-def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_dir, device='cuda'):
+def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_dir, device='cuda', ood_enabled=False, ood_task_keys=None):
     """
     Create a comprehensive multi-encoder trajectory visualization with training samples in background.
     Shows input/target, trajectory in latent space with training background, and reconstructions.
+    
+    Args:
+        ood_enabled: Whether OOD sampling is enabled
+        ood_task_keys: List of OOD task keys used for this evaluation
     """
     # Configure matplotlib to prevent issues
     import matplotlib
@@ -844,8 +848,8 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
     extract_reconstruction_grid = safe_extract_reconstruction_grid
     
     print("Loading unified latent data (training + support + query + trajectory)...")
-    training_latent_data, training_tsne_2d, training_labels, training_colors, trajectory_tsne_2d, all_labels, all_tsne_2d = load_unified_latent_data_with_trajectory(
-        run_dir, model, device, trajectory_info
+    training_latent_data, training_tsne_2d, training_labels, training_colors, trajectory_tsne_2d, all_labels, all_tsne_2d, actual_evaluated_keys = load_unified_latent_data_with_trajectory(
+        run_dir, model, device, trajectory_info, ood_enabled=ood_enabled, ood_task_keys=ood_task_keys
     )
 
     # Create figure with GridSpec for complex multi-encoder layout
@@ -1026,31 +1030,37 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
                 if all_labels is not None:
                     print(f"DEBUG: Checking for support/query samples in {len(all_labels)} total labels")
                     print(f"DEBUG: First few all_labels: {all_labels[:5]}")
-                    print(f"DEBUG: Looking for key: '{evaluated_key}'")
+                    print(f"DEBUG: Looking for keys: {actual_evaluated_keys}")
                     print(f"DEBUG: all_tsne_2d available: {all_tsne_2d is not None}")
                     if all_tsne_2d is not None:
                         print(f"DEBUG: all_tsne_2d shape: {all_tsne_2d.shape}")
                     
-                    # Filter support samples for the evaluated key
+                    # ✅ FIX: Filter support samples for any of the actual evaluated keys
                     support_indices = []
                     for i, label in enumerate(all_labels):
-                        if 'support' in label and evaluated_key in label:
-                            support_indices.append(i)
+                        if 'support' in label:
+                            for key in actual_evaluated_keys:
+                                if key in label:
+                                    support_indices.append(i)
+                                    break
                     
-                    print(f"DEBUG: Found {len(support_indices)} support samples for key '{evaluated_key}'")
+                    print(f"DEBUG: Found {len(support_indices)} support samples for keys {actual_evaluated_keys}")
                     if support_indices and all_tsne_2d is not None:
                         x_coords = all_tsne_2d[support_indices, 0]
                         y_coords = all_tsne_2d[support_indices, 1]
                         ax_latent.scatter(x_coords, y_coords, color='blue', alpha=0.8, s=15, 
                                     marker='s', edgecolors='black', linewidth=1.0)
                     
-                    # Filter query samples for the evaluated key
+                    # ✅ FIX: Filter query samples for any of the actual evaluated keys
                     query_indices = []
                     for i, label in enumerate(all_labels):
-                        if 'query' in label and evaluated_key in label:
-                            query_indices.append(i)
+                        if 'query' in label:
+                            for key in actual_evaluated_keys:
+                                if key in label:
+                                    query_indices.append(i)
+                                    break
                     
-                    print(f"DEBUG: Found {len(query_indices)} query samples for key '{evaluated_key}'")
+                    print(f"DEBUG: Found {len(query_indices)} query samples for keys {actual_evaluated_keys}")
                     if query_indices and all_tsne_2d is not None:
                         x_coords = all_tsne_2d[query_indices, 0]
                         y_coords = all_tsne_2d[query_indices, 1]
@@ -1135,10 +1145,13 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
                                                markerfacecolor=encoder_colors[encoder], 
                                                markersize=8, label=f'Training Encoder {encoder}'))
             
-            # Add support and query samples to legend for the evaluated key only
+            # ✅ FIX: Add support and query samples to legend for the actual evaluated keys
             if all_labels is not None:
-                support_labels = [l for l in all_labels if 'support' in l and evaluated_key in l]
-                query_labels = [l for l in all_labels if 'query' in l and evaluated_key in l]
+                support_labels = []
+                query_labels = []
+                for key in actual_evaluated_keys:
+                    support_labels.extend([l for l in all_labels if 'support' in l and key in l])
+                    query_labels.extend([l for l in all_labels if 'query' in l and key in l])
                 
                 if support_labels:
                     legend_elements.append(plt.Line2D([0], [0], marker='s', color='w', 
@@ -1455,13 +1468,22 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
     decoder_type = eval_settings.get('trajectory_decoder_type', 'shared')
     decoder_display = "Independent Decoders" if decoder_type == "independent" else "Shared Decoder"
     
-    # Add data summary to title (filtered by evaluated key)
+    # ✅ FIX: Add data summary to title (filtered by actual evaluated keys)
     training_count = len([l for l in training_labels if 'training' in l]) if training_labels else 0
-    support_count = len([l for l in all_labels if 'support' in l and evaluated_key in l]) if all_labels else 0
-    query_count = len([l for l in all_labels if 'query' in l and evaluated_key in l]) if all_labels else 0
+    support_count = 0
+    query_count = 0
+    for key in actual_evaluated_keys:
+        support_count += len([l for l in all_labels if 'support' in l and key in l]) if all_labels else 0
+        query_count += len([l for l in all_labels if 'query' in l and key in l]) if all_labels else 0
     data_summary = f"Training: {training_count}, Support: {support_count}, Query: {query_count}"
     
-    plt.suptitle(f'Multi-Encoder Trajectory Analysis\nEVALUATION DATA - Trajectory Reconstructions: {decoder_display}\nData: {data_summary}', fontsize=16)
+    # ✅ FIX: Detect if OOD samples are being used and add indicator
+    ood_indicator = ""
+    if ood_enabled or any('ood_' in label for label in all_labels if label):
+        ood_indicator = " (OOD SAMPLES)"
+        print(f"DEBUG: OOD sampling enabled, adding OOD indicator to title: {ood_indicator}")
+    
+    plt.suptitle(f'Multi-Encoder Trajectory Analysis{ood_indicator}\nEVALUATION DATA - Trajectory Reconstructions: {decoder_display}\nData: {data_summary}', fontsize=16)
     
     try:
         plt.tight_layout()
@@ -1791,7 +1813,7 @@ def plot_query_error_maps_row(ax_query_error_maps, trajectory_info, model, num_e
     # Add overall title
     fig.text(0.5, 0.02, 'Query Error Maps (Target - Reconstruction)', ha='center', va='bottom', fontsize=12)
 
-def load_unified_latent_data_with_trajectory(run_dir, model, device, trajectory_info, eval_results=None, evaluated_key=None):
+def load_unified_latent_data_with_trajectory(run_dir, model, device, trajectory_info, eval_results=None, evaluated_key=None, ood_enabled=False, ood_task_keys=None):
     """
     Load ALL latent vectors (training + support + query + trajectory) and apply unified t-SNE.
     This ensures all points are plotted using the same t-SNE transformation for consistency.
@@ -1817,7 +1839,16 @@ def load_unified_latent_data_with_trajectory(run_dir, model, device, trajectory_
             if isinstance(trajectory_info[0], dict):
                 evaluated_key = trajectory_info[0].get('evaluated_key', '')
     
-    print(f"DEBUG: Evaluating key: {evaluated_key}")
+    # ✅ FIX: Use OOD task keys when OOD is enabled
+    actual_evaluated_keys = []
+    if ood_enabled and ood_task_keys:
+        actual_evaluated_keys = ood_task_keys
+        print(f"DEBUG: Using OOD task keys for evaluation: {actual_evaluated_keys}")
+    else:
+        actual_evaluated_keys = [evaluated_key] if evaluated_key else []
+        print(f"DEBUG: Using evaluation key: {evaluated_key}")
+    
+    print(f"DEBUG: Evaluating keys: {actual_evaluated_keys}")
     
     # ✅ FIX: Use stored optimized latents from training (REAL SAMPLES USED IN TRAINING!)
     if hasattr(model, 'epoch_optimized_latents') and model.epoch_optimized_latents:
@@ -1841,8 +1872,8 @@ def load_unified_latent_data_with_trajectory(run_dir, model, device, trajectory_
                 all_latents.append(latent)
                 all_labels.append(f"training_enc_{encoder_idx}_key_{key}")
                 
-                # Color based on whether this key matches the evaluated key
-                if key == evaluated_key:
+                # ✅ FIX: Color based on whether this key matches any of the actual evaluated keys
+                if key in actual_evaluated_keys:
                     all_colors.append(plt.cm.Set1(encoder_idx if encoder_idx is not None else 0))
                 else:
                     all_colors.append(plt.cm.tab10((encoder_idx if encoder_idx is not None else 0) % 10))
@@ -1962,6 +1993,22 @@ def load_unified_latent_data_with_trajectory(run_dir, model, device, trajectory_
             key_data = key_results[evaluated_key]
             print(f"DEBUG: Found data for evaluated key '{evaluated_key}'")
             
+            # ✅ FIX: Get the actual OOD task keys from the evaluation results
+            ood_task_keys = []
+            if 'raw_data' in key_data and 'ood_task_keys' in key_data['raw_data']:
+                ood_task_keys = key_data['raw_data']['ood_task_keys']
+                print(f"DEBUG: Using OOD task keys: {ood_task_keys}")
+            
+            # ✅ FIX: Use OOD task keys for labeling instead of evaluation key
+            if ood_task_keys:
+                support_label = f"support_ood_{ood_task_keys[0]}"  # Use first OOD task key
+                query_label = f"query_ood_{ood_task_keys[0]}"      # Use first OOD task key
+                print(f"DEBUG: Using OOD labels - support: {support_label}, query: {query_label}")
+            else:
+                support_label = f"support_{evaluated_key}"
+                query_label = f"query_{evaluated_key}"
+                print(f"DEBUG: Using evaluation key labels - support: {support_label}, query: {query_label}")
+            
             # Extract support and query latent data
             support_query_latents = []
             support_query_labels = []
@@ -2004,7 +2051,7 @@ def load_unified_latent_data_with_trajectory(run_dir, model, device, trajectory_
                             latent_numpy = np.array(latent_data).flatten()
                         
                         support_query_latents.append(latent_numpy)
-                        support_query_labels.append(f"support_{evaluated_key}")
+                        support_query_labels.append(support_label)
                         support_query_colors.append('blue')
                     
                     # Extract query latents (task optimization format)
@@ -2035,7 +2082,7 @@ def load_unified_latent_data_with_trajectory(run_dir, model, device, trajectory_
                             latent_numpy = np.array(latent_data).flatten()
                         
                         support_query_latents.append(latent_numpy)
-                        support_query_labels.append(f"query_{evaluated_key}")
+                        support_query_labels.append(query_label)
                         support_query_colors.append('red')
                 
                 # Process support samples (regular evaluation format)
@@ -2054,7 +2101,7 @@ def load_unified_latent_data_with_trajectory(run_dir, model, device, trajectory_
                             else:
                                 latent_numpy = latent.flatten()
                             support_query_latents.append(latent_numpy)
-                            support_query_labels.append(f"support_{evaluated_key}")
+                            support_query_labels.append(support_label)
                             support_query_colors.append('blue')
                     
                     # Extract individual encoder support latents
@@ -2070,7 +2117,7 @@ def load_unified_latent_data_with_trajectory(run_dir, model, device, trajectory_
                                 else:
                                     latent_numpy = latent.flatten()
                                 support_query_latents.append(latent_numpy)
-                                support_query_labels.append(f"support_{evaluated_key}")
+                                support_query_labels.append(support_label)
                                 support_query_colors.append('blue')
                 
                 # Process query samples
@@ -2089,7 +2136,7 @@ def load_unified_latent_data_with_trajectory(run_dir, model, device, trajectory_
                             else:
                                 latent_numpy = latent.flatten()
                             support_query_latents.append(latent_numpy)
-                            support_query_labels.append(f"query_{evaluated_key}")
+                            support_query_labels.append(query_label)
                             support_query_colors.append('red')
                     
                     # Extract individual encoder query latents
@@ -2105,7 +2152,7 @@ def load_unified_latent_data_with_trajectory(run_dir, model, device, trajectory_
                                 else:
                                     latent_numpy = latent.flatten()
                                 support_query_latents.append(latent_numpy)
-                                support_query_labels.append(f"query_{evaluated_key}")
+                                support_query_labels.append(query_label)
                                 support_query_colors.append('red')
             
             # Add support/query latents to the unified dataset
@@ -2304,7 +2351,7 @@ def load_unified_latent_data_with_trajectory(run_dir, model, device, trajectory_
         print(f"DEBUG: Normalized latents shape: {latents_normalized.shape}")
         print(f"DEBUG: Normalized latents min/max: {latents_normalized.min():.4f}/{latents_normalized.max():.4f}")
         
-        tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(all_latents)-1), n_iter=1000)
+        tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(all_latents)-1), max_iter=1000)
         tsne_2d = tsne.fit_transform(latents_normalized)
         
         print(f"DEBUG: t-SNE result shape: {tsne_2d.shape}")
@@ -2334,4 +2381,4 @@ def load_unified_latent_data_with_trajectory(run_dir, model, device, trajectory_
     print(f"  - Query samples: {len(query_indices)}")
     print(f"  - Trajectory points: {len(trajectory_indices)}")
     
-    return training_latents, training_tsne_2d, training_labels, training_colors, trajectory_tsne_2d, all_labels, tsne_2d
+    return training_latents, training_tsne_2d, training_labels, training_colors, trajectory_tsne_2d, all_labels, tsne_2d, actual_evaluated_keys

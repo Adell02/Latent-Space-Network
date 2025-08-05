@@ -22,7 +22,10 @@ evaluation_settings = settings.get_evaluation_settings()
 
 BASE_DIR = data_settings['run_base_dir']
 
+from utils.evaluation_utils import get_evaluation_keys_with_all_support
 DEFAULT_EVAL_KEYS = evaluation_settings['eval_keys']
+# Handle "all" evaluation keys similar to training keys
+DEFAULT_EVAL_KEYS = get_evaluation_keys_with_all_support(DEFAULT_EVAL_KEYS, evaluation_settings.get('n_max_eval_keys', 10))
 DEFAULT_EVAL_N_SAMPLES = evaluation_settings['eval_n_samples']
 DEFAULT_EVAL_N_QUERIES = evaluation_settings['eval_n_queries']
 DEFAULT_EVAL_EPOCH = evaluation_settings['eval_epoch']

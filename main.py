@@ -77,7 +77,10 @@ def main_args():
     BASE_DIR = data_settings['run_base_dir']
 
     # Use settings defaults or command line overrides
+    from utils.evaluation_utils import get_evaluation_keys_with_all_support
     DEFAULT_EVAL_KEYS = args.keys or evaluation_settings['eval_keys']
+    # Handle "all" evaluation keys similar to training keys
+    DEFAULT_EVAL_KEYS = get_evaluation_keys_with_all_support(DEFAULT_EVAL_KEYS, evaluation_settings.get('n_max_eval_keys', 10))
     DEFAULT_EVAL_N_SAMPLES = args.n_eval_samples or evaluation_settings['eval_n_samples']
     DEFAULT_EVAL_N_QUERIES = args.n_eval_queries or evaluation_settings['eval_n_queries']
     DEFAULT_EVAL_EPOCH = args.epoch or evaluation_settings['eval_epoch']

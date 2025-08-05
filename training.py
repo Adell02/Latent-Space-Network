@@ -8,6 +8,7 @@ import os
 from models.base_model import LatentProgramNetwork, compute_loss, gaussian_poe
 from utils.settings_manager import settings
 from re_arc.main import generate_and_process_tasks
+from utils.data_preparation import generate_per_key_ood_samples
 from utils.latent_functions import get_optimized_z
 from utils.data_preparation import split_dataset_by_keys_for_multi_encoder
 from utils.training_helpers import create_mixed_domains_dataloader, create_infinite_dataloader
@@ -594,17 +595,23 @@ def main_training(file_store_name, run_dir=None, notes=None):  # ← ADD notes p
                     'infinite_dataloader': True
                 }
             else:
+                # ✅ FIX: OOD sampling should ONLY be used during evaluation, not during training
+                # Multi-encoder training should always use generated samples from re-arc
+                logger.info("Multi-encoder training uses generated samples from re-arc (no OOD sampling during training)")
+                print("Multi-encoder training uses generated samples from re-arc (no OOD sampling during training)")
+                
+                # Generate data using the original method
                 all_input_sequences = []
                 all_output_sequences = []
                 for task_key in TRAINING_KEYS:
-                    try:
-                        _, _, _, task_input_sequences, task_output_sequences = generate_and_process_tasks(task_key, N_EXAMPLES_PER_TASK)
-                        all_input_sequences.extend(task_input_sequences)
-                        all_output_sequences.extend(task_output_sequences)
-                        logger.info(f"Generated {len(task_input_sequences)} pairs for task {task_key}")
-                    except Exception as e:
-                        logger.error(f"Error generating data for task {task_key}: {e}")
-                        continue
+                        try:
+                            _, _, _, task_input_sequences, task_output_sequences = generate_and_process_tasks(task_key, N_EXAMPLES_PER_TASK)
+                            all_input_sequences.extend(task_input_sequences)
+                            all_output_sequences.extend(task_output_sequences)
+                            logger.info(f"Generated {len(task_input_sequences)} pairs for task {task_key}")
+                        except Exception as e:
+                            logger.error(f"Error generating data for task {task_key}: {e}")
+                            continue
                 if not all_input_sequences:
                     logger.error("No data generated for mixed dataset. Exiting training.")
                     print("No data generated for mixed dataset. Exiting training.")
@@ -641,23 +648,29 @@ def main_training(file_store_name, run_dir=None, notes=None):  # ← ADD notes p
             results['output_sequences'] = None
             results['key_list'] = None
         else:
+            # ✅ FIX: OOD sampling should ONLY be used during evaluation, not during training
+            # Training should always use generated samples from re-arc
+            logger.info("Training uses generated samples from re-arc (no OOD sampling during training)")
+            print("Training uses generated samples from re-arc (no OOD sampling during training)")
+            
+            # Generate data using the original method
             all_input_sequences = []
             all_output_sequences = []
             logger.info(f"Generating data for tasks: {TRAINING_KEYS}")
             print(f"Generating data for tasks: {TRAINING_KEYS}")
             for task_key in TRAINING_KEYS:
-                logger.info(f"Processing task: {task_key} with {N_EXAMPLES_PER_TASK} examples")
-                print(f"Processing task: {task_key} with {N_EXAMPLES_PER_TASK} examples")
-                try:
-                    _, _, _, task_input_sequences, task_output_sequences = generate_and_process_tasks(task_key, N_EXAMPLES_PER_TASK)
-                    all_input_sequences.extend(task_input_sequences)
-                    all_output_sequences.extend(task_output_sequences)
-                    logger.info(f"Generated {len(task_input_sequences)} pairs for task {task_key}")
-                    print(f"Generated {len(task_input_sequences)} pairs for task {task_key}")
-                except Exception as e:
-                    logger.error(f"Error generating data for task {task_key}: {e}")
-                    print(f"Error generating data for task {task_key}: {e}")
-                    continue
+                    logger.info(f"Processing task: {task_key} with {N_EXAMPLES_PER_TASK} examples")
+                    print(f"Processing task: {task_key} with {N_EXAMPLES_PER_TASK} examples")
+                    try:
+                        _, _, _, task_input_sequences, task_output_sequences = generate_and_process_tasks(task_key, N_EXAMPLES_PER_TASK)
+                        all_input_sequences.extend(task_input_sequences)
+                        all_output_sequences.extend(task_output_sequences)
+                        logger.info(f"Generated {len(task_input_sequences)} pairs for task {task_key}")
+                        print(f"Generated {len(task_input_sequences)} pairs for task {task_key}")
+                    except Exception as e:
+                        logger.error(f"Error generating data for task {task_key}: {e}")
+                        print(f"Error generating data for task {task_key}: {e}")
+                        continue
             if not all_input_sequences:
                 logger.error("No data generated from any task. Exiting training.")
                 print("No data generated from any task. Exiting training.")
@@ -1381,7 +1394,8 @@ def comprehensive_evaluation_after_epoch(
                 import wandb
                 # Use consistent key for single panel with epoch as step
                 wandb_logger._safe_log({
-                    'training_latent_space': wandb.Image(plot_path)
+                    'training_latent_space': wandb.Image(plot_path),
+                    'epoch': epoch+1 if epoch is not None else None  # ✅ ADD: Explicit epoch field
                 }, step_hint=epoch+1)
                 print(f"  [OK] REAL training latent space plot uploaded to wandb")
             except Exception as e:
@@ -1475,7 +1489,8 @@ def comprehensive_evaluation_after_epoch(
                 import wandb
                 # Use consistent key for single panel with epoch as step
                 wandb_logger._safe_log({
-                    'encoder_training_latent_space': wandb.Image(encoder_plot_path)
+                    'encoder_training_latent_space': wandb.Image(encoder_plot_path),
+                    'epoch': epoch+1 if epoch is not None else None  # ✅ ADD: Explicit epoch field
                 }, step_hint=epoch+1)
                 print(f"  [OK] REAL encoder-specific training latent space plot uploaded to wandb")
             except Exception as e:
@@ -1489,6 +1504,11 @@ def comprehensive_evaluation_after_epoch(
     eval_results = None
     # Use evaluation keys from settings instead of hardcoded selection
     eval_keys = evaluation_settings.get('eval_keys', training_keys[:2] if len(training_keys) >= 2 else training_keys)
+    
+    # Handle "all" evaluation keys similar to training keys
+    from utils.evaluation_utils import get_evaluation_keys_with_all_support
+    eval_keys = get_evaluation_keys_with_all_support(eval_keys, evaluation_settings.get('n_max_eval_keys', 10))
+    
     n_samples = evaluation_settings.get('eval_n_samples', 2)
     n_queries = evaluation_settings.get('eval_n_queries', 10)
     eval_seed = data_settings.get('eval_seed', 42)
@@ -1498,6 +1518,24 @@ def comprehensive_evaluation_after_epoch(
     print(f"  Evaluation seed: {eval_seed}")
 
     try:
+        # Check if we already have per-key OOD samples cached
+        if not hasattr(model, '_cached_per_key_ood_samples'):
+            model._cached_per_key_ood_samples = {}
+        
+        # Check if out-of-distribution is enabled
+        out_of_distribution = evaluation_settings.get('out_of_distribution', False)
+        
+        if out_of_distribution:
+            print(f"  Using cached per-key out-of-distribution samples...")
+            # Generate per-key OOD samples once and cache them
+            if not model._cached_per_key_ood_samples:
+                model._cached_per_key_ood_samples = generate_per_key_ood_samples(
+                    eval_keys, n_samples, n_queries, seed=eval_seed
+                )
+                print(f"  [OK] Generated and cached per-key OOD samples for {len(eval_keys)} keys")
+            else:
+                print(f"  [OK] Using cached per-key OOD samples for {len(eval_keys)} keys")
+        
         eval_results = main_test(
             model=model,
             keys=eval_keys,
@@ -1520,9 +1558,19 @@ def comprehensive_evaluation_after_epoch(
 
         if eval_results and 'key_results' in eval_results:
             print("  [OK] Evaluation completed successfully")
+            
+            # ✅ FIX: Limit trajectory plots to n_max_trajectory_plots
+            n_max_trajectory_plots = evaluation_settings.get('n_max_trajectory_plots', 4)
+            trajectory_plot_count = 0
+            
             for key, key_results in eval_results['key_results'].items():
+                # ✅ ADD: Check if we've reached the maximum number of trajectory plots
+                if trajectory_plot_count >= n_max_trajectory_plots:
+                    print(f"  [INFO] Reached maximum trajectory plots ({n_max_trajectory_plots}), skipping remaining keys")
+                    break
+                    
                 if 'trajectory_info' in key_results and key_results['trajectory_info']:
-                    print(f"  Generating trajectory plot for key '{key}'...")
+                    print(f"  Generating trajectory plot for key '{key}' ({trajectory_plot_count + 1}/{n_max_trajectory_plots})...")
                     trajectory_info = key_results['trajectory_info']
 
                     # Handle trajectory_info structure - could be list or dict
@@ -1554,16 +1602,27 @@ def comprehensive_evaluation_after_epoch(
                         print(f"    DEBUG: losses length: {len(actual_trajectory['losses'])}")
 
                     try:
+                        # ✅ FIX: Get OOD settings and task keys for proper labeling
+                        ood_enabled = evaluation_settings.get('out_of_distribution', False)
+                        ood_task_keys = []
+                        if 'raw_data' in key_results and 'ood_task_keys' in key_results['raw_data']:
+                            ood_task_keys = key_results['raw_data']['ood_task_keys']
+                            print(f"    DEBUG: Using OOD task keys for trajectory plot: {ood_task_keys}")
+                        
+                        # Use first OOD task key for trajectory plot if available
+                        trajectory_key = ood_task_keys[0] if ood_task_keys else key
                         trajectory_plot_path = create_standalone_latent_space_plot(
                             trajectory_info=actual_trajectory,
                             model=model,
                             save_dir=run_dir,
                             epoch=epoch,
                             sample_idx=0,
-                            evaluated_key=key,
+                            evaluated_key=trajectory_key,  # Use OOD task key instead of evaluation key
                             device=device,
                             wandb_logger=wandb_logger,
-                            eval_results=eval_results
+                            eval_results=eval_results,
+                            ood_enabled=ood_enabled,
+                            ood_task_keys=ood_task_keys
                         )
                         if trajectory_plot_path and os.path.exists(trajectory_plot_path):
                             print(f"[OK] Trajectory plot saved: {trajectory_plot_path}")
@@ -1575,11 +1634,15 @@ def comprehensive_evaluation_after_epoch(
                     # ✅ ADD: Generate and upload main trajectory plot with reconstructions
                     try:
                         from LPN_reproduction.evaluate_trajectory import visualize_comprehensive_trajectory
+                        # ✅ FIX: Use OOD task key in filename if available
+                        reconstruction_key = ood_task_keys[0] if ood_task_keys else key
                         main_reconstruction_path = os.path.join(
-                            run_dir, "trajectory_plots", f"main_reconstruction_{key}_epoch_{epoch+1}.png"
+                            run_dir, "trajectory_plots", f"main_reconstruction_{reconstruction_key}_epoch_{epoch+1}.png"
                         )
+                        # ✅ FIX: Pass OOD information to trajectory visualization
                         visualize_comprehensive_trajectory(
-                            actual_trajectory, model, main_reconstruction_path, run_dir, device=device
+                            actual_trajectory, model, main_reconstruction_path, run_dir, device=device,
+                            ood_enabled=ood_enabled, ood_task_keys=ood_task_keys
                         )
                         print(f"[OK] Main trajectory plot with reconstructions saved: {main_reconstruction_path}")
                         
@@ -1596,6 +1659,9 @@ def comprehensive_evaluation_after_epoch(
                                 print(f"[WARNING] Could not upload main trajectory plot to wandb: {e}")
                     except Exception as e:
                         print(f"[WARNING] Main trajectory plot generation failed for key {key}: {e}")
+                    
+                    # ✅ ADD: Increment trajectory plot counter
+                    trajectory_plot_count += 1
                 else:
                     print(f"    [WARNING] Key '{key}' not found in trajectory_info")
         else:
@@ -1705,7 +1771,8 @@ def comprehensive_evaluation_after_epoch(
                             import wandb
                             # Use consistent key for single panel with epoch as step
                             wandb_logger._safe_log({
-                                'evaluation_latent_space': wandb.Image(plot_path)
+                                'evaluation_latent_space': wandb.Image(plot_path),
+                                'epoch': epoch+1 if epoch is not None else None  # ✅ ADD: Explicit epoch field
                             }, step_hint=epoch+1)
                             print(f"  [ OK ] Basic evaluation latent space plot uploaded to wandb")
                         except Exception as e:

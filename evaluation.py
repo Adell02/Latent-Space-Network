@@ -8,6 +8,9 @@ import numpy as np
 from utils.model_utils import set_seed, prepare_dataloader, collect_latent_data
 from torch.utils.data import TensorDataset, DataLoader
 from re_arc.main import generate_and_process_tasks
+from utils.data_preparation import load_and_process_original_arc_evaluation_tasks, get_available_evaluation_tasks, load_original_arc_evaluation_task, transform_grid_to_sequence
+import random
+
 from utils.settings_manager import settings
 from utils.latent_functions import get_optimized_z, get_optimized_z_from_initial, optimize_task_latent, optimize_latent_z
 from models.base_model import compute_loss
@@ -679,14 +682,45 @@ def main_test(model, keys, run_dir, n_samples, n_queries, seed, device='cuda',
         print("-" * 50)
         
         try:
-            # Generate key-specific support samples
-            print(f"  Generating {n_samples} support samples and {n_queries} query samples for key '{key}'...")
-            all_needed = n_samples + n_queries
-            _, _, _, all_input_sequences, all_output_sequences = generate_and_process_tasks(key, all_needed)
-            input_samples_sequences = all_input_sequences[:n_samples]
-            output_samples_sequences = all_output_sequences[:n_samples]
-            input_queries_sequences = all_input_sequences[n_samples:]
-            output_queries_sequences = all_output_sequences[n_samples:]
+            # Check if out-of-distribution sampling is enabled
+            eval_settings = settings.get_evaluation_settings()
+            out_of_distribution = eval_settings.get('out_of_distribution', False)
+            
+            if out_of_distribution:
+                print(f"  Using per-key out-of-distribution samples...")
+                
+                # Generate per-key OOD samples once for all keys
+                from utils.data_preparation import generate_per_key_ood_samples
+                per_key_ood_samples = generate_per_key_ood_samples(
+                    keys, n_samples, n_queries, seed=seed
+                )
+                
+                if not per_key_ood_samples:
+                    print(f"  [WARNING] No per-key OOD samples generated, falling back to generated samples")
+                    out_of_distribution = False
+                else:
+                    # Use pre-generated per-key OOD samples
+                    key_ood_data = per_key_ood_samples[key]
+                    input_samples_sequences = key_ood_data['support']['input_sequences']
+                    output_samples_sequences = key_ood_data['support']['output_sequences']
+                    input_queries_sequences = key_ood_data['query']['input_sequences']
+                    output_queries_sequences = key_ood_data['query']['output_sequences']
+                    
+                    # ✅ ADD: Store the actual OOD task keys used
+                    ood_task_keys = key_ood_data.get('ood_task_keys', [])  # We need to add this to the data structure
+                    
+                    print(f"  Using {len(input_samples_sequences)} support and {len(input_queries_sequences)} query OOD samples for key '{key}'")
+                    print(f"  OOD samples from tasks: {ood_task_keys}")
+            else:
+                # Fall back to generated samples
+                print(f"  Generating {n_samples} support samples and {n_queries} query samples for key '{key}'...")
+                all_needed = n_samples + n_queries
+                _, _, _, all_input_sequences, all_output_sequences = generate_and_process_tasks(key, all_needed)
+                
+                input_samples_sequences = all_input_sequences[:n_samples]
+                output_samples_sequences = all_output_sequences[:n_samples]
+                input_queries_sequences = all_input_sequences[n_samples:]
+                output_queries_sequences = all_output_sequences[n_samples:]
             
             if not input_samples_sequences or not input_queries_sequences:
                 print(f"  [ERROR] Failed to generate data for key '{key}' - skipping")
@@ -738,7 +772,9 @@ def main_test(model, keys, run_dir, n_samples, n_queries, seed, device='cuda',
                     'input_samples_sequences': input_samples_sequences,
                     'output_samples_sequences': output_samples_sequences,
                     'input_queries_sequences': input_queries_sequences,
-                    'output_queries_sequences': output_queries_sequences
+                    'output_queries_sequences': output_queries_sequences,
+                    # ✅ ADD: Store the actual OOD task keys used
+                    'ood_task_keys': ood_task_keys
                 }
             }
             

@@ -432,6 +432,9 @@ def run_single_experiment(run_number: int, config_name: str, config: Dict[str, A
             eval_n_queries = config.get('evaluation_settings', {}).get('eval_n_queries', 100)
             eval_seed = config.get('data_settings', {}).get('eval_seed', 1)
             
+            from utils.evaluation_utils import get_evaluation_keys_with_all_support
+            # Handle "all" evaluation keys similar to training keys
+            eval_keys = get_evaluation_keys_with_all_support(eval_keys, evaluation_settings.get('n_max_eval_keys', 10))
             eval_results = main_test(model, eval_keys, run_dir, eval_n_samples, 
                                    eval_n_queries, eval_seed, device)
             

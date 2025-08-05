@@ -221,7 +221,8 @@ def comprehensive_evaluation_after_epoch_specialist(
             try:
                 import wandb
                 wandb_logger._safe_log({
-                    f'phase_{phase_name.lower()}_latent_space': wandb.Image(plot_path)
+                    f'phase_{phase_name.lower()}_latent_space': wandb.Image(plot_path),
+                    'epoch': epoch+1 if epoch is not None else None  # ✅ ADD: Explicit epoch field
                 }, step_hint=epoch+1)
                 print(f"  [OK] Phase {phase_name} training latent space plot uploaded to wandb")
             except Exception as e:
@@ -261,6 +262,13 @@ def comprehensive_evaluation_after_epoch_specialist(
             for key, key_results in eval_results['key_results'].items():
                 if 'trajectory_info' in key_results and key_results['trajectory_info']:
                     try:
+                        # ✅ FIX: Get OOD settings and pass them to the function
+                        eval_settings = settings.get_evaluation_settings()
+                        ood_enabled = eval_settings.get('out_of_distribution', False)
+                        ood_task_keys = []
+                        if ood_enabled and 'raw_data' in key_results:
+                            ood_task_keys = key_results['raw_data'].get('ood_task_keys', [])
+                        
                         trajectory_plot_path = create_standalone_latent_space_plot(
                             trajectory_info=key_results['trajectory_info'][0],
                             model=model,
@@ -270,7 +278,9 @@ def comprehensive_evaluation_after_epoch_specialist(
                             evaluated_key=key,
                             device=device,
                             wandb_logger=wandb_logger,
-                            eval_results=eval_results
+                            eval_results=eval_results,
+                            ood_enabled=ood_enabled,
+                            ood_task_keys=ood_task_keys
                         )
                         if trajectory_plot_path:
                             print(f"[OK] Trajectory plot saved: {trajectory_plot_path}")
@@ -525,6 +535,7 @@ def generate_latent_histograms(model, dataloader, device, encoder_idx, epoch, wa
                 f"phase_a_latents/encoder_{encoder_idx}_mu_std": mu_std,
                 f"phase_a_latents/encoder_{encoder_idx}_logvar_mean": logvar_mean,
                 f"phase_a_latents/encoder_{encoder_idx}_logvar_std": logvar_std,
+                'epoch': epoch+1 if epoch is not None else None  # ✅ ADD: Explicit epoch field
             }, step_hint=global_step)
             print(f"[ OK ] Logged latent histograms for Encoder {encoder_idx} at epoch {epoch}")
         except Exception as e:
@@ -764,7 +775,8 @@ def _create_comprehensive_analysis_plot(model, data_source, device, data_type, n
     if wandb_logger:
         try:
             wandb_logger._safe_log({
-                f'comprehensive_analysis_{data_type}': wandb.Image(plot_path)
+                f'comprehensive_analysis_{data_type}': wandb.Image(plot_path),
+                'epoch': global_step if global_step is not None else None  # ✅ ADD: Explicit epoch field (using global_step as epoch)
             }, step_hint=global_step)
         except Exception as e:
             print(f"[ WARNING ] Could not log comprehensive analysis plot to wandb: {e}")
@@ -858,7 +870,8 @@ def _create_accuracy_matrix(model, eval_keys, num_encoders, device, wandb_logger
             wandb_logger._safe_log({
                 "phase_b_final/accuracy_matrix": wandb.Image(temp_plot_path),
                 "phase_b_final/matrix_shape": f"{num_encoders + 1}x{len(eval_keys)}",
-                "phase_b_final/eval_keys": eval_keys
+                "phase_b_final/eval_keys": eval_keys,
+                'epoch': global_step if global_step is not None else None  # ✅ ADD: Explicit epoch field (using global_step as epoch)
             }, step_hint=global_step)
             print("[ OK ] Logged accuracy matrix")
         except Exception as e:
@@ -1306,7 +1319,8 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                         import os
                         try:
                             wandb_logger._safe_log({
-                                f"phase_a_reconstruction/{wandb_key}": wandb.Image(plot_path)
+                                f"phase_a_reconstruction/{wandb_key}": wandb.Image(plot_path),
+                                'epoch': global_step if global_step is not None else None  # ✅ ADD: Explicit epoch field (using global_step as epoch)
                             }, step_hint=global_step)
                             logger.info(f"[ OK ] Logged Phase A reconstruction for Encoder {encoder_idx} at step {global_step}")
                         except Exception as wandb_error:
@@ -1404,7 +1418,8 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                     final_phase_a_step = (num_encoders - 1) * phase_epochs + phase_epochs
                     wandb_logger._safe_log({
                         "phase_a/encoder_losses_summary": wandb.Image(phase_a_plot_path),
-                        "phase_a/completed": True
+                        "phase_a/completed": True,
+                        'epoch': final_phase_a_step if final_phase_a_step is not None else None  # ✅ ADD: Explicit epoch field
                     }, step_hint=final_phase_a_step)
                     logger.info("[ OK ] Phase A summary plot logged to WandB")
                 except Exception as wandb_error:
@@ -1784,7 +1799,8 @@ def train_phase_b_decoder(model, encoder_datasets, device, logger, wandb_logger,
                 final_phase_b_step = base_global_step + phase_epochs
                 wandb_logger._safe_log({
                     "phase_b/decoder_loss_summary": wandb.Image(phase_b_plot_path),
-                    "phase_b/completed": True
+                    "phase_b/completed": True,
+                    'epoch': final_phase_b_step if final_phase_b_step is not None else None  # ✅ ADD: Explicit epoch field
                 }, step_hint=final_phase_b_step)
                 logger.info("[ OK ] Phase B summary plot logged to WandB")
             except Exception as wandb_error:

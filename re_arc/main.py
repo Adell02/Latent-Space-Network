@@ -4,6 +4,7 @@ import os
 import json
 import numpy as np
 import random
+from typing import List, Tuple, Dict, Any
 
 from random import seed as set_seed
 
@@ -15,7 +16,7 @@ from re_arc.utils import *
 from re_arc import generators
 from re_arc import verifiers
 
-from utils.data_preparation import transform_grid_to_sequence
+from utils.grid_utils import transform_grid_to_sequence
 
 def get_generators() -> dict:
     """
@@ -308,3 +309,5 @@ def load_generated_arc_data(key, n_examples):
         output_sequences.append(output_seq)
 
     return np.array(input_sequences), np.array(output_sequences)
+
+

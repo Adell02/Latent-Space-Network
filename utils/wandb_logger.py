@@ -255,7 +255,10 @@ class WandbLogger:
             plot_path = os.path.join(run_dir, filename)
             if os.path.exists(plot_path):
                 try:
-                    self._safe_log({wandb_key: wandb.Image(plot_path)}, step_hint=step_hint)
+                    self._safe_log({
+                        wandb_key: wandb.Image(plot_path),
+                        'epoch': epoch if epoch is not None else None  # ✅ ADD: Explicit epoch field
+                    }, step_hint=step_hint)
                     print(f"  [OK] Uploaded {filename}")
                     uploaded_count += 1
                 except Exception as e:
@@ -272,7 +275,10 @@ class WandbLogger:
                 try:
                     # Use consistent key for single panel visualization
                     wandb_key = 'trajectory_reconstruction'
-                    self._safe_log({wandb_key: wandb.Image(traj_plot)}, step_hint=step_hint)
+                    self._safe_log({
+                        wandb_key: wandb.Image(traj_plot),
+                        'epoch': epoch if epoch is not None else None  # ✅ ADD: Explicit epoch field
+                    }, step_hint=step_hint)
                     print(f"  [OK] Uploaded {os.path.basename(traj_plot)}")
                     uploaded_count += 1
                 except Exception as e:
@@ -306,7 +312,10 @@ class WandbLogger:
                     # Fallback for other plot types
                     wandb_key = f'trajectory_plots_{plot_key}'
                 
-                self._safe_log({wandb_key: wandb.Image(latest_path)}, step_hint=step_hint)
+                self._safe_log({
+                    wandb_key: wandb.Image(latest_path),
+                    'epoch': epoch if epoch is not None else None  # ✅ ADD: Explicit epoch field
+                }, step_hint=step_hint)
                 print(f"  [OK] Uploaded {os.path.basename(latest_path)} (latest epoch {latest_epoch})")
                 uploaded_count += 1
             except Exception as e:
@@ -321,7 +330,10 @@ class WandbLogger:
                     try:
                         plot_name = os.path.basename(plot_path)
                         wandb_key = 'latent_space_evaluation'
-                        self._safe_log({wandb_key: wandb.Image(plot_path)}, step_hint=step_hint)
+                        self._safe_log({
+                            wandb_key: wandb.Image(plot_path),
+                            'epoch': epoch if epoch is not None else None  # ✅ ADD: Explicit epoch field
+                        }, step_hint=step_hint)
                         print(f"  [OK] Uploaded evaluation latent space plot: {plot_name}")
                         uploaded_count += 1
                     except Exception as e:
