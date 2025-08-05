@@ -262,9 +262,9 @@ def comprehensive_evaluation_after_epoch_specialist(
             for key, key_results in eval_results['key_results'].items():
                 if 'trajectory_info' in key_results and key_results['trajectory_info']:
                     try:
-                        # ✅ FIX: Get OOD settings and pass them to the function
-                        eval_settings = settings.get_evaluation_settings()
-                        ood_enabled = eval_settings.get('out_of_distribution', False)
+                        # Get OOD settings and pass them to the function
+                        eval_data_settings = settings.get_evaluation_data_settings()
+                        ood_enabled = eval_data_settings.get('use_ood_for_evaluation', True)
                         ood_task_keys = []
                         if ood_enabled and 'raw_data' in key_results:
                             ood_task_keys = key_results['raw_data'].get('ood_task_keys', [])

@@ -8,11 +8,32 @@
       "run_base_dir": "runs_re_arc",
       "split_across_encoders": false
   },
+  "training_settings": {
+      "data_source": "synthetic",
+      "use_ood_for_training": false,
+      "num_epochs": 1,
+      "batch_size": 4,
+      "gradient_accumulation_steps": 1,
+      "learning_rate": 0.0004,
+      "optimizer_weight_decay": 0.0,
+      "beta": 0.0001,
+      "use_mixed_precision": true,
+      "save_checkpoint_interval": 1,
+      "infinite_dataloader": true,
+      "batches_per_epoch": 10,
+      "return_task_keys": true,
+      "cross_pair_loss": {
+        "enabled": true,
+        "num_pairs": 10,
+        "description": "Cross-pair reconstruction loss for generalization"
+      }
+  },
   "evaluation_settings": {
+      "data_source": "ood_original_arc",
+      "use_ood_for_evaluation": true,
       "eval_keys": "all",
       "n_max_eval_keys": 10,
       "n_max_trajectory_plots": 4,
-      "out_of_distribution":true,
       "other_eval_keys": [
         "00d62c1b",
         "1cf80156",
@@ -77,24 +98,6 @@
           "restart_unused_codes": true,
           "restart_threshold": 0.5,
           "split_batch_size": null
-      }
-  },
-  "training_settings": {
-      "num_epochs": 1,
-      "batch_size": 4,
-      "gradient_accumulation_steps": 1,
-      "learning_rate": 0.0004,
-      "optimizer_weight_decay": 0.0,
-      "beta": 0.001,
-      "use_mixed_precision": true,
-      "save_checkpoint_interval": 1,
-      "infinite_dataloader": true,
-      "batches_per_epoch": 10,
-      "return_task_keys": true,
-      "cross_pair_loss": {
-        "enabled": true,
-        "num_pairs": 10,
-        "description": "Cross-pair reconstruction loss for generalization"
       }
   },
   "repulsion_loss_settings": {

@@ -940,7 +940,7 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
     
     # Get trajectory data early
     z_vectors = trajectory_info['z_vectors']
-    losses = trajectory_info['losses']
+    losses = trajectory_info.get('losses', [])  # ✅ FIX: Get losses from trajectory_info
     
     # Plot trajectory in latent space using precomputed t-SNE coordinates
     if z_vectors is not None and len(z_vectors) >= 2:
@@ -2000,7 +2000,7 @@ def load_unified_latent_data_with_trajectory(run_dir, model, device, trajectory_
                 print(f"DEBUG: Using OOD task keys: {ood_task_keys}")
             
             # ✅ FIX: Use OOD task keys for labeling instead of evaluation key
-            if ood_task_keys:
+            if ood_task_keys and len(ood_task_keys) > 0 and ood_enabled:
                 support_label = f"support_ood_{ood_task_keys[0]}"  # Use first OOD task key
                 query_label = f"query_ood_{ood_task_keys[0]}"      # Use first OOD task key
                 print(f"DEBUG: Using OOD labels - support: {support_label}, query: {query_label}")
@@ -2171,24 +2171,19 @@ def load_unified_latent_data_with_trajectory(run_dir, model, device, trajectory_
         import traceback
         traceback.print_exc()
     
-    # Add trajectory points to unified dataset (limit to 3 points: initial, mid, final)
+    # Add trajectory points to unified dataset (show all points, no limiting)
     print("Adding trajectory latent vectors...")
     z_vectors = trajectory_info.get('z_vectors', [])
+    losses = trajectory_info.get('losses', [])  # ✅ FIX: Get losses from trajectory_info
+    
     if z_vectors:
-        print(f"DEBUG: Processing {len(z_vectors)} trajectory vectors, limiting to 3 points")
+        print(f"DEBUG: Processing {len(z_vectors)} trajectory vectors, showing all points")
         
-        # Limit to 3 points: initial, mid, final
-        if len(z_vectors) >= 3:
-            # Take first, middle, and last points
-            indices = [0, len(z_vectors) // 2, len(z_vectors) - 1]
-            labels = ['initial', 'mid', 'final']
-        else:
-            # If less than 3 points, use all available
-            indices = list(range(len(z_vectors)))
-            labels = [f'step_{i}' for i in indices]
+        # ✅ FIX: Show all trajectory points without limiting
+        labels = [f'step{i}' for i in range(len(z_vectors))]
+        print(f"DEBUG: Using all {len(z_vectors)} trajectory points")
         
-        for i, (idx, label) in enumerate(zip(indices, labels)):
-            z_vec = z_vectors[idx]
+        for i, (label, z_vec) in enumerate(zip(labels, z_vectors)):
             # Handle both tensor and numpy array cases
             if hasattr(z_vec, 'cpu'):
                 # Tensor case
@@ -2199,7 +2194,7 @@ def load_unified_latent_data_with_trajectory(run_dir, model, device, trajectory_
             all_latents.append(z_numpy)
             all_labels.append(f"trajectory_{label}")
             all_colors.append('red')  # Red for trajectory points
-        print(f"[ OK ] Added {len(indices)} trajectory points: {labels}")
+        print(f"[ OK ] Added {len(labels)} trajectory points: {labels}")
     
     # Convert to numpy arrays - ensure all vectors have the same shape and are numeric
     print(f"DEBUG: Processing {len(all_latents)} latent vectors...")

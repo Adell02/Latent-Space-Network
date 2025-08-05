@@ -1522,19 +1522,21 @@ def comprehensive_evaluation_after_epoch(
         if not hasattr(model, '_cached_per_key_ood_samples'):
             model._cached_per_key_ood_samples = {}
         
-        # Check if out-of-distribution is enabled
-        out_of_distribution = evaluation_settings.get('out_of_distribution', False)
+        # Check if OOD evaluation is enabled
+        eval_data_settings = settings.get_evaluation_data_settings()
+        use_ood_for_evaluation = eval_data_settings.get('use_ood_for_evaluation', True)
         
-        if out_of_distribution:
-            print(f"  Using cached per-key out-of-distribution samples...")
-            # Generate per-key OOD samples once and cache them
-            if not model._cached_per_key_ood_samples:
-                model._cached_per_key_ood_samples = generate_per_key_ood_samples(
+        if use_ood_for_evaluation:
+            print(f"  Using OOD evaluation data from original ARC tasks...")
+            # Generate OOD evaluation dataset using original ARC tasks
+            from utils.data_preparation import generate_ood_evaluation_dataset
+            if not hasattr(model, '_cached_ood_evaluation_data'):
+                model._cached_ood_evaluation_data = generate_ood_evaluation_dataset(
                     eval_keys, n_samples, n_queries, seed=eval_seed
                 )
-                print(f"  [OK] Generated and cached per-key OOD samples for {len(eval_keys)} keys")
+                print(f"  [OK] Generated and cached OOD evaluation data for {len(eval_keys)} keys")
             else:
-                print(f"  [OK] Using cached per-key OOD samples for {len(eval_keys)} keys")
+                print(f"  [OK] Using cached OOD evaluation data for {len(eval_keys)} keys")
         
         eval_results = main_test(
             model=model,
@@ -1601,16 +1603,16 @@ def comprehensive_evaluation_after_epoch(
                     if 'losses' in actual_trajectory:
                         print(f"    DEBUG: losses length: {len(actual_trajectory['losses'])}")
 
+                    # Get OOD settings and task keys for proper labeling (moved outside try blocks)
+                    ood_enabled = eval_data_settings.get('use_ood_for_evaluation', True)
+                    ood_task_keys = []
+                    if 'raw_data' in key_results and 'ood_task_keys' in key_results['raw_data']:
+                        ood_task_keys = key_results['raw_data']['ood_task_keys']
+                        print(f"    DEBUG: Using OOD task keys for trajectory plot: {ood_task_keys}")
+                    
                     try:
-                        # ✅ FIX: Get OOD settings and task keys for proper labeling
-                        ood_enabled = evaluation_settings.get('out_of_distribution', False)
-                        ood_task_keys = []
-                        if 'raw_data' in key_results and 'ood_task_keys' in key_results['raw_data']:
-                            ood_task_keys = key_results['raw_data']['ood_task_keys']
-                            print(f"    DEBUG: Using OOD task keys for trajectory plot: {ood_task_keys}")
-                        
                         # Use first OOD task key for trajectory plot if available
-                        trajectory_key = ood_task_keys[0] if ood_task_keys else key
+                        trajectory_key = ood_task_keys[0] if ood_task_keys and len(ood_task_keys) > 0 else key
                         trajectory_plot_path = create_standalone_latent_space_plot(
                             trajectory_info=actual_trajectory,
                             model=model,
@@ -1635,7 +1637,7 @@ def comprehensive_evaluation_after_epoch(
                     try:
                         from LPN_reproduction.evaluate_trajectory import visualize_comprehensive_trajectory
                         # ✅ FIX: Use OOD task key in filename if available
-                        reconstruction_key = ood_task_keys[0] if ood_task_keys else key
+                        reconstruction_key = ood_task_keys[0] if ood_task_keys and len(ood_task_keys) > 0 else key
                         main_reconstruction_path = os.path.join(
                             run_dir, "trajectory_plots", f"main_reconstruction_{reconstruction_key}_epoch_{epoch+1}.png"
                         )

@@ -939,8 +939,10 @@ def plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir=None, e
                 print(f"    Sample {sample_idx + 1}: Creating comprehensive visualization...")
                 
                 # Use the enhanced evaluate_trajectory function
+                # ✅ FIX: Pass OOD parameters (default to False/None for regular evaluation)
                 visualize_comprehensive_trajectory(
-                    trajectory_info, model, save_path, save_dir, device=device
+                    trajectory_info, model, save_path, save_dir, device=device,
+                    ood_enabled=False, ood_task_keys=None
                 )
                 
                 print(f"    [ OK ] Saved: {save_path}")
@@ -2590,7 +2592,7 @@ def plot_evaluation_latent_space_by_key_and_encoder(eval_results, save_dir, epoc
                             all_latents.append(latent_array)
                             
                             # ✅ FIX: Use OOD task key if available, otherwise use evaluation key
-                            if ood_task_keys:
+                            if ood_task_keys and len(ood_task_keys) > 0:
                                 actual_key = ood_task_keys[0]  # Use first OOD task key for query
                             else:
                                 actual_key = key
@@ -2686,7 +2688,7 @@ def plot_evaluation_latent_space_by_key_and_encoder(eval_results, save_dir, epoc
     for key, key_data in eval_results['key_results'].items():
         if 'raw_data' in key_data and 'ood_task_keys' in key_data['raw_data']:
             ood_task_keys = key_data['raw_data']['ood_task_keys']
-            if ood_task_keys:
+            if ood_task_keys and len(ood_task_keys) > 0:
                 ood_indicator = " (OOD SAMPLES)"
                 break
     

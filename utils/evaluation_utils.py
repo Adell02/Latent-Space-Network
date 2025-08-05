@@ -136,8 +136,16 @@ def generate_trajectory_plots(eval_results: Dict[str, Any], run_dir: str, epoch:
                     
                     # Use the general visualization function with error handling
                     try:
+                        # Get OOD settings and pass them to the function
+                        eval_data_settings = settings.get_evaluation_data_settings()
+                        ood_enabled = eval_data_settings.get('use_ood_for_evaluation', True)
+                        ood_task_keys = []
+                        if ood_enabled and 'raw_data' in eval_results.get('key_results', {}).get(key, {}):
+                            ood_task_keys = eval_results['key_results'][key]['raw_data'].get('ood_task_keys', [])
+                        
                         plot_data = visualize_comprehensive_trajectory(
-                            trajectory_info, model, plot_path, run_dir, device='cuda'
+                            trajectory_info, model, plot_path, run_dir, device='cuda',
+                            ood_enabled=ood_enabled, ood_task_keys=ood_task_keys
                         )
                     except KeyboardInterrupt:
                         print(f"  [ WARNING ] Trajectory visualization interrupted for {key} sample {sample_idx}")
@@ -150,9 +158,9 @@ def generate_trajectory_plots(eval_results: Dict[str, Any], run_dir: str, epoch:
                     # Create standalone latent space plot for this trajectory
                     from utils.visualizers import create_standalone_latent_space_plot
                     
-                    # ✅ FIX: Get OOD settings and pass them to the function
-                    eval_settings = settings.get_evaluation_settings()
-                    ood_enabled = eval_settings.get('out_of_distribution', False)
+                    # Get OOD settings and pass them to the function
+                    eval_data_settings = settings.get_evaluation_data_settings()
+                    ood_enabled = eval_data_settings.get('use_ood_for_evaluation', True)
                     ood_task_keys = []
                     if ood_enabled and 'raw_data' in eval_results.get('key_results', {}).get(key, {}):
                         ood_task_keys = eval_results['key_results'][key]['raw_data'].get('ood_task_keys', [])

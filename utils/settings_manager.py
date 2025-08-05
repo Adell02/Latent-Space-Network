@@ -40,6 +40,26 @@ class SettingsManager:
             self.load_settings()
         return self._settings['training_settings']
 
+    def get_training_data_settings(self) -> Dict[str, Any]:
+        """Get training data source settings."""
+        if self._settings is None:
+            self.load_settings()
+        training_settings = self._settings['training_settings']
+        return {
+            'data_source': training_settings.get('data_source', 'synthetic'),
+            'use_ood_for_training': training_settings.get('use_ood_for_training', False)
+        }
+
+    def get_evaluation_data_settings(self) -> Dict[str, Any]:
+        """Get evaluation data source settings."""
+        if self._settings is None:
+            self.load_settings()
+        eval_settings = self._settings['evaluation_settings']
+        return {
+            'data_source': eval_settings.get('data_source', 'ood_original_arc'),
+            'use_ood_for_evaluation': eval_settings.get('use_ood_for_evaluation', True)
+        }
+
     def get_repulsion_loss_settings(self) -> dict:
         """Get repulsion loss settings."""
         return self._settings['repulsion_loss_settings']

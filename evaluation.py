@@ -682,37 +682,40 @@ def main_test(model, keys, run_dir, n_samples, n_queries, seed, device='cuda',
         print("-" * 50)
         
         try:
-            # Check if out-of-distribution sampling is enabled
-            eval_settings = settings.get_evaluation_settings()
-            out_of_distribution = eval_settings.get('out_of_distribution', False)
+            # Initialize OOD variables
+            ood_task_keys = []  # ✅ FIX: Initialize ood_task_keys before conditional blocks
             
-            if out_of_distribution:
-                print(f"  Using per-key out-of-distribution samples...")
+            # Check if OOD evaluation is enabled
+            eval_data_settings = settings.get_evaluation_data_settings()
+            use_ood_for_evaluation = eval_data_settings.get('use_ood_for_evaluation', True)
+            
+            if use_ood_for_evaluation:
+                print(f"  Using OOD evaluation data from original ARC tasks...")
                 
-                # Generate per-key OOD samples once for all keys
-                from utils.data_preparation import generate_per_key_ood_samples
-                per_key_ood_samples = generate_per_key_ood_samples(
+                # Generate OOD evaluation dataset using original ARC tasks
+                from utils.data_preparation import generate_ood_evaluation_dataset
+                ood_evaluation_data = generate_ood_evaluation_dataset(
                     keys, n_samples, n_queries, seed=seed
                 )
                 
-                if not per_key_ood_samples:
-                    print(f"  [WARNING] No per-key OOD samples generated, falling back to generated samples")
-                    out_of_distribution = False
+                if not ood_evaluation_data or key not in ood_evaluation_data:
+                    print(f"  [WARNING] No OOD evaluation data available for key '{key}', falling back to synthetic samples")
+                    use_ood_for_evaluation = False
                 else:
-                    # Use pre-generated per-key OOD samples
-                    key_ood_data = per_key_ood_samples[key]
+                    # Use OOD evaluation data
+                    key_ood_data = ood_evaluation_data[key]
                     input_samples_sequences = key_ood_data['support']['input_sequences']
                     output_samples_sequences = key_ood_data['support']['output_sequences']
                     input_queries_sequences = key_ood_data['query']['input_sequences']
                     output_queries_sequences = key_ood_data['query']['output_sequences']
                     
-                    # ✅ ADD: Store the actual OOD task keys used
-                    ood_task_keys = key_ood_data.get('ood_task_keys', [])  # We need to add this to the data structure
+                    # Store the actual OOD task keys used
+                    ood_task_keys = key_ood_data.get('ood_task_keys', [])
                     
                     print(f"  Using {len(input_samples_sequences)} support and {len(input_queries_sequences)} query OOD samples for key '{key}'")
                     print(f"  OOD samples from tasks: {ood_task_keys}")
             else:
-                # Fall back to generated samples
+                # Use synthetic samples for evaluation
                 print(f"  Generating {n_samples} support samples and {n_queries} query samples for key '{key}'...")
                 all_needed = n_samples + n_queries
                 _, _, _, all_input_sequences, all_output_sequences = generate_and_process_tasks(key, all_needed)
