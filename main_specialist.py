@@ -3,6 +3,7 @@ import torch
 import os
 import pickle
 import numpy as np
+import datetime
 
 # --- Initialize settings FIRST so subsequent imports see the correct config ---
 from utils.settings_manager import init_settings
@@ -99,7 +100,15 @@ def main_args():
     if not args.file_name:
         raise ValueError("--file_name must be specified")
 
-    run_dir = os.path.join(BASE_DIR, args.file_name)
+    # Create run directory with timestamp
+    timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    run_dir = os.path.join(BASE_DIR, f"{args.file_name}_{timestamp}")
+    os.makedirs(run_dir, exist_ok=True)
+    print(f"Created run directory: {run_dir}")
+
+    # Generate notes for this run
+    notes = f"Specialist run: {args.file_name} | Specialist training"
+    print(f"Run notes: {notes}")
 
     # ----------------------
     # TRAINING
@@ -118,7 +127,9 @@ def main_args():
         results, _ = main_specialist_training(
             args.file_name,
             phases_to_run=phases_to_run,
-            resume_from_phase=args.resume_from_phase
+            resume_from_phase=args.resume_from_phase,
+            run_dir=run_dir,  # Pass the exact directory
+            notes=notes
         )
         print("Specialist training complete. Results saved in the run directory.")
 

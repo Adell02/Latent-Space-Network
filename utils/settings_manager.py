@@ -67,7 +67,7 @@ class SettingsManager:
             'log_visualizations': True,
             'log_gradients': False,
             'log_trajectory_plots': True,
-            'trajectory_max_samples': 3,
+            'trajectory_max_samples': 10,
             'eval_log_interval': 10
         })
 

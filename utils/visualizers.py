@@ -2705,13 +2705,23 @@ def create_standalone_latent_space_plot(trajectory_info, model, save_dir, epoch,
         save_dir, model, device, trajectory_info, eval_results=eval_results, evaluated_key=evaluated_key  # ✅ Add evaluated_key parameter
     )
     
-    # Get trajectory data
+    # Get trajectory data (limit to 3 points: initial, mid, final)
     z_vectors = trajectory_info.get('z_vectors', [])
     losses = trajectory_info.get('losses', [])
     
     if not z_vectors or len(z_vectors) < 2:
         print(f"Warning: No trajectory data found for sample {sample_idx}")
         return None
+    
+    # Limit trajectory to 3 points: initial, mid, final
+    if len(z_vectors) >= 3:
+        # Take first, middle, and last points
+        indices = [0, len(z_vectors) // 2, len(z_vectors) - 1]
+        z_vectors = [z_vectors[i] for i in indices]
+        losses = [losses[i] for i in indices] if len(losses) >= len(z_vectors) else losses[:len(z_vectors)]
+        print(f"DEBUG: Limited trajectory to 3 points: initial, mid, final")
+    else:
+        print(f"DEBUG: Using all {len(z_vectors)} trajectory points (less than 3)")
     
     # Create the plot - replicate exactly the trajectory figure latent space
     fig, ax = plt.subplots(figsize=(12, 10))

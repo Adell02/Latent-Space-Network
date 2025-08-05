@@ -281,6 +281,68 @@ def restore_original_settings():
     else:
         print("[ WARNING ] No backup settings file found to restore")
 
+def generate_run_notes(config_name: str, config: Dict[str, Any], specialist_mode: bool = False) -> str:
+    """
+    Generate descriptive notes for a sweep run.
+    
+    Args:
+        config_name: Name of the configuration
+        config: Configuration dictionary
+        specialist_mode: Whether this is a specialist training run
+        
+    Returns:
+        str: Descriptive notes for the WandB run
+    """
+    notes_parts = [f"Config: {config_name}"]
+    
+    if specialist_mode:
+        # Specialist training notes
+        specialist_config = config.get('specialist_training', {})
+        phase_a_epochs = specialist_config.get('phase_a', {}).get('epochs', 'N/A')
+        phase_b_epochs = specialist_config.get('phase_b', {}).get('epochs', 'N/A')
+        beta = config.get('training_settings', {}).get('beta', 'N/A')
+        
+        notes_parts.extend([
+            f"Specialist Training",
+            f"Phase A epochs: {phase_a_epochs}",
+            f"Phase B epochs: {phase_b_epochs}",
+            f"Beta: {beta}"
+        ])
+    else:
+        # Standard training notes
+        model_arch = config.get('model_architecture', {})
+        training_settings = config.get('training_settings', {})
+        latent_opt = config.get('latent_optimization', {})
+        
+        latent_dim = model_arch.get('latent_dim', 'N/A')
+        num_encoders = model_arch.get('num_encoders', 'N/A')
+        encoder_layers = model_arch.get('encoder_layers', 'N/A')
+        learning_rate = training_settings.get('learning_rate', 'N/A')
+        beta = training_settings.get('beta', 'N/A')
+        num_epochs = training_settings.get('num_epochs', 'N/A')
+        opt_method = latent_opt.get('method', 'N/A')
+        
+        notes_parts.extend([
+            f"Standard Training",
+            f"Latent dim: {latent_dim}",
+            f"Num encoders: {num_encoders}",
+            f"Encoder layers: {encoder_layers}",
+            f"Learning rate: {learning_rate}",
+            f"Beta: {beta}",
+            f"Num epochs: {num_epochs}",
+            f"Optimization: {opt_method}"
+        ])
+        
+        # Add repulsion loss info if present
+        if 'repulsion_loss_settings' in config:
+            repulsion_config = config['repulsion_loss_settings']
+            if 'schedule' in repulsion_config:
+                start_val = repulsion_config['schedule'].get('start', 'N/A')
+                end_val = repulsion_config['schedule'].get('end', 'N/A')
+                notes_parts.append(f"Repulsion loss: {start_val} -> {end_val}")
+    
+    return " | ".join(notes_parts)
+
 def run_single_experiment(run_number: int, config_name: str, config: Dict[str, Any], 
                          modes: List[str], device: str, specialist_mode: bool = False) -> bool:
     """
@@ -309,15 +371,17 @@ def run_single_experiment(run_number: int, config_name: str, config: Dict[str, A
         settings.set_settings(config)
         
         # Create run name
-        run_name = f"run_{run_number}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        
-        # Create run directory (use different base dir for specialist runs)
-        if specialist_mode:
-            base_dir = "runs_specialist_sweep"
-        else:
-            base_dir = BASE_DIR
-        run_dir = os.path.join(base_dir, run_name)
-        
+        # Get WandB project name from settings
+        wandb_project = config.get("wandb_settings", {}).get("project_name", "default_project")
+        run_name = f"{wandb_project}_run_{run_number}"
+
+        # Create run directory with timestamp
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        base_dir = BASE_DIR if not specialist_mode else "runs_specialist_sweep"
+        run_dir = os.path.join(base_dir, f"{run_name}_{timestamp}")
+        os.makedirs(run_dir, exist_ok=True)
+        print(f"Created run directory: {run_dir}")
+
         if 'train' in modes or 'all' in modes:
             print(f"\n--- Training Mode ---")
             print(f"Run directory: {run_dir}")
@@ -331,7 +395,9 @@ def run_single_experiment(run_number: int, config_name: str, config: Dict[str, A
                 results, model = main_specialist_training(
                     run_name, 
                     phases_to_run=phases_to_run,
-                    resume_from_phase=None
+                    resume_from_phase=None,
+                    run_dir=run_dir,  # Pass the exact directory
+                    notes=generate_run_notes(config_name, config, specialist_mode) # Pass notes
                 )
                 if results is None:
                     print(f"Specialist training failed for run {run_number}")
@@ -341,7 +407,7 @@ def run_single_experiment(run_number: int, config_name: str, config: Dict[str, A
             else:
                 print("Using standard training mode")
                 # Train the model using standard training
-                results, model = main_training(run_name)
+                results, model = main_training(run_name, run_dir=run_dir, notes=generate_run_notes(config_name, config, specialist_mode))  # Pass the exact directory
                 if results is None:
                     print(f"Training failed for run {run_number}")
                     return False

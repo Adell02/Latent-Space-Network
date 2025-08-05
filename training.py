@@ -387,7 +387,7 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler,
     return avg_loss, epoch_shape/total_batches, epoch_grid/total_batches,epoch_kl/total_batches, epoch_repulsion/total_batches, repulsion_lambda
 
 
-def main_training(file_store_name, run_dir=None):  # ← ADD run_dir parameter
+def main_training(file_store_name, run_dir=None, notes=None):  # ← ADD notes parameter
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
@@ -404,9 +404,10 @@ def main_training(file_store_name, run_dir=None):  # ← ADD run_dir parameter
     model_architecture = settings.get_model_architecture()
     training_settings = settings.get_training_settings()
     latent_optimization = settings.get_latent_optimization()
-    repulsion_loss_settings = settings.get_repulsion_loss_settings()
-    wandb_settings = settings.get_wandb_settings()
 
+    # Get wandb settings
+    wandb_settings = settings.get_wandb_settings()
+    
     # Initialize wandb for training mode (will be done after run_dir is created)
     wandb_logger = None
 
@@ -427,7 +428,6 @@ def main_training(file_store_name, run_dir=None):  # ← ADD run_dir parameter
         raise ValueError("No training keys specified in data_settings after reload.")
     N_EXAMPLES_PER_TASK = data_settings['n']
     N_PAIRS_PER_EXAMPLE = data_settings.get('n_pairs',1)
-    
     DROPOUT = model_architecture['dropout']
     
     BATCH_SIZE = training_settings['batch_size']
@@ -452,15 +452,18 @@ def main_training(file_store_name, run_dir=None):  # ← ADD run_dir parameter
     NUM_ENCODERS = model_architecture.get('num_encoders', 1)
     is_multi_encoder = NUM_ENCODERS > 1
 
-    # Use the run_dir passed from main.py
+    # Use the run_dir passed from main files (main.py, main_sweep.py, etc.)
     if run_dir is None:
         # Fallback: create run directory only if not provided
         run_dir = create_run_directory(file_store_name)
+    else:
+        # Ensure the directory exists
+        os.makedirs(run_dir, exist_ok=True)
     
     logger = setup_logging(run_dir)
     logger.info(f"Starting training for ARC problems {len(TRAINING_KEYS)} keys.")
     logger.info(f"Full settings dump: {json.dumps(settings.get_settings(), indent=2)}")
-    print("Run directory created:", run_dir)
+    print("Using run directory:", run_dir)
 
     # Initialize results dictionary early
     results = {
@@ -476,13 +479,11 @@ def main_training(file_store_name, run_dir=None):  # ← ADD run_dir parameter
     }
 
     # Initialize wandb for training mode (now that run_dir is available)
-    if wandb_settings.get('enabled', False):
-        # Don't override WANDB_PROJECT_NAME - let it be set by the sweep or environment
-        wandb_logger = init_wandb_for_mode('train', run_dir)
-        if wandb_logger:
-            logger.info(f"[OK] Wandb logging enabled: {wandb_logger.run.name}")
-        else:
-            logger.info("[WARNING] Wandb initialization failed, continuing without wandb")
+    wandb_logger = init_wandb_for_mode('train', run_dir, notes=notes)
+    if wandb_logger and wandb_logger.is_initialized:
+        logger.info(f"[OK] Wandb logging enabled: {wandb_logger.run.name}")
+    else:
+        logger.info("[WARNING] Wandb initialization failed, continuing without wandb")
 
     logger.info("Generating and preparing data...")
     print("Generating and preparing data...")

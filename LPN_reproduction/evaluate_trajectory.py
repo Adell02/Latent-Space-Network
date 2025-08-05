@@ -1536,13 +1536,8 @@ def plot_error_maps_row(ax_error_maps, trajectory_info, model, num_encoders):
     input_grid, input_shape = extract_grid_from_sequence(input_seq)
     target_grid, target_shape = extract_grid_from_sequence(target_seq)
     
-    # Check if dimensions match
-    if input_grid.shape != target_grid.shape:
-        ax_error_maps.text(0.5, 0.5, 'Input/Target dimensions\ndo not match', 
-                          ha='center', va='center', transform=ax_error_maps.transAxes, fontsize=10)
-        ax_error_maps.set_title('Error Maps (Dimension Mismatch)')
-        ax_error_maps.axis('off')
-        return
+    # Store target grid for error map comparison
+    target_grid_for_error = target_grid
     
     # Get trajectory reconstructions
     trajectory_reconstructions = trajectory_info.get('poe_trajectory_reconstructions', {})
@@ -1595,12 +1590,19 @@ def plot_error_maps_row(ax_error_maps, trajectory_info, model, num_encoders):
                 
                 recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
                 
-                if recon_grid is not None and recon_grid.shape == target_grid.shape:
-                    # Create error map
-                    error_map = target_grid - recon_grid
-                    im = ax.imshow(error_map, cmap='RdBu_r', interpolation='nearest', aspect='equal', vmin=-1, vmax=1)
-                    ax.set_title(f'Encoder {enc_idx}\nError', fontsize=8)
-                    ax.axis('off')
+                if recon_grid is not None:
+                    if recon_grid.shape == target_grid_for_error.shape:
+                        # Create error map
+                        error_map = target_grid_for_error - recon_grid
+                        im = ax.imshow(error_map, cmap='RdBu_r', interpolation='nearest', aspect='equal', vmin=-1, vmax=1)
+                        ax.set_title(f'Encoder {enc_idx}\nError', fontsize=8)
+                        ax.axis('off')
+                    else:
+                        # Show dimension mismatch
+                        ax.text(0.5, 0.5, f'Encoder {enc_idx}\nDim Mismatch\n{recon_grid.shape} vs {target_grid_for_error.shape}', 
+                               ha='center', va='center', transform=ax.transAxes, fontsize=8)
+                        ax.set_title(f'Encoder {enc_idx}\nError')
+                        ax.axis('off')
                 else:
                     ax.text(0.5, 0.5, f'Encoder {enc_idx}\nNo Data', 
                            ha='center', va='center', transform=ax.transAxes, fontsize=8)
@@ -1625,12 +1627,19 @@ def plot_error_maps_row(ax_error_maps, trajectory_info, model, num_encoders):
                 
                 recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
                 
-                if recon_grid is not None and recon_grid.shape == target_grid.shape:
-                    # Create error map
-                    error_map = target_grid - recon_grid
-                    im = ax.imshow(error_map, cmap='RdBu_r', interpolation='nearest', aspect='equal', vmin=-1, vmax=1)
-                    ax.set_title(f'POE {label.title()}\nError', fontsize=8)
-                    ax.axis('off')
+                if recon_grid is not None:
+                    if recon_grid.shape == target_grid_for_error.shape:
+                        # Create error map
+                        error_map = target_grid_for_error - recon_grid
+                        im = ax.imshow(error_map, cmap='RdBu_r', interpolation='nearest', aspect='equal', vmin=-1, vmax=1)
+                        ax.set_title(f'POE {label.title()}\nError', fontsize=8)
+                        ax.axis('off')
+                    else:
+                        # Show dimension mismatch
+                        ax.text(0.5, 0.5, f'POE {label.title()}\nDim Mismatch\n{recon_grid.shape} vs {target_grid_for_error.shape}', 
+                               ha='center', va='center', transform=ax.transAxes, fontsize=8)
+                        ax.set_title(f'POE {label.title()}\nError')
+                        ax.axis('off')
                 else:
                     ax.text(0.5, 0.5, f'POE {label.title()}\nNo Data', 
                            ha='center', va='center', transform=ax.transAxes, fontsize=8)
@@ -1663,13 +1672,8 @@ def plot_query_error_maps_row(ax_query_error_maps, trajectory_info, model, num_e
     input_grid, input_shape = extract_grid_from_sequence(query_input)
     target_grid, target_shape = extract_grid_from_sequence(query_target)
     
-    # Check if dimensions match
-    if input_grid.shape != target_grid.shape:
-        ax_query_error_maps.text(0.5, 0.5, 'Query Input/Target dimensions\ndo not match', 
-                                ha='center', va='center', transform=ax_query_error_maps.transAxes, fontsize=10)
-        ax_query_error_maps.set_title('Query Error Maps (Dimension Mismatch)')
-        ax_query_error_maps.axis('off')
-        return
+    # Store target grid for error map comparison
+    target_grid_for_error = target_grid
     
     # Get query reconstructions
     query_encoder_reconstructions = trajectory_info.get('query_encoder_reconstructions', {})
@@ -1722,12 +1726,19 @@ def plot_query_error_maps_row(ax_query_error_maps, trajectory_info, model, num_e
                 
                 recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
                 
-                if recon_grid is not None and recon_grid.shape == target_grid.shape:
-                    # Create error map
-                    error_map = target_grid - recon_grid
-                    im = ax.imshow(error_map, cmap='RdBu_r', interpolation='nearest', aspect='equal', vmin=-1, vmax=1)
-                    ax.set_title(f'Query Encoder {enc_idx}\nError', fontsize=8)
-                    ax.axis('off')
+                if recon_grid is not None:
+                    if recon_grid.shape == target_grid_for_error.shape:
+                        # Create error map
+                        error_map = target_grid_for_error - recon_grid
+                        im = ax.imshow(error_map, cmap='RdBu_r', interpolation='nearest', aspect='equal', vmin=-1, vmax=1)
+                        ax.set_title(f'Query Encoder {enc_idx}\nError', fontsize=8)
+                        ax.axis('off')
+                    else:
+                        # Show dimension mismatch
+                        ax.text(0.5, 0.5, f'Query Encoder {enc_idx}\nDim Mismatch\n{recon_grid.shape} vs {target_grid_for_error.shape}', 
+                               ha='center', va='center', transform=ax.transAxes, fontsize=8)
+                        ax.set_title(f'Query Encoder {enc_idx}\nError')
+                        ax.axis('off')
                 else:
                     ax.text(0.5, 0.5, f'Query Encoder {enc_idx}\nNo Data', 
                            ha='center', va='center', transform=ax.transAxes, fontsize=8)
@@ -1753,12 +1764,19 @@ def plot_query_error_maps_row(ax_query_error_maps, trajectory_info, model, num_e
                 recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
                 
                 
-                if recon_grid is not None and recon_grid.shape == target_grid.shape:
-                    # Create error map
-                    error_map = target_grid - recon_grid
-                    im = ax.imshow(error_map, cmap='RdBu_r', interpolation='nearest', aspect='equal', vmin=-1, vmax=1)
-                    ax.set_title(f'Query POE {label.title()}\nError', fontsize=8)
-                    ax.axis('off')
+                if recon_grid is not None:
+                    if recon_grid.shape == target_grid_for_error.shape:
+                        # Create error map
+                        error_map = target_grid_for_error - recon_grid
+                        im = ax.imshow(error_map, cmap='RdBu_r', interpolation='nearest', aspect='equal', vmin=-1, vmax=1)
+                        ax.set_title(f'Query POE {label.title()}\nError', fontsize=8)
+                        ax.axis('off')
+                    else:
+                        # Show dimension mismatch
+                        ax.text(0.5, 0.5, f'Query POE {label.title()}\nDim Mismatch\n{recon_grid.shape} vs {target_grid_for_error.shape}', 
+                               ha='center', va='center', transform=ax.transAxes, fontsize=8)
+                        ax.set_title(f'Query POE {label.title()}\nError')
+                        ax.axis('off')
                 else:
                     ax.text(0.5, 0.5, f'Query POE {label.title()}\nNo Data', 
                            ha='center', va='center', transform=ax.transAxes, fontsize=8)
@@ -1809,16 +1827,30 @@ def load_unified_latent_data_with_trajectory(run_dir, model, device, trajectory_
         
         print(f"[ OK ] Using {len(training_latents)} REAL OPTIMIZED latents from training (actual samples used in epoch)")
         
-        # Process REAL training latents
+        # ✅ FIX: Limit to 10 samples per key for better visualization
+        key_counts = {}
+        max_samples_per_key = 10
+        
+        # Process REAL training latents with per-key limit
         for i, (latent, key, encoder_idx) in enumerate(zip(training_latents, training_keys, training_encoder_indices)):
-            all_latents.append(latent)
-            all_labels.append(f"training_enc_{encoder_idx}_key_{key}")
+            # Count samples per key and limit to max_samples_per_key
+            if key not in key_counts:
+                key_counts[key] = 0
             
-            # Color based on whether this key matches the evaluated key
-            if key == evaluated_key:
-                all_colors.append(plt.cm.Set1(encoder_idx if encoder_idx is not None else 0))  # Bright color for matching key
-            else:
-                all_colors.append(plt.cm.tab10((encoder_idx if encoder_idx is not None else 0) % 10))  # More visible color for other keys
+            if key_counts[key] < max_samples_per_key:
+                all_latents.append(latent)
+                all_labels.append(f"training_enc_{encoder_idx}_key_{key}")
+                
+                # Color based on whether this key matches the evaluated key
+                if key == evaluated_key:
+                    all_colors.append(plt.cm.Set1(encoder_idx if encoder_idx is not None else 0))
+                else:
+                    all_colors.append(plt.cm.tab10((encoder_idx if encoder_idx is not None else 0) % 10))
+                
+                key_counts[key] += 1
+        
+        print(f"[ OK ] Limited to {max_samples_per_key} samples per key. Total latents after limiting: {len(all_latents)}")
+        print(f"[ OK ] Key distribution: {dict(list(key_counts.items())[:10])}...")
     else:
         print("[ WARNING ] No stored optimized latents found, falling back to pre-saved sequences")
         
@@ -2092,12 +2124,24 @@ def load_unified_latent_data_with_trajectory(run_dir, model, device, trajectory_
         import traceback
         traceback.print_exc()
     
-    # Add trajectory points to unified dataset
+    # Add trajectory points to unified dataset (limit to 3 points: initial, mid, final)
     print("Adding trajectory latent vectors...")
     z_vectors = trajectory_info.get('z_vectors', [])
     if z_vectors:
-        print(f"DEBUG: Processing {len(z_vectors)} trajectory vectors")
-        for i, z_vec in enumerate(z_vectors):
+        print(f"DEBUG: Processing {len(z_vectors)} trajectory vectors, limiting to 3 points")
+        
+        # Limit to 3 points: initial, mid, final
+        if len(z_vectors) >= 3:
+            # Take first, middle, and last points
+            indices = [0, len(z_vectors) // 2, len(z_vectors) - 1]
+            labels = ['initial', 'mid', 'final']
+        else:
+            # If less than 3 points, use all available
+            indices = list(range(len(z_vectors)))
+            labels = [f'step_{i}' for i in indices]
+        
+        for i, (idx, label) in enumerate(zip(indices, labels)):
+            z_vec = z_vectors[idx]
             # Handle both tensor and numpy array cases
             if hasattr(z_vec, 'cpu'):
                 # Tensor case
@@ -2106,9 +2150,9 @@ def load_unified_latent_data_with_trajectory(run_dir, model, device, trajectory_
                 # Numpy array case
                 z_numpy = z_vec.flatten()
             all_latents.append(z_numpy)
-            all_labels.append(f"trajectory_step_{i}")
+            all_labels.append(f"trajectory_{label}")
             all_colors.append('red')  # Red for trajectory points
-        print(f"[ OK ] Added {len(z_vectors)} trajectory points")
+        print(f"[ OK ] Added {len(indices)} trajectory points: {labels}")
     
     # Convert to numpy arrays - ensure all vectors have the same shape and are numeric
     print(f"DEBUG: Processing {len(all_latents)} latent vectors...")

@@ -91,11 +91,21 @@ def main_args():
     if not args.file_name:
         raise ValueError("--file_name must be specified")
 
-    # Compose unique run directory using project name and timestamp
-    run_dir = os.path.join(BASE_DIR, args.file_name)
-    if not os.path.exists(run_dir):
-        os.makedirs(run_dir, exist_ok=True)
-    print(f"Run directory: {run_dir}")
+    # Check if we're in training mode (file_name already contains timestamp)
+    if "train" in args.mode or "all" in args.mode:
+        # Use file_name directly since it already contains timestamp
+        run_dir = os.path.join(BASE_DIR, args.file_name)
+    else:
+        # For eval/visualize mode, add timestamp since file_name doesn't have one
+        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        run_dir = os.path.join(BASE_DIR, f"{args.file_name}_{timestamp}")
+
+    os.makedirs(run_dir, exist_ok=True)
+    print(f"Created run directory: {run_dir}")
+
+    # Generate notes for this run
+    notes = f"Main run: {args.file_name} | Standard training"
+    print(f"Run notes: {notes}")
 
     # DON'T call create_run_directory again - use the existing run_dir
     # run_dir = create_run_directory(args.file_name)  # ← REMOVE THIS LINE
@@ -116,27 +126,16 @@ def main_args():
     step_counter = 0
     
     try:
+        # ----------------------
+        # TRAINING
+        # ----------------------
         if 'train' in args.mode or 'all' in args.mode:
-            # Train the model
-            print(f"Starting training with settings from: {args.settings}")
-            
-            # Log training start
-            step_counter += 1
-            if wandb_logger:
-                try:
-                    wandb_logger._safe_log({
-                        'main/mode': args.mode,
-                        'main/settings_file': args.settings,
-                        'main/device': str(device),
-                        'main_training/started': True,
-                        'main_training/data_source': 'training_start'
-                    }, step_hint=step_counter)
-                    print(f"[OK] Training start logged to WandB at step {step_counter}")
-                except Exception as e:
-                    print(f"[WARNING] Failed to log training start: {e}")
-            
-            results, model = main_training(args.file_name, run_dir=run_dir)
-            print("Training complete. Results saved in the run directory.")
+            print(f"Starting training...")
+            results, model = main_training(args.file_name, run_dir=run_dir, notes=notes)
+            if results is None:
+                print("Training failed!")
+                return
+            print("Training completed successfully!")
             
             # Log training completion metrics
             step_counter += 1
