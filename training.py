@@ -236,7 +236,7 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler,
     training_settings = settings.get_training_settings()
     batch_size = training_settings.get('batch_size', 4)
     batches_per_epoch = training_settings.get('batches_per_epoch', 10)
-    max_latents_to_store = batch_size * batches_per_epoch
+    max_latents_to_store = max(batch_size * batches_per_epoch, 1000)
     print(f"  [DEBUG] Will store max {max_latents_to_store} latents per encoder (batch_size={batch_size} * batches_per_epoch={batches_per_epoch})")
 
     # Zero gradients before epoch
