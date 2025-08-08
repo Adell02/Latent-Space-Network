@@ -254,7 +254,9 @@ def latent_space_visualization(model, input_seqs, target_seqs, device, max_sampl
     latents_tsne = None
     if len(latents) >= 10:
         try:
-            tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(latents)//4))
+            calculated_perplexity = min(30, max(2, len(latents)//4))
+            print(f"    DEBUG: Validation t-SNE perplexity - samples: {len(latents)}, perplexity: {calculated_perplexity}")
+            tsne = TSNE(n_components=2, random_state=42, perplexity=calculated_perplexity)
             latents_tsne = tsne.fit_transform(latents)
         except:
             pass

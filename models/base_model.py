@@ -18,6 +18,7 @@ import sys
 from typing import Tuple, List, Union, Optional, Dict, Any
 import copy
 import numpy as np
+import logging
 
 # add the parent directory to the path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -27,6 +28,9 @@ from utils.settings_manager import settings
 
 # Import VQ-VAE components
 from models.vq_vae import create_vq_vae_from_settings, VQVAEWrapper
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 
 #########################################
@@ -181,28 +185,11 @@ def gaussian_poe(mu: torch.Tensor, logvar: torch.Tensor, debug=False) -> Tuple[t
     -------
     fused_mu, fused_logvar : (B, D)
     """
-    if debug:
-        print(f"PoE Debug: Input shapes - mu: {mu.shape}, logvar: {logvar.shape}")
-        print(f"PoE Debug: mu stats - min: {mu.min():.4f}, max: {mu.max():.4f}, mean: {mu.mean():.4f}")
-        print(f"PoE Debug: logvar stats - min: {logvar.min():.4f}, max: {logvar.max():.4f}, mean: {logvar.mean():.4f}")
-        
-        # Check if encoders are producing identical outputs
-        if mu.shape[0] > 1:
-            mu_diff = torch.abs(mu[0] - mu[1]).mean()
-            logvar_diff = torch.abs(logvar[0] - logvar[1]).mean()
-            print(f"PoE Debug: Encoder differences - mu_diff: {mu_diff:.6f}, logvar_diff: {logvar_diff:.6f}")
-            
-            if mu_diff < 1e-6 and logvar_diff < 1e-6:
-                print("WARNING: Encoders are producing nearly identical outputs!")
     
     precision   = torch.exp(-logvar)            # Σ⁻¹
     fused_var   = 1. / precision.sum(0)         # (B,D)
     fused_mu    = fused_var * (precision * mu).sum(0)
     fused_logvar = fused_var.log()
-    
-    if debug:
-        print(f"PoE Debug: Output shapes - fused_mu: {fused_mu.shape}, fused_logvar: {fused_logvar.shape}")
-        print(f"PoE Debug: fused_mu stats - min: {fused_mu.min():.4f}, max: {fused_mu.max():.4f}, mean: {fused_mu.mean():.4f}")
     
     return fused_mu, fused_logvar
 
@@ -295,6 +282,12 @@ class TransformerEncoder(nn.Module):
         batch_size = input_seq.size(0)
         device = input_seq.device
         
+        # Check sequence lengths
+        if input_seq.shape[1] < 902:
+            print(f"        ERROR: Encoder input sequence too short: {input_seq.shape[1]} < 902")
+        if target_seq.shape[1] < 902:
+            print(f"        ERROR: Encoder target sequence too short: {target_seq.shape[1]} < 902")
+        
         # Validate and clamp input values to prevent embedding index errors
         # Grid tokens (0-899) should be in range [0, 9]
         input_grid_tokens = torch.clamp(input_seq[:, :900], 0, 9).long()
@@ -357,6 +350,7 @@ class TransformerEncoder(nn.Module):
             # Standard VAE path
             mu = self.fc_mu(cls_output)
             log_var = self.fc_log_var(cls_output)
+            
             return mu, log_var, None
 
     def get_vq_metrics(self) -> Optional[Dict[str, Any]]:
@@ -408,7 +402,7 @@ class TransformerDecoder(nn.Module):
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=hidden_dim,
             nhead=num_heads,
-            dim_feedforward=hidden_dim,
+            dim_feedforward=4 * hidden_dim,  # Match paper's 4×H
             dropout=dropout,
             batch_first=True,
             norm_first=True
@@ -431,7 +425,6 @@ class TransformerDecoder(nn.Module):
         """
         # Handle tensors with extra dimensions (e.g., from multi-encoder)
         if z.dim() > 2:
-            # Flatten all dimensions except the last one to get [B, latent_dim]
             z = z.flatten(start_dim=0, end_dim=-2)
         
         # z: [B, latent_dim]
@@ -610,7 +603,10 @@ class MultiEncoderLPN(nn.Module):
             # Standard VAE reparameterization
             if sample:
                 eps = torch.randn_like(mu)
-                return mu + eps * torch.exp(0.5 * logvar)
+                half_logvar = 0.5 * logvar
+                exp_half_logvar = torch.exp(half_logvar)
+                result = mu + eps * exp_half_logvar
+                return result
             return mu
 
     def get_vq_metrics(self) -> Optional[Dict[str, Any]]:
@@ -752,7 +748,7 @@ class LatentProgramNetwork(nn.Module):
     def _reparam(self, mu: torch.Tensor, logvar: torch.Tensor, sample: bool = True) -> torch.Tensor:
         """
         Reparameterization for both VAE and VQ-VAE modes.
-        
+
         For VQ-VAE: mu contains quantized latents, logvar contains VQ loss
         For VAE: standard reparameterization trick
         """
@@ -763,9 +759,21 @@ class LatentProgramNetwork(nn.Module):
         else:
             # Standard VAE reparameterization
             if sample:
+                if torch.isnan(logvar).any() or torch.isinf(logvar).any():
+                    logger.error("NaN or Inf in logvar during reparameterization!")
+                    logger.error(f"logvar range: [{logvar.min().item():.4f}, {logvar.max().item():.4f}]")
+
+                # Clamp to avoid numerical overflow in exp()
+                logvar = torch.clamp(logvar, min=-10.0, max=10.0)
                 eps = torch.randn_like(mu)
-                return mu + eps * torch.exp(0.5 * logvar)
+                std = torch.exp(0.5 * logvar)
+                z = mu + eps * std
+
+                # Clamp z to avoid NaNs or huge values downstream
+                z = torch.nan_to_num(z, nan=0.0, posinf=1e2, neginf=-1e2)
+                return z
             return mu
+
 
     def get_vq_metrics(self) -> Optional[Dict[str, Any]]:
         """Get VQ-VAE metrics if enabled."""
@@ -1056,7 +1064,6 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
                 # New parameters for specialist training
                 current_epoch: int = None, anti_mask: torch.Tensor = None, 
                 anti_batch_lambda: float = None, cross_pair_enabled: bool = False,
-                cross_pair_num_pairs: int = None,
                 # New parameters for enhanced training mechanisms
                 use_cyclical_beta: bool = False, beta_cycle_length: int = 4,
                 use_free_bits: bool = True, free_bits_delta: float = 0.07,
@@ -1093,7 +1100,6 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
         anti_mask: Boolean mask indicating anti-samples [B] (True = anti-sample, False = in-slice)
         anti_batch_lambda: Base lambda weight for anti-batch KL regularization
         cross_pair_enabled: Whether to use cross-pair reconstruction loss
-        cross_pair_num_pairs: Number of cross-pairs to sample (None = all pairs)
         use_cyclical_beta: Whether to use cyclical β-annealing
         beta_cycle_length: Number of epochs per β cycle
         use_free_bits: Whether to apply free-bits mechanism

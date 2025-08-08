@@ -1183,12 +1183,12 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                 input_tensor = torch.tensor(first_query['input'], dtype=torch.float32).unsqueeze(0).to(device)
                 target_tensor = torch.tensor(trajectory['query_target'], dtype=torch.float32).unsqueeze(0).to(device)
                 
-                # Ensure input has correct shape (should be 900 for grid input)
-                if input_tensor.shape[-1] != 900:
-                    if input_tensor.shape[-1] > 900:
-                        input_tensor = input_tensor[..., :900]
+                # Ensure input has correct shape (should be 902 for complete sequence including shape tokens)
+                if input_tensor.shape[-1] != 902:
+                    if input_tensor.shape[-1] > 902:
+                        input_tensor = input_tensor[..., :902]
                     else:
-                        padding = torch.zeros(1, 900 - input_tensor.shape[-1], device=device)
+                        padding = torch.zeros(1, 902 - input_tensor.shape[-1], device=device)
                         input_tensor = torch.cat([input_tensor, padding], dim=-1)
                 
                 # Ensure input is 2D: [batch, seq_len]
@@ -1203,27 +1203,9 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                         padding = torch.zeros(1, 902 - target_tensor.shape[-1], device=device)
                         target_tensor = torch.cat([target_tensor, padding], dim=-1)
                 
-                # FIXED: Handle sequence length mismatch properly
-                if input_tensor.shape[1] != target_tensor.shape[1]:
-                    print(f"DEBUG: Shape mismatch detected: input={input_tensor.shape}, target={target_tensor.shape}")
-                    
-                    # Handle the case where input is 900 and target is 902 (missing shape info)
-                    if input_tensor.shape[1] == 900 and target_tensor.shape[1] == 902:
-                        # Extract shape info from target and add to input
-                        target_shape = target_tensor[:, 900:902]
-                        input_grid = input_tensor[:, :900]
-                        input_tensor = torch.cat([input_grid, target_shape], dim=1)
-                        print(f"DEBUG: Fixed input sequence length: {input_tensor.shape}")
-                    else:
-                        # Use the minimum length to avoid index errors
-                        min_seq_len = min(input_tensor.shape[1], target_tensor.shape[1])
-                        if min_seq_len == 0:
-                            raise ValueError(f"Both tensors have zero sequence length after truncation")
-                        
-                        # Truncate both tensors to the same length
-                        input_tensor = input_tensor[:, :min_seq_len]
-                        target_tensor = target_tensor[:, :min_seq_len]
-                        print(f"DEBUG: Truncated to shape: input={input_tensor.shape}, target={target_tensor.shape}")
+                # Verify both sequences have the correct length (902)
+                if input_tensor.shape[1] != target_tensor.shape[1] or input_tensor.shape[1] != 902:
+                    raise ValueError(f"Sequence length mismatch: input={input_tensor.shape}, target={target_tensor.shape}. Both should be [batch, 902]")
                 
                 if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
                     print(f"DEBUG: Model is multi-encoder, num_encoders: {num_encoders}")

@@ -572,15 +572,7 @@ def safe_extract_reconstruction_grid(shape_logits, grid_logits):
 def generate_per_key_ood_samples(evaluation_keys, n_samples_per_key, n_queries_per_key, seed=42):
     """
     Generate per-key out-of-distribution sample sets with fixed support/query samples for each evaluation key.
-    
-    Args:
-        evaluation_keys: List of evaluation keys that need OOD samples
-        n_samples_per_key: Number of support samples per key
-        n_queries_per_key: Number of query samples per key
-        seed: Random seed for reproducible sampling
-        
-    Returns:
-        dict: {key: {'support': [samples], 'query': [samples]}}
+    ✅ CORRECT: Train examples → Support samples, Test examples → Query samples
     """
     # Set random seed for reproducible sampling
     random.seed(seed)
@@ -595,7 +587,6 @@ def generate_per_key_ood_samples(evaluation_keys, n_samples_per_key, n_queries_p
     print(f"Using {len(available_tasks)} available original ARC evaluation tasks")
     
     # Create a mapping from evaluation keys to OOD tasks
-    # Use consistent assignment based on key hash for reproducibility
     key_to_ood_tasks = {}
     for i, eval_key in enumerate(evaluation_keys):
         # Assign 2-3 OOD tasks per evaluation key for variety
@@ -610,22 +601,30 @@ def generate_per_key_ood_samples(evaluation_keys, n_samples_per_key, n_queries_p
     
     # Generate per-key sample sets
     per_key_samples = {}
-    total_needed_per_key = n_samples_per_key + n_queries_per_key
     
     for eval_key in evaluation_keys:
         try:
-            # Load examples from assigned OOD tasks for this key
-            all_examples = []
+            # Collect train examples (support) and test examples (query) separately
+            support_examples = []
+            query_examples = []
+            
             for ood_task in key_to_ood_tasks[eval_key]:
                 try:
                     task_data = load_original_arc_evaluation_task(ood_task)
-                    task_examples = task_data.get('train', []) + task_data.get('test', [])
-                    all_examples.extend(task_examples)
+                    
+                    # ✅ CORRECT: Train examples → Support samples
+                    train_examples = task_data.get('train', [])
+                    support_examples.extend(train_examples)
+                    
+                    # ✅ CORRECT: Test examples → Query samples
+                    test_examples = task_data.get('test', [])
+                    query_examples.extend(test_examples)
+                    
                 except Exception as e:
                     print(f"Error loading OOD task {ood_task} for key {eval_key}: {e}")
                     continue
             
-            if not all_examples:
+            if not support_examples or not query_examples:
                 print(f"Warning: No examples available for key '{eval_key}'")
                 continue
             
@@ -633,24 +632,28 @@ def generate_per_key_ood_samples(evaluation_keys, n_samples_per_key, n_queries_p
             key_seed = seed + hash(eval_key)
             random.seed(key_seed)
             
-            # Sample total needed examples for this key
-            n_available = len(all_examples)
-            n_to_sample = min(total_needed_per_key, n_available)
+            # Sample support examples (from train data)
+            n_support_available = len(support_examples)
+            n_support_to_sample = min(n_samples_per_key, n_support_available)
             
-            if n_to_sample < total_needed_per_key:
-                print(f"Warning: Only {n_to_sample} examples available for key '{eval_key}', requested {total_needed_per_key}")
+            if n_support_to_sample < n_samples_per_key:
+                print(f"Warning: Only {n_support_to_sample} support examples available for key '{eval_key}', requested {n_samples_per_key}")
             
-            # Sample examples for this key
-            selected_examples = random.sample(all_examples, n_to_sample)
+            selected_support = random.sample(support_examples, n_support_to_sample)
             
-            # Split into support and query samples
-            support_samples = selected_examples[:n_samples_per_key]
-            query_samples = selected_examples[n_samples_per_key:n_samples_per_key + n_queries_per_key]
+            # Sample query examples (from test data)
+            n_query_available = len(query_examples)
+            n_query_to_sample = min(n_queries_per_key, n_query_available)
             
-            # Process support samples
+            if n_query_to_sample < n_queries_per_key:
+                print(f"Warning: Only {n_query_to_sample} query examples available for key '{eval_key}', requested {n_queries_per_key}")
+            
+            selected_query = random.sample(query_examples, n_query_to_sample)
+            
+            # Process support samples (from train data)
             support_input_sequences = []
             support_output_sequences = []
-            for example in support_samples:
+            for example in selected_support:
                 input_grid = np.array(example['input'])
                 output_grid = np.array(example['output'])
                 input_seq = transform_grid_to_sequence(input_grid)
@@ -658,10 +661,10 @@ def generate_per_key_ood_samples(evaluation_keys, n_samples_per_key, n_queries_p
                 support_input_sequences.append(input_seq)
                 support_output_sequences.append(output_seq)
             
-            # Process query samples
+            # Process query samples (from test data)
             query_input_sequences = []
             query_output_sequences = []
-            for example in query_samples:
+            for example in selected_query:
                 input_grid = np.array(example['input'])
                 output_grid = np.array(example['output'])
                 input_seq = transform_grid_to_sequence(input_grid)
@@ -673,18 +676,19 @@ def generate_per_key_ood_samples(evaluation_keys, n_samples_per_key, n_queries_p
                 'support': {
                     'input_sequences': support_input_sequences,
                     'output_sequences': support_output_sequences,
-                    'samples': support_samples
+                    'samples': selected_support,
+                    'data_source': 'train_examples'  # ✅ Track data source
                 },
                 'query': {
                     'input_sequences': query_input_sequences,
                     'output_sequences': query_output_sequences,
-                    'samples': query_samples
+                    'samples': selected_query,
+                    'data_source': 'test_examples'   # ✅ Track data source
                 },
-                # ✅ ADD: Store the actual OOD task keys used
                 'ood_task_keys': key_to_ood_tasks[eval_key]
             }
             
-            print(f"  Key '{eval_key}': {len(support_input_sequences)} support, {len(query_input_sequences)} query samples")
+            print(f"  Key '{eval_key}': {len(support_input_sequences)} support (train), {len(query_input_sequences)} query (test) samples")
             
         except Exception as e:
             print(f"Error generating OOD samples for key '{eval_key}': {e}")
@@ -696,7 +700,9 @@ def generate_per_key_ood_samples(evaluation_keys, n_samples_per_key, n_queries_p
 def generate_ood_evaluation_dataset(evaluation_keys, n_samples_per_key, n_queries_per_key, seed=42):
     """
     Generate OOD evaluation dataset using original ARC tasks.
-    ✅ This should ONLY be called during evaluation, never during training.
+    ✅ CORRECT: Each evaluation key maps to ONE OOD task
+    Support = train examples from that OOD task
+    Query = test examples from that same OOD task
     """
     print(f"\n=== GENERATING OOD EVALUATION DATASET ===")
     print(f"Evaluation keys: {evaluation_keys}")
@@ -706,7 +712,7 @@ def generate_ood_evaluation_dataset(evaluation_keys, n_samples_per_key, n_querie
     # Set random seed for reproducible sampling
     random.seed(seed)
     
-    # Get all available original ARC evaluation tasks
+    # Get available OOD tasks
     available_tasks = get_available_evaluation_tasks()
     if not available_tasks:
         print("Warning: No original ARC evaluation tasks found")
@@ -714,62 +720,58 @@ def generate_ood_evaluation_dataset(evaluation_keys, n_samples_per_key, n_querie
     
     print(f"Using {len(available_tasks)} available original ARC evaluation tasks")
     
-    # Create a mapping from evaluation keys to OOD tasks
-    key_to_ood_tasks = {}
+    # ✅ FIX: One-to-one mapping (each evaluation key gets ONE OOD task)
+    key_to_ood_task = {}
     for i, eval_key in enumerate(evaluation_keys):
-        # Assign 2-3 OOD tasks per evaluation key for variety
-        num_ood_tasks = min(3, len(available_tasks) // len(evaluation_keys))
-        start_idx = (hash(eval_key) % len(available_tasks))
-        assigned_tasks = []
-        for j in range(num_ood_tasks):
-            task_idx = (start_idx + j) % len(available_tasks)
-            assigned_tasks.append(available_tasks[task_idx])
-        key_to_ood_tasks[eval_key] = assigned_tasks
-        print(f"  Key '{eval_key}' assigned to OOD tasks: {assigned_tasks}")
+        # Assign ONE OOD task per evaluation key
+        task_idx = i % len(available_tasks)  # Simple round-robin assignment
+        key_to_ood_task[eval_key] = available_tasks[task_idx]
+        print(f"  Key '{eval_key}' assigned to OOD task: {available_tasks[task_idx]}")
     
-    # Generate per-key OOD sample sets
     ood_evaluation_data = {}
-    total_needed_per_key = n_samples_per_key + n_queries_per_key
     
     for eval_key in evaluation_keys:
+        ood_task = key_to_ood_task[eval_key]  # ✅ ONE task per key
+        
         try:
-            # Load examples from assigned OOD tasks for this key
-            all_examples = []
-            for ood_task in key_to_ood_tasks[eval_key]:
-                try:
-                    task_data = load_original_arc_evaluation_task(ood_task)
-                    task_examples = task_data.get('train', []) + task_data.get('test', [])
-                    all_examples.extend(task_examples)
-                except Exception as e:
-                    print(f"Error loading OOD task {ood_task} for key {eval_key}: {e}")
-                    continue
+            task_data = load_original_arc_evaluation_task(ood_task)
             
-            if not all_examples:
-                print(f"Warning: No examples available for key '{eval_key}'")
+            # ✅ CORRECT: Support and query from SAME OOD task
+            support_examples = task_data.get('train', [])  # From this OOD task
+            query_examples = task_data.get('test', [])     # From this SAME OOD task
+            
+            if not support_examples or not query_examples:
+                print(f"Warning: Insufficient examples for key '{eval_key}' from task '{ood_task}'")
+                print(f"  Support examples: {len(support_examples)}")
+                print(f"  Query examples: {len(query_examples)}")
                 continue
             
             # Use key-specific seed for reproducible sampling
             key_seed = seed + hash(eval_key)
             random.seed(key_seed)
             
-            # Sample total needed examples for this key
-            n_available = len(all_examples)
-            n_to_sample = min(total_needed_per_key, n_available)
+            # Sample support examples (from train data)
+            n_support_available = len(support_examples)
+            n_support_to_sample = min(n_samples_per_key, n_support_available)
             
-            if n_to_sample < total_needed_per_key:
-                print(f"Warning: Only {n_to_sample} examples available for key '{eval_key}', requested {total_needed_per_key}")
+            if n_support_to_sample < n_samples_per_key:
+                print(f"Warning: Only {n_support_to_sample} support examples available for key '{eval_key}', requested {n_samples_per_key}")
             
-            # Sample examples for this key
-            selected_examples = random.sample(all_examples, n_to_sample)
+            selected_support = random.sample(support_examples, n_support_to_sample)
             
-            # Split into support and query samples
-            support_samples = selected_examples[:n_samples_per_key]
-            query_samples = selected_examples[n_samples_per_key:n_samples_per_key + n_queries_per_key]
+            # Sample query examples (from test data)
+            n_query_available = len(query_examples)
+            n_query_to_sample = min(n_queries_per_key, n_query_available)
             
-            # Process support samples
+            if n_query_to_sample < n_queries_per_key:
+                print(f"Warning: Only {n_query_to_sample} query examples available for key '{eval_key}', requested {n_queries_per_key}")
+            
+            selected_query = random.sample(query_examples, n_query_to_sample)
+            
+            # Process support samples (from train data)
             support_input_sequences = []
             support_output_sequences = []
-            for example in support_samples:
+            for example in selected_support:
                 input_grid = np.array(example['input'])
                 output_grid = np.array(example['output'])
                 input_seq = transform_grid_to_sequence(input_grid)
@@ -777,10 +779,10 @@ def generate_ood_evaluation_dataset(evaluation_keys, n_samples_per_key, n_querie
                 support_input_sequences.append(input_seq)
                 support_output_sequences.append(output_seq)
             
-            # Process query samples
+            # Process query samples (from test data)
             query_input_sequences = []
             query_output_sequences = []
-            for example in query_samples:
+            for example in selected_query:
                 input_grid = np.array(example['input'])
                 output_grid = np.array(example['output'])
                 input_seq = transform_grid_to_sequence(input_grid)
@@ -792,21 +794,23 @@ def generate_ood_evaluation_dataset(evaluation_keys, n_samples_per_key, n_querie
                 'support': {
                     'input_sequences': support_input_sequences,
                     'output_sequences': support_output_sequences,
-                    'samples': support_samples
+                    'samples': selected_support,
+                    'data_source': 'train_examples'  # ✅ Track data source
                 },
                 'query': {
                     'input_sequences': query_input_sequences,
                     'output_sequences': query_output_sequences,
-                    'samples': query_samples
+                    'samples': selected_query,
+                    'data_source': 'test_examples'   # ✅ Track data source
                 },
-                'ood_task_keys': key_to_ood_tasks[eval_key],
-                'data_type': 'ood_original_arc'  # ✅ Track data type
+                'ood_task_keys': [ood_task],  # ✅ Single task per key
+                'data_type': 'ood_original_arc'
             }
             
-            print(f"  Key '{eval_key}': {len(support_input_sequences)} support, {len(query_input_sequences)} query OOD samples")
+            print(f"  Key '{eval_key}': {len(support_input_sequences)} support (train), {len(query_input_sequences)} query (test) OOD samples from task '{ood_task}'")
             
         except Exception as e:
-            print(f"Error generating OOD samples for key '{eval_key}': {e}")
+            print(f"Error generating OOD samples for key '{eval_key}' from task '{ood_task}': {e}")
             continue
     
     print(f"Generated OOD evaluation data for {len(ood_evaluation_data)} keys")

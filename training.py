@@ -79,7 +79,7 @@ def evaluate_accuracy(model, dataloader, device, is_multi_encoder=False, encoder
     evaluation_name = f"Encoder {encoder_idx}" if encoder_idx is not None else "PoE" if is_multi_encoder else "Model"
     
     with torch.no_grad():
-        for batch in dataloader:
+        for batch_idx_eval, batch in enumerate(dataloader):
             # Handle batch structure with keys
             if len(batch) >= 3:
                 batch_input_eval, batch_target_eval, batch_keys = batch[:3]
@@ -99,7 +99,7 @@ def evaluate_accuracy(model, dataloader, device, is_multi_encoder=False, encoder
                 num_steps = inference_settings.get('num_steps', 10)
                 lr = inference_settings.get('learning_rate', 0.1)
                 
-                z_eval, _ = get_optimized_z(
+                z_eval, _, _ = get_optimized_z(
                     model, batch_input_eval, batch_target_eval, 
                     context='evaluation',  # Use evaluation context
                     num_steps=num_steps,
@@ -127,6 +127,12 @@ def evaluate_accuracy(model, dataloader, device, is_multi_encoder=False, encoder
             shape_tgt_eval = batch_target_eval[:, 900:902].long()
             grid_tgt_eval = batch_target_eval[:, :900].long()
 
+            # Debug shape predictions
+            print(f"        DEBUG: Batch {batch_idx_eval} - shape_logits range: [{shape_logits_eval.min().item():.4f}, {shape_logits_eval.max().item():.4f}]")
+            print(f"        DEBUG: Batch {batch_idx_eval} - shape_pred: {shape_pred_eval.flatten().tolist()}")
+            print(f"        DEBUG: Batch {batch_idx_eval} - shape_tgt: {shape_tgt_eval.flatten().tolist()}")
+            print(f"        DEBUG: Batch {batch_idx_eval} - shape_matches: {(shape_pred_eval == shape_tgt_eval).sum().item()}/{shape_tgt_eval.numel()}")
+
             epoch_shape_correct += (shape_pred_eval == shape_tgt_eval).sum().item()
             epoch_shape_tokens += shape_tgt_eval.numel()
             
@@ -144,6 +150,11 @@ def evaluate_accuracy(model, dataloader, device, is_multi_encoder=False, encoder
                     sample_exact_correct += 1
 
     # Calculate accuracies
+    print(f"        DEBUG: Accuracy calculation:")
+    print(f"        DEBUG: - epoch_shape_correct: {epoch_shape_correct}, epoch_shape_tokens: {epoch_shape_tokens}")
+    print(f"        DEBUG: - epoch_grid_correct: {epoch_grid_correct}, epoch_grid_tokens: {epoch_grid_tokens}")
+    print(f"        DEBUG: - sample_exact_correct: {sample_exact_correct}, total_samples_eval: {total_samples_eval}")
+    
     shape_accuracy = epoch_shape_correct / epoch_shape_tokens if epoch_shape_tokens > 0 else 0.0
     grid_accuracy = epoch_grid_correct / epoch_grid_tokens if epoch_grid_tokens > 0 else 0.0
     overall_accuracy = (epoch_shape_correct + epoch_grid_correct) / (epoch_shape_tokens + epoch_grid_tokens) if (epoch_shape_tokens + epoch_grid_tokens) > 0 else 0.0
@@ -189,7 +200,6 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler,
     
     # ENABLE LEAVE-ONE-OUT TRAINING FOR ALL TRAINING TYPES
     cross_pair_enabled = training_settings.get('cross_pair_loss', {}).get('enabled', True)
-    cross_pair_num_pairs = training_settings.get('cross_pair_loss', {}).get('num_pairs', 4)
     
     # Repulsion parameters (for joint training)
     use_repulsion_loss = repulsion_loss_settings.get('enabled', False) and joint_training
@@ -253,6 +263,13 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler,
             input_seq, target_seq = batch[:2]
             batch_keys = None  # Fallback for non-key dataloaders
         
+        print(f"        DEBUG: Batch {batch_idx} - batch info:")
+        print(f"        DEBUG: - input_seq shape: {input_seq.shape}")
+        print(f"        DEBUG: - target_seq shape: {target_seq.shape}")
+        print(f"        DEBUG: - batch_keys: {batch_keys}")
+        print(f"        DEBUG: - input_seq range: [{input_seq.min().item():.4f}, {input_seq.max().item():.4f}]")
+        print(f"        DEBUG: - target_seq range: [{target_seq.min().item():.4f}, {target_seq.max().item():.4f}]")
+        
         input_seq  = input_seq.to(device)
         target_seq = target_seq.to(device)
 
@@ -265,7 +282,6 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler,
                 use_independent_decoder=(encoder_idx is not None and not joint_training),
                 # ENABLE LEAVE-ONE-OUT TRAINING FOR ALL
                 cross_pair_enabled=cross_pair_enabled,
-                cross_pair_num_pairs=cross_pair_num_pairs,
                 # Enhanced mechanisms
                 current_epoch=current_epoch_num,
                 **enhanced_training,
@@ -283,6 +299,17 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler,
             grid_comp  = comp.get('grid_loss' , torch.tensor(0.0, device=device))
             kl_comp    = comp.get('kl_loss'   , torch.tensor(0.0, device=device))
             repulsion_comp = comp.get('repulsion_loss', torch.tensor(0.0, device=device))
+
+            # Debug loss components
+            print(f"        DEBUG: Batch {batch_idx} - total_loss: {loss.item():.4f}")
+            print(f"        DEBUG: Batch {batch_idx} - shape_loss: {shape_comp.item():.4f}")
+            print(f"        DEBUG: Batch {batch_idx} - grid_loss: {grid_comp.item():.4f}")
+            print(f"        DEBUG: Batch {batch_idx} - kl_loss: {kl_comp.item():.4f}")
+            print(f"        DEBUG: Batch {batch_idx} - repulsion_loss: {repulsion_comp.item():.4f}")
+            
+            if not torch.isfinite(loss):
+                print(f"        ERROR: Non-finite loss detected in batch {batch_idx}: {loss.item()}")
+                print(f"        ERROR: Loss components - shape: {shape_comp.item()}, grid: {grid_comp.item()}, kl: {kl_comp.item()}")
 
             # normalize for accumulation
             loss = loss / gradient_accumulation_steps
@@ -313,7 +340,7 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler,
                     for enc_idx in range(model.num_encoders):
                         # Only store latents if we haven't reached the limit
                         if len(optimized_latents) < max_latents_to_store:
-                            z_optimized, _ = get_optimized_z(
+                            z_optimized, _, _ = get_optimized_z(
                                 model, input_sample, target_sample,
                                 context='training',
                                 num_steps=num_steps,
@@ -333,7 +360,7 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler,
                     # Single encoder or individual encoder training
                     # Only store latents if we haven't reached the limit
                     if len(optimized_latents) < max_latents_to_store:
-                        z_optimized, _ = get_optimized_z(
+                        z_optimized, _, _ = get_optimized_z(
                             model, input_sample, target_sample,
                             context='training',
                             num_steps=num_steps,
@@ -1254,7 +1281,11 @@ def comprehensive_evaluation_after_epoch(
     2. Evaluate with sample-level optimization, generating trajectory figures
     3. Plot latent space with support and query samples colored by keys
     """
+    import matplotlib
+    matplotlib.use('Agg')  # Use non-interactive backend
     import matplotlib.pyplot as plt
+    plt.rcParams['figure.max_open_warning'] = 0
+    
     import numpy as np
     from sklearn.manifold import TSNE
     from evaluation import main_test
@@ -1298,7 +1329,13 @@ def comprehensive_evaluation_after_epoch(
 
         # Apply t-SNE
         print("  Applying t-SNE to REAL OPTIMIZED training latents...")
-        tsne = TSNE(n_components=2, random_state=data_settings.get('training_seed', 42), perplexity=min(30, max(1, len(all_training_latents)//4)))
+        calculated_perplexity = min(30, max(1, len(all_training_latents)//4))
+        print(f"    DEBUG: t-SNE perplexity calculation - samples: {len(all_training_latents)}, calculated: {calculated_perplexity}")
+        if calculated_perplexity < 2:
+            calculated_perplexity = 2
+            print(f"    WARNING: Perplexity too low, setting to minimum value: {calculated_perplexity}")
+        
+        tsne = TSNE(n_components=2, random_state=data_settings.get('training_seed', 42), perplexity=calculated_perplexity)
         tsne_coords = tsne.fit_transform(all_training_latents)
 
         # Create visualization
@@ -1720,7 +1757,9 @@ def comprehensive_evaluation_after_epoch(
                     print(f"  Evaluation latents shape: {all_eval_latents.shape}")
 
                     print("  Applying t-SNE to evaluation latents...")
-                    tsne = TSNE(n_components=2, random_state=data_settings.get('eval_seed', 42), perplexity=min(30, max(1, len(all_eval_latents)//4)))
+                    calculated_perplexity = min(30, max(2, len(all_eval_latents)//4))
+                    print(f"    DEBUG: Eval t-SNE perplexity - samples: {len(all_eval_latents)}, perplexity: {calculated_perplexity}")
+                    tsne = TSNE(n_components=2, random_state=data_settings.get('eval_seed', 42), perplexity=calculated_perplexity)
                     tsne_coords = tsne.fit_transform(all_eval_latents)
 
                     plt.figure(figsize=(16, 12))

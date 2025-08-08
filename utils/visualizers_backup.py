@@ -3323,7 +3323,9 @@ def plot_comprehensive_latent_space(results, eval_results=None, save_dir=None):
         print(f"    Reduced to {combined_latents.shape[1]} dimensions with PCA")
     
     # Apply t-SNE
-    tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(combined_latents)//4))
+    calculated_perplexity = min(30, max(2, len(combined_latents)//4))
+    print(f"    DEBUG: Backup t-SNE perplexity - samples: {len(combined_latents)}, perplexity: {calculated_perplexity}")
+    tsne = TSNE(n_components=2, random_state=42, perplexity=calculated_perplexity)
     tsne_results = tsne.fit_transform(combined_latents)
     print("    [ OK ] t-SNE completed")
     
@@ -3508,7 +3510,9 @@ def get_comprehensive_latent_data_for_trajectory(run_dir):
         
         # Apply t-SNE
         from sklearn.manifold import TSNE
-        tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(combined_latents)//4), max_iter=1000)
+        calculated_perplexity = min(30, max(2, len(combined_latents)//4))
+        print(f"    DEBUG: Backup t-SNE perplexity 2 - samples: {len(combined_latents)}, perplexity: {calculated_perplexity}")
+        tsne = TSNE(n_components=2, random_state=42, perplexity=calculated_perplexity, max_iter=1000)
         tsne_2d = tsne.fit_transform(combined_latents_reduced)
         
         return combined_latents, tsne_2d, all_labels, all_colors

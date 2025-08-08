@@ -2166,6 +2166,8 @@ def load_unified_latent_data_with_trajectory(run_dir, model, device, trajectory_
                 print(f"[ WARNING ] No support/query latents found for key '{evaluated_key}'")
         else:
             print(f"[ WARNING ] No evaluation data found for key '{evaluated_key}'")
+            print(f"    DEBUG: Available evaluation keys: {list(key_results.keys()) if key_results else 'None'}")
+            print(f"    DEBUG: Requested key: '{evaluated_key}'")
     except Exception as e:
         print(f"[ WARNING ] Warning: Could not load support/query data from evaluation results: {e}")
         import traceback

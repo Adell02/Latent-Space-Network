@@ -932,7 +932,6 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
     anti_batch_lambda = phase_a_settings.get('anti_batch_lambda', BETA)
     cross_pair_settings = phase_a_settings.get('cross_pair_loss', {})
     cross_pair_enabled = cross_pair_settings.get('enabled', False)
-    cross_pair_num_pairs = cross_pair_settings.get('num_pairs', 4)
     
     # Use settings for phase epochs if not provided
     if phase_epochs is None:
@@ -942,7 +941,7 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
     logger.info(f"Specialist Phase A configuration:")
     logger.info(f"  Cross-pair reconstruction: {'ENABLED' if cross_pair_enabled else 'DISABLED'}")
     if cross_pair_enabled:
-        logger.info(f"    - Cross-pair sampling: {cross_pair_num_pairs if cross_pair_num_pairs else 'ALL'} pairs")
+        logger.info(f"    - Cross-pair sampling: 'ALL' pairs")
     logger.info(f"  Anti-batch training: {'ENABLED' if anti_batch_size > 0 else 'DISABLED'}")
     if anti_batch_size > 0:
         logger.info(f"    - Anti-batch proportion: {anti_batch_size:.1%}")
@@ -1166,7 +1165,6 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                         anti_mask=anti_mask,  # Enable anti-batch training
                         anti_batch_lambda=anti_batch_lambda,
                         cross_pair_enabled=cross_pair_enabled,
-                        cross_pair_num_pairs=cross_pair_num_pairs,
                         # Enhanced mechanisms
                         use_cyclical_beta=use_cyclical_beta,
                         beta_cycle_length=beta_cycle_length,
@@ -1849,6 +1847,8 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
         run_dir: Directory to use for training (if None, creates one)
         notes: Notes to add to the WandB run
     """
+    # Enable anomaly detection to catch NaN origins
+    torch.autograd.set_detect_anomaly(True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     

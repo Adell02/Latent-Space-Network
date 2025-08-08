@@ -90,7 +90,6 @@
     "return_task_keys": true,
     "cross_pair_loss": {
       "enabled": true,
-      "num_pairs": 4,
       "description": "Cross-pair reconstruction loss for generalization"
     },
     "learning_rate_scheduler": {

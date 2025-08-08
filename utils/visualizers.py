@@ -2622,7 +2622,9 @@ def plot_evaluation_latent_space_by_key_and_encoder(eval_results, save_dir, epoc
     unique_encoders = sorted(list(set(all_encoders)))
     
     # t-SNE
-    tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(all_latents)//4))
+    calculated_perplexity = min(30, max(2, len(all_latents)//4))
+    print(f"    DEBUG: t-SNE perplexity calculation - samples: {len(all_latents)}, calculated: {calculated_perplexity}")
+    tsne = TSNE(n_components=2, random_state=42, perplexity=calculated_perplexity)
     tsne_coords = tsne.fit_transform(all_latents)
     
     # Color map

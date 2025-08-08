@@ -2,8 +2,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
-from utils.settings_manager import settings
 import numpy as np
+from utils.settings_manager import settings
+import logging
+from models.base_model import get_latent_dim
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 def optimize_latent_z(lpn, input_seq, target_seq, num_steps=None, lr=None, return_trajectory=False,
                      encoder_idx=None, use_independent_decoder=False):
@@ -22,8 +27,31 @@ def optimize_latent_z(lpn, input_seq, target_seq, num_steps=None, lr=None, retur
         
     batch_size = input_seq.size(0)
     device = input_seq.device
-        
-    # Get initial latent representation
+    
+    # DEBUG: Check input data format
+    logger.debug(f"    DEBUG: input_seq shape: {input_seq.shape}")
+    logger.debug(f"    DEBUG: target_seq shape: {target_seq.shape}")
+    logger.debug(f"    DEBUG: input_seq range: [{input_seq.min().item():.4f}, {input_seq.max().item():.4f}]")
+    logger.debug(f"    DEBUG: target_seq range: [{target_seq.min().item():.4f}, {target_seq.max().item():.4f}]")
+    
+    # Check sequence lengths
+    if input_seq.shape[1] != 902:
+        logger.warning(f"    WARNING: input_seq length is {input_seq.shape[1]}, expected 902")
+    if target_seq.shape[1] != 902:
+        logger.warning(f"    WARNING: target_seq length is {target_seq.shape[1]}, expected 902")
+    
+    # Check target sequence format
+    if not torch.is_tensor(target_seq):
+        logger.warning(f"    WARNING: target_seq is not a tensor, type: {type(target_seq)}")
+        target_seq = torch.tensor(target_seq, device=device, dtype=torch.float32)
+    
+    # Check for valid target values
+    if torch.isnan(target_seq).any():
+        logger.error(f"    ERROR: target_seq contains NaN values!")
+    if torch.isinf(target_seq).any():
+        logger.error(f"    ERROR: target_seq contains Inf values!")
+    
+    # Get initial latent representation from encoder
     with torch.no_grad():
         if hasattr(lpn, 'is_multi_encoder') and lpn.is_multi_encoder:
             if encoder_idx is not None:
@@ -37,8 +65,40 @@ def optimize_latent_z(lpn, input_seq, target_seq, num_steps=None, lr=None, retur
             # For single encoder
             mu, log_var, _ = lpn.encoder(input_seq, target_seq)
     
-    z = lpn.reparameterize(mu, log_var)
+    # DEBUG: Check if using VQ-VAE
+    is_vq_vae = hasattr(lpn, 'is_using_vq_vae') and lpn.is_using_vq_vae()
+    if is_vq_vae:
+        logger.debug(f"    DEBUG: Model is using VQ-VAE")
+        logger.debug(f"    DEBUG: mu shape: {mu.shape}, log_var shape: {log_var.shape}")
+        # For VQ-VAE, mu contains quantized latents, log_var contains VQ loss
+        z = mu.detach().clone().requires_grad_(True)
+    else:
+        # DEBUG: Check encoder outputs
+        if torch.isnan(mu).any():
+            logger.error(f"    ERROR: NaN detected in encoder mu!")
+            logger.error(f"    ERROR: mu shape: {mu.shape}")
+            logger.error(f"    ERROR: mu range: [{mu.min().item():.4f}, {mu.max().item():.4f}]")
+        if torch.isnan(log_var).any():
+            logger.error(f"    ERROR: NaN detected in encoder log_var!")
+            logger.error(f"    ERROR: log_var shape: {log_var.shape}")
+            logger.error(f"    ERROR: log_var range: [{log_var.min().item():.4f}, {log_var.max().item():.4f}]")
+        
+        # Initialize z with the encoder's output
+        z = lpn.reparameterize(mu, log_var).detach().clone().requires_grad_(True)
+    
     initial_z = z.detach().clone()
+    
+    # DEBUG: Check initial z
+    if torch.isnan(z).any():
+        logger.error(f"    ERROR: NaN detected in initial z!")
+        logger.error(f"    ERROR: z shape: {z.shape}")
+        logger.error(f"    ERROR: z range: [{z.min().item():.4f}, {z.max().item():.4f}]")
+        if is_vq_vae:
+            logger.error(f"    ERROR: VQ-VAE mode - z should be quantized latents")
+        else:
+            logger.error(f"    ERROR: This suggests NaN was introduced during reparameterization")
+            logger.error(f"    ERROR: mu range: [{mu.min().item():.4f}, {mu.max().item():.4f}]")
+            logger.error(f"    ERROR: log_var range: [{log_var.min().item():.4f}, {log_var.max().item():.4f}]")
 
     # Compute individual initial losses for each sample
     with torch.no_grad():
@@ -54,50 +114,79 @@ def optimize_latent_z(lpn, input_seq, target_seq, num_steps=None, lr=None, retur
         
         # Compute per-sample initial losses
         initial_losses = []
+        
         for i in range(batch_size):
             # Shape loss for this sample
             shape_pred_i = shape_logits_init[i:i+1]
             shape_tgt_i = target_seq[i:i+1, 900:902].long()
-            shape_loss_i = F.cross_entropy(shape_pred_i.reshape(-1, 31), shape_tgt_i.reshape(-1))
+            shape_pred_reshaped = shape_pred_i.reshape(-1, 31)
+            shape_tgt_reshaped = shape_tgt_i.reshape(-1)
+            
+            try:
+                shape_loss_i = F.cross_entropy(shape_pred_reshaped, shape_tgt_reshaped)
+            except Exception as e:
+                logger.error(f"    ERROR: Sample {i} - shape loss computation failed: {e}")
+                continue
             
             # Grid loss for this sample
             tgt_rows = int(target_seq[i, 900].item())
             tgt_cols = int(target_seq[i, 901].item())
             active_pixels = tgt_rows * tgt_cols
+            
             if active_pixels > 0:
-                grid_loss_i = F.cross_entropy(grid_logits_init[i, :active_pixels],
-                                            target_seq[i, :active_pixels].long())
+                grid_pred_i = grid_logits_init[i, :active_pixels]
+                grid_tgt_i = target_seq[i, :active_pixels].long()
+                
+                try:
+                    grid_loss_i = F.cross_entropy(grid_pred_i, grid_tgt_i)
+                except Exception as e:
+                    logger.error(f"    ERROR: Sample {i} - grid loss computation failed: {e}")
+                    continue
             else:
                 grid_loss_i = torch.tensor(0.0, device=device)
             
             sample_loss = (shape_loss_i + grid_loss_i).item()
+            
+            # Check for non-finite values
+            if not torch.isfinite(torch.tensor(sample_loss)):
+                logger.error(f"    ERROR: Sample {i} - Non-finite loss detected: {sample_loss}")
+                continue
+                
             initial_losses.append(sample_loss)
+        
+        if not initial_losses:
+            logger.error(f"    ERROR: No initial losses computed! Empty batch or all samples failed.")
+            return z, float('inf'), {} if return_trajectory else None
+        
+        # Check for non-finite losses
+        if not all(torch.isfinite(torch.tensor(l)) for l in initial_losses):
+            logger.error(f"    ERROR: Non-finite losses detected in initial_losses: {initial_losses}")
+            return z, float('inf'), {} if return_trajectory else None
+        
+        # Compute batch average losses
+        batch_avg_losses = [sum(initial_losses) / len(initial_losses)]
 
-    # Detach z from the graph and enable gradients on it.
-    z = z.detach().requires_grad_(True)
+    # Initialize optimizer for z
     optimizer_z = torch.optim.Adam([z], lr=lr)
-
-    # Track individual sample losses and batch average
-    individual_losses = [initial_losses]  # Each element is a list of losses for all samples at that step
-    batch_avg_losses = [sum(initial_losses) / len(initial_losses)]
     
-    # Track trajectory information if requested
-    trajectory = {
-        'z_vectors': [initial_z.detach().clone()],
-        'losses': [batch_avg_losses[0]],  # Keep as list for consistency
-        'individual_losses': individual_losses,  # NEW: Per-sample losses for each step
-        'encoder_mu': mu.detach().clone(),
-        'encoder_log_var': log_var.detach().clone(),
-        'initial_z': initial_z.detach().clone()
-    } if return_trajectory else None
-
-    print(f"    Gradient ascent: {num_steps} steps, LR: {lr}, Batch size: {batch_size}")
-    print(f"    Initial batch avg loss: {batch_avg_losses[0]:.4f}")
+    # Initialize trajectory tracking
+    individual_losses = [initial_losses]
+    trajectory = {'z_vectors': [initial_z], 'losses': [batch_avg_losses[0]]} if return_trajectory else None
 
     pbar = tqdm(range(num_steps), desc="Gradient ascent", unit="step", leave=False)
 
     for step in pbar:
         optimizer_z.zero_grad()
+        
+        # DEBUG: Check inputs to decoder
+        if torch.isnan(z).any():
+            logger.error(f"    ERROR: NaN detected in z before decoder call!")
+            logger.error(f"    ERROR: z shape: {z.shape}")
+            logger.error(f"    ERROR: z range: [{z.min().item():.4f}, {z.max().item():.4f}]")
+        if torch.isnan(input_seq).any():
+            logger.error(f"    ERROR: NaN detected in input_seq before decoder call!")
+        if torch.isnan(target_seq).any():
+            logger.error(f"    ERROR: NaN detected in target_seq before decoder call!")
         
         # Decode using the current z
         if hasattr(lpn, 'is_multi_encoder') and lpn.is_multi_encoder:
@@ -109,6 +198,16 @@ def optimize_latent_z(lpn, input_seq, target_seq, num_steps=None, lr=None, retur
                 shape_logits, grid_logits = lpn.multi_encoder.shared_decoder(z, input_seq, target_seq=target_seq)
         else:
             shape_logits, grid_logits = lpn.decoder(z, input_seq, target_seq=target_seq)
+
+        # DEBUG: Check decoder outputs for NaN
+        if torch.isnan(shape_logits).any():
+            logger.error(f"    ERROR: NaN detected in shape_logits from decoder!")
+            logger.error(f"    ERROR: shape_logits shape: {shape_logits.shape}")
+            logger.error(f"    ERROR: shape_logits range: [{shape_logits.min().item():.4f}, {shape_logits.max().item():.4f}]")
+        if torch.isnan(grid_logits).any():
+            logger.error(f"    ERROR: NaN detected in grid_logits from decoder!")
+            logger.error(f"    ERROR: grid_logits shape: {grid_logits.shape}")
+            logger.error(f"    ERROR: grid_logits range: [{grid_logits.min().item():.4f}, {grid_logits.max().item():.4f}]")
 
         # Compute batch loss for backpropagation (keep existing approach)
         shape_targets = target_seq[:, 900:902].long()
@@ -214,43 +313,64 @@ def optimize_latent_z_from_initial(lpn, input_seq, target_seq, initial_z, num_st
         
         # Compute per-sample initial losses
         initial_losses = []
+        
         for i in range(batch_size):
             # Shape loss for this sample
             shape_pred_i = shape_logits_init[i:i+1]
             shape_tgt_i = target_seq[i:i+1, 900:902].long()
-            shape_loss_i = F.cross_entropy(shape_pred_i.reshape(-1, 31), shape_tgt_i.reshape(-1))
+            shape_pred_reshaped = shape_pred_i.reshape(-1, 31)
+            shape_tgt_reshaped = shape_tgt_i.reshape(-1)
+            
+            try:
+                shape_loss_i = F.cross_entropy(shape_pred_reshaped, shape_tgt_reshaped)
+            except Exception as e:
+                logger.error(f"    ERROR: Sample {i} - shape loss computation failed: {e}")
+                continue
             
             # Grid loss for this sample
             tgt_rows = int(target_seq[i, 900].item())
             tgt_cols = int(target_seq[i, 901].item())
             active_pixels = tgt_rows * tgt_cols
+            
             if active_pixels > 0:
-                grid_loss_i = F.cross_entropy(grid_logits_init[i, :active_pixels],
-                                            target_seq[i, :active_pixels].long())
+                grid_pred_i = grid_logits_init[i, :active_pixels]
+                grid_tgt_i = target_seq[i, :active_pixels].long()
+                
+                try:
+                    grid_loss_i = F.cross_entropy(grid_pred_i, grid_tgt_i)
+                except Exception as e:
+                    logger.error(f"    ERROR: Sample {i} - grid loss computation failed: {e}")
+                    continue
             else:
                 grid_loss_i = torch.tensor(0.0, device=device)
             
             sample_loss = (shape_loss_i + grid_loss_i).item()
+            
+            # Check for non-finite values
+            if not torch.isfinite(torch.tensor(sample_loss)):
+                logger.error(f"    ERROR: Sample {i} - Non-finite loss detected: {sample_loss}")
+                continue
+                
             initial_losses.append(sample_loss)
+        
+        if not initial_losses:
+            logger.error(f"    ERROR: No initial losses computed! Empty batch or all samples failed.")
+            return z, float('inf'), {} if return_trajectory else None
+        
+        # Check for non-finite losses
+        if not all(torch.isfinite(torch.tensor(l)) for l in initial_losses):
+            logger.error(f"    ERROR: Non-finite losses detected in initial_losses: {initial_losses}")
+            return z, float('inf'), {} if return_trajectory else None
+        
+        # Compute batch average losses
+        batch_avg_losses = [sum(initial_losses) / len(initial_losses)]
 
-    # Detach z from the graph and enable gradients on it.
-    z = z.detach().requires_grad_(True)
+    # Initialize optimizer for z
     optimizer_z = torch.optim.Adam([z], lr=lr)
-
-    # Track individual sample losses and batch average
-    individual_losses = [initial_losses]  # Each element is a list of losses for all samples at that step
-    batch_avg_losses = [sum(initial_losses) / len(initial_losses)]
     
-    # Track trajectory information if requested
-    trajectory = {
-        'z_vectors': [initial_z.detach().clone()],
-        'losses': [batch_avg_losses[0]],  # Keep as list for consistency
-        'individual_losses': individual_losses,  # NEW: Per-sample losses for each step
-        'initial_z': initial_z.detach().clone()
-    } if return_trajectory else None
-
-    print(f"    Gradient ascent from support sample: {num_steps} steps, LR: {lr}, Batch size: {batch_size}")
-    print(f"    Initial batch avg loss: {batch_avg_losses[0]:.4f}")
+    # Initialize trajectory tracking
+    individual_losses = [initial_losses]
+    trajectory = {'z_vectors': [initial_z], 'losses': [batch_avg_losses[0]]} if return_trajectory else None
 
     pbar = tqdm(range(num_steps), desc="Gradient ascent", unit="step", leave=False)
 
@@ -310,8 +430,6 @@ def optimize_latent_z_from_initial(lpn, input_seq, target_seq, initial_z, num_st
             # Keep losses as a list for consistency with other optimization methods
             trajectory['losses'].append(batch_avg_losses[-1])
     
-    print(f"    Final batch avg loss: {batch_avg_losses[-1]:.4f}")
-    print(f"    Loss improvement: {batch_avg_losses[0] - batch_avg_losses[-1]:.4f}")
     
     if return_trajectory:
         return z.detach(), batch_avg_losses[-1], trajectory
@@ -336,8 +454,6 @@ def evolutionary_optimize_latent_z(lpn, input_seq, target_seq, population_size=N
         mutation_std = evolutionary_settings['mutation_std']
         
     batch_size = input_seq.size(0)
-    print(f"    Evolutionary optimization: {num_generations} generations, "
-          f"Pop size: {population_size}, Mutation std: {mutation_std}, Batch size: {batch_size}")
         
     device = input_seq.device
     with torch.no_grad():
@@ -390,7 +506,6 @@ def evolutionary_optimize_latent_z(lpn, input_seq, target_seq, population_size=N
         'method': 'evolutionary'
     } if return_trajectory else None
     
-    print(f"    Initial loss: {initial_loss:.4f}")
     
     # Create progress bar for generations
     pbar = tqdm(range(num_generations), desc="Evolutionary", unit="gen", leave=False)
@@ -458,9 +573,6 @@ def evolutionary_optimize_latent_z(lpn, input_seq, target_seq, population_size=N
     pbar.close()
     
     loss_improvement = initial_loss - best_loss
-    print(f"    [ OK ] Evolutionary optimization complete: "
-          f"Loss {initial_loss:.4f} → {best_loss:.4f} "
-          f"(Δ: {loss_improvement:+.4f})")
     
     if return_trajectory:
         return best_candidate, trajectory['losses'], trajectory
@@ -491,7 +603,7 @@ def voronoi_optimize_latent_z(lpn, input_seq, target_seq, population_size=None,
         mutation_std = voronoi_settings['mutation_std']
         
     batch_size = input_seq.size(0)
-    print(f"    Voronoi optimization: {num_generations} generations, "
+    logger.info(f"    Voronoi optimization: {num_generations} generations, "
           f"Pop size: {population_size}, Diversity weight: {diversity_weight}, "
           f"Mutation std: {mutation_std}, Batch size: {batch_size}")
         
@@ -564,7 +676,6 @@ def voronoi_optimize_latent_z(lpn, input_seq, target_seq, population_size=None,
         'diversity_weight': diversity_weight
     } if return_trajectory else None
     
-    print(f"    Initial loss: {initial_loss:.4f}")
     
     # Create progress bar for generations
     pbar = tqdm(range(num_generations), desc="Voronoi", unit="gen", leave=False)
@@ -639,9 +750,6 @@ def voronoi_optimize_latent_z(lpn, input_seq, target_seq, population_size=None,
     pbar.close()
     
     loss_improvement = initial_loss - best_loss
-    print(f"    [ OK ] Voronoi optimization complete: "
-          f"Loss {initial_loss:.4f} → {best_loss:.4f} "
-          f"(Δ: {loss_improvement:+.4f}), Best score: {best_score:.4f}")
     
     if return_trajectory:
         return best_candidate, trajectory['losses'], trajectory
@@ -690,7 +798,7 @@ def get_optimized_z(lpn, input_seq, target_seq, num_steps=None, lr=None, context
     
     # MEAN OPTIMIZATION: If steps=0, return mean of posterior (no sampling)
     if final_num_steps == 0:
-        print(f"    Mean optimization: num_steps=0, returning mean of posterior (no sampling)")
+        logger.info(f"    Mean optimization: num_steps=0, returning mean of posterior (no sampling)")
         with torch.no_grad():
             if hasattr(lpn, 'is_multi_encoder') and lpn.is_multi_encoder:
                 if encoder_idx is not None:
@@ -719,26 +827,43 @@ def get_optimized_z(lpn, input_seq, target_seq, num_steps=None, lr=None, context
                 }
                 return z, 0.0, trajectory
             else:
-                return z, 0.0
+                return z, 0.0, None
     
     if enabled:
-        print(f"    Latent optimization ENABLED: method={optimization_method}, steps={final_num_steps}, lr={final_lr}")
+        logger.info(f"    Latent optimization ENABLED: method={optimization_method}, steps={final_num_steps}, lr={final_lr}")
         if optimization_method == "gradient":
             with torch.enable_grad():
                 result = optimize_latent_z(lpn, input_seq, target_seq, 
                                        num_steps=final_num_steps, lr=final_lr, 
                                        return_trajectory=return_trajectory,
                                        encoder_idx=encoder_idx, use_independent_decoder=use_independent_decoder)
-                print(f"    Optimization completed, trajectory returned: {result[2] is not None if len(result) > 2 else False}")
-                return result
+                logger.info(f"    Optimization completed, trajectory returned: {result[2] is not None if len(result) > 2 else False}")
+                # Ensure we always return 3 values
+                if len(result) == 2:
+                    z, loss = result
+                    return z, loss, None
+                else:
+                    return result
         elif optimization_method == "evolutionary":
             # For evolutionary and voronoi, we don't use num_steps/lr but their own parameters
             # However, we could map num_steps to num_generations if needed
-            return evolutionary_optimize_latent_z(lpn, input_seq, target_seq, 
+            result = evolutionary_optimize_latent_z(lpn, input_seq, target_seq, 
                                                 return_trajectory=return_trajectory)
+            # Ensure we always return 3 values
+            if len(result) == 2:
+                z, loss = result
+                return z, loss, None
+            else:
+                return result
         elif optimization_method == "voronoi":
-            return voronoi_optimize_latent_z(lpn, input_seq, target_seq,
+            result = voronoi_optimize_latent_z(lpn, input_seq, target_seq,
                                            return_trajectory=return_trajectory)
+            # Ensure we always return 3 values
+            if len(result) == 2:
+                z, loss = result
+                return z, loss, None
+            else:
+                return result
         else:
             # Unknown method, fall back to basic sampling
             with torch.no_grad():
@@ -754,12 +879,11 @@ def get_optimized_z(lpn, input_seq, target_seq, num_steps=None, lr=None, context
                     # For single encoder
                     mu, log_var, _ = lpn.encoder(input_seq, target_seq)
                     z = lpn.reparameterize(mu, log_var)
-            if return_trajectory:
-                return z, None, None
-            else:
-                return z, None
+                
+                return z, 0.0, None
     else:
-        # Optimization disabled, just use basic sampling
+        # Optimization disabled, use basic sampling
+        logger.info(f"    Latent optimization DISABLED, using basic sampling")
         with torch.no_grad():
             if hasattr(lpn, 'is_multi_encoder') and lpn.is_multi_encoder:
                 if encoder_idx is not None:
@@ -773,10 +897,8 @@ def get_optimized_z(lpn, input_seq, target_seq, num_steps=None, lr=None, context
                 # For single encoder
                 mu, log_var, _ = lpn.encoder(input_seq, target_seq)
                 z = lpn.reparameterize(mu, log_var)
-        if return_trajectory:
-            return z, None, None
-        else:
-            return z, None
+            
+            return z, 0.0, None
 
 def get_optimized_z_from_initial(lpn, input_seq, target_seq, initial_z, num_steps=None, lr=None, context='training', 
                                 return_trajectory=False, encoder_idx=None, use_independent_decoder=False):
@@ -785,20 +907,20 @@ def get_optimized_z_from_initial(lpn, input_seq, target_seq, initial_z, num_step
     This ensures the trajectory starts from exactly the same point as the support sample.
     """
     # DEBUG: Check input types
-    print(f"DEBUG: get_optimized_z_from_initial called")
-    print(f"DEBUG: initial_z type: {type(initial_z)}")
-    print(f"DEBUG: initial_z shape: {initial_z.shape if hasattr(initial_z, 'shape') else 'no shape'}")
+    logger.debug(f"DEBUG: get_optimized_z_from_initial called")
+    logger.debug(f"DEBUG: initial_z type: {type(initial_z)}")
+    logger.debug(f"DEBUG: initial_z shape: {initial_z.shape if hasattr(initial_z, 'shape') else 'no shape'}")
     if hasattr(initial_z, 'cpu'):
-        print(f"DEBUG: initial_z is tensor")
+        logger.debug(f"DEBUG: initial_z is tensor")
     else:
-        print(f"DEBUG: initial_z is NOT tensor!")
+        logger.debug(f"DEBUG: initial_z is NOT tensor!")
         # Convert to tensor if it's not already
         if isinstance(initial_z, np.ndarray):
-            print(f"DEBUG: Converting numpy array to tensor")
+            logger.debug(f"DEBUG: Converting numpy array to tensor")
             initial_z = torch.tensor(initial_z, dtype=torch.float32, device=input_seq.device)
-            print(f"DEBUG: Converted initial_z shape: {initial_z.shape}")
+            logger.debug(f"DEBUG: Converted initial_z shape: {initial_z.shape}")
         else:
-            print(f"ERROR: initial_z is neither tensor nor numpy array!")
+            logger.error(f"ERROR: initial_z is neither tensor nor numpy array!")
             raise ValueError(f"initial_z must be tensor or numpy array, got {type(initial_z)}")
     
     # Get settings from settings manager (moved inside function for sweep compatibility)
@@ -820,24 +942,24 @@ def get_optimized_z_from_initial(lpn, input_seq, target_seq, initial_z, num_step
     final_lr = lr if lr is not None else default_lr
     
     if enabled:
-        print(f"    Latent optimization ENABLED: method={optimization_method}, steps={final_num_steps}, lr={final_lr}")
+        logger.info(f"    Latent optimization ENABLED: method={optimization_method}, steps={final_num_steps}, lr={final_lr}")
         if optimization_method == "gradient":
             with torch.enable_grad():
                 result = optimize_latent_z_from_initial(lpn, input_seq, target_seq, initial_z,
                                                      num_steps=final_num_steps, lr=final_lr, 
                                                      return_trajectory=return_trajectory,
                                                      encoder_idx=encoder_idx, use_independent_decoder=use_independent_decoder)
-                print(f"    Optimization completed, trajectory returned: {result[2] is not None if len(result) > 2 else False}")
+                logger.info(f"    Optimization completed, trajectory returned: {result[2] is not None if len(result) > 2 else False}")
                 return result
         else:
             # For other methods, fall back to regular optimization
-            print(f"    Warning: Using regular optimization for method {optimization_method}")
+            logger.warning(f"    Warning: Using regular optimization for method {optimization_method}")
             return get_optimized_z(lpn, input_seq, target_seq, num_steps=final_num_steps, lr=final_lr,
                                  context=context, return_trajectory=return_trajectory,
                                  encoder_idx=encoder_idx, use_independent_decoder=use_independent_decoder)
     else:
         # Optimization disabled, return the initial z
-        print(f"    Latent optimization DISABLED, returning initial z")
+        logger.info(f"    Latent optimization DISABLED, returning initial z")
         if return_trajectory:
             return initial_z, None, None
         else:
@@ -895,7 +1017,7 @@ def optimize_task_latent(lpn, support_samples, task_key, num_steps=None, lr=None
     task_latent = task_latent.detach().requires_grad_(True)
     optimizer = torch.optim.Adam([task_latent], lr=lr)
     
-    print(f"    Task-level optimization for '{task_key}': {len(support_samples)} support samples, {num_steps} steps, LR: {lr}")
+    logger.info(f"    Task-level optimization for '{task_key}': {len(support_samples)} support samples, {num_steps} steps, LR: {lr}")
     
     # Track trajectory
     trajectory = {
@@ -967,6 +1089,6 @@ def optimize_task_latent(lpn, support_samples, task_key, num_steps=None, lr=None
         pbar.set_postfix({'loss': f'{loss_value:.4f}'})
     
     final_loss = trajectory['losses'][-1] if trajectory['losses'] else None
-    print(f"    Task '{task_key}' optimization complete. Final loss: {final_loss:.4f}")
+    logger.info(f"    Task '{task_key}' optimization complete. Final loss: {final_loss:.4f}")
     
     return task_latent.detach(), final_loss, trajectory
