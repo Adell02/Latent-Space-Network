@@ -185,11 +185,28 @@ def gaussian_poe(mu: torch.Tensor, logvar: torch.Tensor, debug=False) -> Tuple[t
     -------
     fused_mu, fused_logvar : (B, D)
     """
+    if debug:
+        print(f"PoE Debug: Input shapes - mu: {mu.shape}, logvar: {logvar.shape}")
+        print(f"PoE Debug: mu stats - min: {mu.min():.4f}, max: {mu.max():.4f}, mean: {mu.mean():.4f}")
+        print(f"PoE Debug: logvar stats - min: {logvar.min():.4f}, max: {logvar.max():.4f}, mean: {logvar.mean():.4f}")
+        
+        # Check if encoders are producing identical outputs
+        if mu.shape[0] > 1:
+            mu_diff = torch.abs(mu[0] - mu[1]).mean()
+            logvar_diff = torch.abs(logvar[0] - logvar[1]).mean()
+            print(f"PoE Debug: Encoder differences - mu_diff: {mu_diff:.6f}, logvar_diff: {logvar_diff:.6f}")
+            
+            if mu_diff < 1e-6 and logvar_diff < 1e-6:
+                print("WARNING: Encoders are producing nearly identical outputs!")
     
     precision   = torch.exp(-logvar)            # Σ⁻¹
     fused_var   = 1. / precision.sum(0)         # (B,D)
     fused_mu    = fused_var * (precision * mu).sum(0)
     fused_logvar = fused_var.log()
+    
+    if debug:
+        print(f"PoE Debug: Output shapes - fused_mu: {fused_mu.shape}, fused_logvar: {fused_logvar.shape}")
+        print(f"PoE Debug: fused_mu stats - min: {fused_mu.min():.4f}, max: {fused_mu.max():.4f}, mean: {fused_mu.mean():.4f}")
     
     return fused_mu, fused_logvar
 
@@ -350,7 +367,6 @@ class TransformerEncoder(nn.Module):
             # Standard VAE path
             mu = self.fc_mu(cls_output)
             log_var = self.fc_log_var(cls_output)
-            
             return mu, log_var, None
 
     def get_vq_metrics(self) -> Optional[Dict[str, Any]]:
@@ -402,7 +418,7 @@ class TransformerDecoder(nn.Module):
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=hidden_dim,
             nhead=num_heads,
-            dim_feedforward=4 * hidden_dim,  # Match paper's 4×H
+            dim_feedforward=hidden_dim,
             dropout=dropout,
             batch_first=True,
             norm_first=True
@@ -419,18 +435,43 @@ class TransformerDecoder(nn.Module):
         self.grid_output  = nn.Linear(hidden_dim, 10)
         self.layer_norm   = nn.LayerNorm(hidden_dim)
 
-    def prepare_input_memory(self, z: torch.Tensor) -> torch.Tensor:
+    def prepare_input_memory(self, z: torch.Tensor, input_seq: torch.Tensor) -> torch.Tensor:
         """
-        Expand the latent across sequence length and project into memory space.
+        Build decoder memory that conditions on both the latent vector and the input grid tokens.
+
+        - Latent contribution: project latent to hidden_dim and expand across sequence length
+        - Input contribution: embed input grid tokens with positional encodings, and input shape tokens
+        - Fuse by addition, then project to memory space
         """
         # Handle tensors with extra dimensions (e.g., from multi-encoder)
         if z.dim() > 2:
+            # Flatten all dimensions except the last one to get [B, latent_dim]
             z = z.flatten(start_dim=0, end_dim=-2)
-        
-        # z: [B, latent_dim]
-        latent_emb      = self.latent_projection(z)                # [B, hidden_dim]
-        latent_expanded = latent_emb.unsqueeze(1).expand(-1, 902, -1)  # [B, 902, hidden_dim]
-        memory          = self.memory_projection(latent_expanded)  # [B, 902, hidden_dim]
+
+        batch_size = input_seq.size(0)
+        device = input_seq.device
+
+        # Latent: [B, hidden_dim] -> [B, 902, hidden_dim]
+        latent_emb = self.latent_projection(z)
+        latent_expanded = latent_emb.unsqueeze(1).expand(-1, 902, -1)
+
+        # Input grid embedding with row/col positional encodings
+        inp_grid = torch.clamp(input_seq[:, :900], 0, 9).long()                    # [B, 900]
+        grid_emb = self.output_grid_embedding(inp_grid)                            # [B, 900, H]
+        pos_i = torch.arange(30, device=device).view(1, -1, 1).repeat(batch_size, 1, 30)
+        pos_j = torch.arange(30, device=device).view(1, 1, -1).repeat(batch_size, 30, 1)
+        grid_pos = (self.row_embedding(pos_i) + self.col_embedding(pos_j)).view(batch_size, 900, -1)
+        grid_emb = grid_emb + grid_pos                                             # [B, 900, H]
+
+        # Input shape embedding (rows, cols)
+        inp_shape = torch.clamp(input_seq[:, 900:902], 0, 30).long()               # [B, 2]
+        shape_emb = self.output_shape_embedding(inp_shape)                          # [B, 2, H]
+
+        input_emb_full = torch.cat([grid_emb, shape_emb], dim=1)                   # [B, 902, H]
+
+        # Fuse latent and input into memory
+        fused = latent_expanded + input_emb_full                                    # [B, 902, H]
+        memory = self.memory_projection(fused)                                      # [B, 902, H]
         return memory
 
     def get_position_embedding(self, row_idx: int, col_idx: int, device: torch.device) -> torch.Tensor:
@@ -443,15 +484,15 @@ class TransformerDecoder(nn.Module):
     def forward(self, z: torch.Tensor, input_seq: torch.Tensor,
                 target_seq: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor]:
         batch_size, device = input_seq.size(0), input_seq.device
-        memory = self.prepare_input_memory(z)
+        memory = self.prepare_input_memory(z, input_seq)
 
         if target_seq is not None:
-            # Teacher forcing path
+            # Teacher forcing path (shape-first, then grid)
             tgt_grid  = torch.clamp(target_seq[:, :900], 0, 9).long()
             tgt_shape = torch.clamp(target_seq[:, 900:902], 0, 30).long()
 
-            grid_emb  = self.output_grid_embedding(tgt_grid)
-            shape_emb = self.output_shape_embedding(tgt_shape)
+            shape_emb = self.output_shape_embedding(tgt_shape)                      # [B, 2, H]
+            grid_emb  = self.output_grid_embedding(tgt_grid)                        # [B, 900, H]
 
             # apply input-dropout on grid embeddings
             if self.input_dropout_prob > 0:
@@ -459,59 +500,89 @@ class TransformerDecoder(nn.Module):
                         > self.input_dropout_prob).unsqueeze(-1)
                 grid_emb = grid_emb * mask
 
-            # add positional embeddings (unchanged)
+            # add positional embeddings for grid
             pos_i = torch.arange(30, device=device).view(1, -1, 1).repeat(batch_size, 1, 30)
             pos_j = torch.arange(30, device=device).view(1, 1, -1).repeat(batch_size, 30, 1)
             grid_emb = grid_emb + (self.row_embedding(pos_i) + self.col_embedding(pos_j)).view(batch_size, 900, -1)
 
-            seq_emb = torch.cat([grid_emb, shape_emb], dim=1)      # [B, 902, H]
+            # Sequence is [shape, grid]
+            seq_emb = torch.cat([shape_emb, grid_emb], dim=1)                       # [B, 902, H]
             teacher_inputs = torch.cat([self.start_token_embedding.expand(batch_size, 1, -1),
-                                        seq_emb], dim=1)          # [B, 903, H]
+                                        seq_emb], dim=1)                            # [B, 903, H]
 
             mask   = self.create_causal_mask(teacher_inputs.size(1), device)
             output = self.layer_norm(
                 self.transformer_decoder(tgt=teacher_inputs, memory=memory, tgt_mask=mask)
             )[:, 1:]  # remove start token
 
-            grid_logits  = self.grid_output(output[:, :900])
-            shape_logits = self.shape_output(output[:, 900:902])
+            # First 2 positions predict shape, remaining 900 predict grid
+            shape_logits = self.shape_output(output[:, :2])                          # [B, 2, 31]
+            grid_logits  = self.grid_output(output[:, 2:])                           # [B, 900, 10]
             return shape_logits, grid_logits
 
 
-        # Autoregressive inference
-        seq_len = 902
+        # Autoregressive inference: predict shape first, then grid using predicted shape
         inputs = self.start_token_embedding.expand(batch_size, 1, -1)
-        grid_logits_list = []
-        shape_logits_list = []
-        for step in range(seq_len):
-            mask   = self.create_causal_mask(inputs.size(1), device)
-            dec_out = self.layer_norm(
-                self.transformer_decoder(tgt=inputs, memory=memory, tgt_mask=mask)
-            )
-            last   = dec_out[:, -1:]
-            if step < 900:
-                logits = self.grid_output(last)  # [B, 1, 10]
-                grid_logits_list.append(logits)
-                pred   = torch.argmax(logits, dim=-1)
-                emb    = self.output_grid_embedding(pred)
-                r, c   = divmod(step, 30)
-                emb   += self.get_position_embedding(r, c, device)
-            else:
-                logits = self.shape_output(last)  # [B, 1, 31]
-                shape_logits_list.append(logits)
-                pred   = torch.argmax(logits, dim=-1)
-                emb    = self.output_shape_embedding(pred)
 
+        # Predict rows token
+        mask = self.create_causal_mask(inputs.size(1), device)
+        dec_out = self.layer_norm(self.transformer_decoder(tgt=inputs, memory=memory, tgt_mask=mask))
+        last = dec_out[:, -1:]
+        row_logits = self.shape_output(last)                                         # [B, 1, 31]
+        row_pred = torch.argmax(row_logits, dim=-1)                                  # [B, 1]
+        row_emb = self.output_shape_embedding(row_pred)                              # [B, 1, H]
+        inputs = torch.cat([inputs, row_emb], dim=1)
+
+        # Predict cols token
+        mask = self.create_causal_mask(inputs.size(1), device)
+        dec_out = self.layer_norm(self.transformer_decoder(tgt=inputs, memory=memory, tgt_mask=mask))
+        last = dec_out[:, -1:]
+        col_logits = self.shape_output(last)                                         # [B, 1, 31]
+        col_pred = torch.argmax(col_logits, dim=-1)                                  # [B, 1]
+        col_emb = self.output_shape_embedding(col_pred)                              # [B, 1, H]
+        inputs = torch.cat([inputs, col_emb], dim=1)
+
+        # Collect shape logits stacked as [B, 2, 31]
+        shape_logits = torch.cat([row_logits, col_logits], dim=1)
+
+        # Determine number of grid tokens to generate based on predicted shape
+        # Clamp to [0,30] for safety
+        rows = torch.clamp(row_pred.squeeze(-1), 0, 30)
+        cols = torch.clamp(col_pred.squeeze(-1), 0, 30)
+        # active_pixels per sample
+        active_pixels = (rows * cols).tolist()
+
+        # Initialize container for grid logits (pad to 900 to keep shape-compatible)
+        grid_logits = torch.zeros(batch_size, 900, 10, device=device)
+
+        # Generate grid tokens per sample separately (since sequence lengths differ)
+        # To keep things simple and robust, iterate token-by-token for max active pixels across batch
+        max_tokens = max(active_pixels) if len(active_pixels) > 0 else 0
+        token_counts = [0 for _ in range(batch_size)]
+
+        for t in range(max_tokens):
+            mask = self.create_causal_mask(inputs.size(1), device)
+            dec_out = self.layer_norm(self.transformer_decoder(tgt=inputs, memory=memory, tgt_mask=mask))
+            last = dec_out[:, -1:]
+            logits = self.grid_output(last)                                          # [B, 1, 10]
+
+            # For samples that still need tokens, write logits and append embedding
+            pred = torch.argmax(logits, dim=-1)                                      # [B, 1]
+            emb = self.output_grid_embedding(pred)                                   # [B, 1, H]
+
+            # Add per-sample positional embedding using predicted cols
+            for b in range(batch_size):
+                if token_counts[b] < active_pixels[b]:
+                    r = (token_counts[b] // max(cols[b].item(), 1)) if cols[b].item() > 0 else 0
+                    c = (token_counts[b] %  max(cols[b].item(), 1)) if cols[b].item() > 0 else 0
+                    emb[b, 0] = emb[b, 0] + self.get_position_embedding(int(r), int(c), device)
             inputs = torch.cat([inputs, emb], dim=1)
 
-        if grid_logits_list:
-            grid_logits = torch.cat(grid_logits_list, dim=1)  # [B, 900, 10]
-        else:
-            grid_logits = None
-        if shape_logits_list:
-            shape_logits = torch.cat(shape_logits_list, dim=1)  # [B, 2, 31]
-        else:
-            shape_logits = None
+            # Store logits where applicable and increment counters
+            for b in range(batch_size):
+                if token_counts[b] < active_pixels[b]:
+                    grid_logits[b, token_counts[b]] = logits[b, 0]
+                    token_counts[b] += 1
 
         return shape_logits, grid_logits
 
@@ -603,10 +674,7 @@ class MultiEncoderLPN(nn.Module):
             # Standard VAE reparameterization
             if sample:
                 eps = torch.randn_like(mu)
-                half_logvar = 0.5 * logvar
-                exp_half_logvar = torch.exp(half_logvar)
-                result = mu + eps * exp_half_logvar
-                return result
+                return mu + eps * torch.exp(0.5 * logvar)
             return mu
 
     def get_vq_metrics(self) -> Optional[Dict[str, Any]]:
@@ -748,7 +816,7 @@ class LatentProgramNetwork(nn.Module):
     def _reparam(self, mu: torch.Tensor, logvar: torch.Tensor, sample: bool = True) -> torch.Tensor:
         """
         Reparameterization for both VAE and VQ-VAE modes.
-
+        
         For VQ-VAE: mu contains quantized latents, logvar contains VQ loss
         For VAE: standard reparameterization trick
         """
@@ -759,21 +827,9 @@ class LatentProgramNetwork(nn.Module):
         else:
             # Standard VAE reparameterization
             if sample:
-                if torch.isnan(logvar).any() or torch.isinf(logvar).any():
-                    logger.error("NaN or Inf in logvar during reparameterization!")
-                    logger.error(f"logvar range: [{logvar.min().item():.4f}, {logvar.max().item():.4f}]")
-
-                # Clamp to avoid numerical overflow in exp()
-                logvar = torch.clamp(logvar, min=-10.0, max=10.0)
                 eps = torch.randn_like(mu)
-                std = torch.exp(0.5 * logvar)
-                z = mu + eps * std
-
-                # Clamp z to avoid NaNs or huge values downstream
-                z = torch.nan_to_num(z, nan=0.0, posinf=1e2, neginf=-1e2)
-                return z
+                return mu + eps * torch.exp(0.5 * logvar)
             return mu
-
 
     def get_vq_metrics(self) -> Optional[Dict[str, Any]]:
         """Get VQ-VAE metrics if enabled."""

@@ -5,6 +5,8 @@ wandb/
 runs_specialist/
 runs_re_arc/
 re-arc_analysis/
+paper_figures/
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

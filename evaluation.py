@@ -209,7 +209,11 @@ def collect_unified_evaluation_latents(model, dataloader, device, is_multi_encod
         print(f"        Single encoder processing...")
         
         def single_encoder_processing(batch_inputs, batch_outputs):
-            mu, log_var,_ =model.encoder(batch_inputs, batch_outputs)
+            if data_type == 'query':
+                dummy = torch.zeros_like(batch_outputs)
+                mu, log_var, _ = model.encoder(batch_inputs, dummy)
+            else:
+                mu, log_var,_ = model.encoder(batch_inputs, batch_outputs)
             return mu, log_var
         
         final_mus, final_log_vars, final_zs = process_in_batches(
@@ -233,7 +237,11 @@ def collect_unified_evaluation_latents(model, dataloader, device, is_multi_encod
             print(f"        Encoder {encoder_idx}...")
             
             def individual_encoder_processing(batch_inputs, batch_outputs):
-                mu, log_var = model(batch_inputs, batch_outputs, encoder_idx=encoder_idx)[1:3]
+                if data_type == 'query':
+                    dummy = torch.zeros_like(batch_outputs)
+                    mu, log_var, _ = model.multi_encoder.encoders[encoder_idx](batch_inputs, dummy)
+                else:
+                    mu, log_var = model(batch_inputs, batch_outputs, encoder_idx=encoder_idx)[1:3]
                 return mu, log_var
             
             final_mus, final_log_vars, final_zs = process_in_batches(
@@ -255,7 +263,11 @@ def collect_unified_evaluation_latents(model, dataloader, device, is_multi_encod
                 print(f"      PoE (Product of Experts)...")
                 
                 def poe_processing(batch_inputs, batch_outputs):
-                    mu, log_var = model(batch_inputs, batch_outputs)[1:3]  # No encoder_idx = PoE
+                    if data_type == 'query':
+                        dummy = torch.zeros_like(batch_outputs)
+                        mu, log_var = model(batch_inputs, dummy)[1:3]
+                    else:
+                        mu, log_var = model(batch_inputs, batch_outputs)[1:3]
                     return mu, log_var
                 
                 final_mus, final_log_vars, final_zs = process_in_batches(
@@ -1110,12 +1122,12 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                 if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
                     if use_independent_decoder and encoder_idx is not None:
                         shape_logits, grid_logits = model.multi_encoder.independent_decoders[encoder_idx](
-                            query_latent, query_input, target_seq=query_target)
+                            query_latent, query_input, target_seq=None)
                     else:
                         shape_logits, grid_logits = model.multi_encoder.shared_decoder(
-                            query_latent, query_input, target_seq=query_target)
+                            query_latent, query_input, target_seq=None)
                 else:
-                    shape_logits, grid_logits = model.decoder(query_latent, query_input, target_seq=query_target)
+                    shape_logits, grid_logits = model.decoder(query_latent, query_input, target_seq=None)
                 
                 # Evaluate reconstruction
                 shape_pred = shape_logits.argmax(dim=-1)
@@ -1124,18 +1136,25 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                 shape_target = query_target[0, 900:902].long()
                 grid_target = query_target[0, :900].long()
                 
-                # Calculate metrics
+                # Calculate metrics using only active pixels from target
+                rows = int(query_target[0, 900].item())
+                cols = int(query_target[0, 901].item())
+                active = max(rows * cols, 0)
+
                 shape_correct = (shape_pred == shape_target).sum().item()
-                grid_correct = (grid_pred == grid_target).sum().item()
-                
                 total_shape_correct += shape_correct
-                total_shape_tokens += 2  # Shape has 2 tokens
-                total_grid_correct += grid_correct
-                total_grid_tokens += 900  # Grid has 900 tokens
-                
-                # Check exact match
-                exact_match = (shape_correct == 2 and grid_correct == 900)
-                total_exact_correct += exact_match
+                total_shape_tokens += 2
+
+                if active > 0:
+                    grid_correct_active = (grid_pred[0, :active] == grid_target[:active]).sum().item()
+                    total_grid_correct += grid_correct_active
+                    total_grid_tokens += active
+                else:
+                    # no active pixels; treat as exact shape-only sample
+                    total_grid_tokens += 0
+
+                exact_match = (shape_correct == 2 and (active == 0 or grid_correct_active == active))
+                total_exact_correct += 1 if exact_match else 0
                 total_samples += 1
                 
                 # Store reconstruction for analysis
@@ -1179,9 +1198,8 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                 query_encoder_reconstructions = {}
                 query_poe_reconstructions = {}
                 
-                # Prepare input and target tensors for query
+                # Prepare input tensor for query (NEVER use GT for model inputs)
                 input_tensor = torch.tensor(first_query['input'], dtype=torch.float32).unsqueeze(0).to(device)
-                target_tensor = torch.tensor(trajectory['query_target'], dtype=torch.float32).unsqueeze(0).to(device)
                 
                 # Ensure input has correct shape (should be 902 for complete sequence including shape tokens)
                 if input_tensor.shape[-1] != 902:
@@ -1195,17 +1213,12 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                 if input_tensor.dim() == 3:
                     input_tensor = input_tensor.squeeze(1)  # Remove middle dimension
                 
-                # Ensure target has correct shape (902 dimensions)
-                if target_tensor.shape[-1] != 902:
-                    if target_tensor.shape[-1] > 902:
-                        target_tensor = target_tensor[..., :902]
-                    else:
-                        padding = torch.zeros(1, 902 - target_tensor.shape[-1], device=device)
-                        target_tensor = torch.cat([target_tensor, padding], dim=-1)
+                # Create a dummy target tensor to satisfy interfaces that expect two sequences
+                dummy_target_tensor = torch.zeros_like(input_tensor)
                 
-                # Verify both sequences have the correct length (902)
-                if input_tensor.shape[1] != target_tensor.shape[1] or input_tensor.shape[1] != 902:
-                    raise ValueError(f"Sequence length mismatch: input={input_tensor.shape}, target={target_tensor.shape}. Both should be [batch, 902]")
+                # Verify input sequence has the correct length (902)
+                if input_tensor.shape[1] != 902:
+                    raise ValueError(f"Sequence length mismatch: input={input_tensor.shape}. Input should be [batch, 902]")
                 
                 if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
                     print(f"DEBUG: Model is multi-encoder, num_encoders: {num_encoders}")
@@ -1248,8 +1261,8 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                                 target_tensor = target_tensor[:, :min_seq_len]
                                 print(f"DEBUG: Truncated to shape: input={input_tensor.shape}, target={target_tensor.shape}")
                             
-                            # Get encoder latent (non-optimized) from query sample
-                            mu, log_var, _ = model.multi_encoder.encoders[enc_idx](input_tensor, target_tensor)
+                            # Get encoder latent (non-optimized) from query sample (use dummy target)
+                            mu, log_var, _ = model.multi_encoder.encoders[enc_idx](input_tensor, dummy_target_tensor)
                             z = model.reparameterize(mu, log_var)
                             
                             encoder_mus.append(mu)
@@ -1275,11 +1288,11 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                             if use_independent_decoder and hasattr(model.multi_encoder, 'independent_decoders'):
                                 print(f"DEBUG: Using independent decoder for encoder {enc_idx}")
                                 shape_logits, grid_logits = model.multi_encoder.independent_decoders[enc_idx](
-                                    encoder_zs[enc_idx], input_tensor, target_seq=target_tensor)
+                                    encoder_zs[enc_idx], input_tensor, target_seq=None)
                             else:
                                 print(f"DEBUG: Using shared decoder for encoder {enc_idx}")
                                 shape_logits, grid_logits = model.multi_encoder.shared_decoder(
-                                    encoder_zs[enc_idx], input_tensor, target_seq=target_tensor)
+                                    encoder_zs[enc_idx], input_tensor, target_seq=None)
                             
                             shape_pred = torch.argmax(shape_logits, dim=-1)
                             grid_pred = torch.argmax(grid_logits, dim=-1)
@@ -1307,9 +1320,9 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                             # Generate PoE latent (non-optimized)
                             poe_z_initial = model.reparameterize(poe_mu, poe_logvar)
                             
-                            # Generate reconstruction using PoE latent
+                            # Generate reconstruction using PoE latent (autoregressive)
                             shape_logits, grid_logits = model.multi_encoder.shared_decoder(
-                                poe_z_initial, input_tensor, target_seq=target_tensor)
+                                poe_z_initial, input_tensor, target_seq=None)
                             
                             shape_pred = torch.argmax(shape_logits, dim=-1)
                             grid_pred = torch.argmax(grid_logits, dim=-1)
@@ -1332,7 +1345,7 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                             optimized_latent = task_averaged_latents[task_key]
                             
                             shape_logits, grid_logits = model.multi_encoder.shared_decoder(
-                                optimized_latent, input_tensor, target_seq=target_tensor)
+                                optimized_latent, input_tensor, target_seq=None)
                             
                             shape_pred = torch.argmax(shape_logits, dim=-1)
                             grid_pred = torch.argmax(grid_logits, dim=-1)
@@ -1347,14 +1360,14 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                             print(f"      Warning: Could not generate POE final reconstruction: {e}")
                 else:
                     print(f"DEBUG: Model is single encoder")
-                    # For single encoder, generate reconstruction for encoder_0
+                    # For single encoder, generate reconstruction for encoder_0 (no GT)
                     print(f"DEBUG: Generating reconstruction for single encoder")
                     try:
-                        # Get encoder latent (non-optimized) from query sample
-                        mu, log_var, _ = model.encoder(input_tensor, target_tensor)
+                        # Get encoder latent (non-optimized) from query sample (use dummy target)
+                        mu, log_var, _ = model.encoder(input_tensor, dummy_target_tensor)
                         z = model.reparameterize(mu, log_var)
                         
-                        shape_logits, grid_logits = model.decoder(z, input_tensor, target_seq=target_tensor)
+                        shape_logits, grid_logits = model.decoder(z, input_tensor, target_seq=None)
                         shape_pred = torch.argmax(shape_logits, dim=-1)
                         grid_pred = torch.argmax(grid_logits, dim=-1)
                         query_encoder_reconstructions['encoder_0'] = {

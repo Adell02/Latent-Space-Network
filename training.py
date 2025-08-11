@@ -120,7 +120,7 @@ def evaluate_accuracy(model, dataloader, device, is_multi_encoder=False, encoder
                     z_eval = model.reparameterize(mu_eval, log_var_eval)
 
             # Decode
-            shape_logits_eval, grid_logits_eval = model.decoder(z_eval, batch_input_eval, target_seq=batch_target_eval)
+            shape_logits_eval, grid_logits_eval = model.decoder(z_eval, batch_input_eval, target_seq=None)
             
             shape_pred_eval = shape_logits_eval.argmax(dim=-1)
             grid_pred_eval = grid_logits_eval.argmax(dim=-1)

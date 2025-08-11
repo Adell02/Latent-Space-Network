@@ -12,7 +12,7 @@
         "data_source": "synthetic",
         "use_ood_for_training": false,
         "num_epochs": 30,
-        "batch_size": 128,
+        "batch_size": 64,
         "gradient_accumulation_steps": 1,
         "learning_rate": 0.0004,
         "optimizer_weight_decay": 0.0,
@@ -21,7 +21,7 @@
         "use_mixed_precision": true,
         "save_checkpoint_interval": 1,
         "infinite_dataloader": true,
-        "batches_per_epoch": 50,
+        "batches_per_epoch": 10,
         "return_task_keys": true,
         "cross_pair_loss": {
           "enabled": true,
@@ -56,7 +56,7 @@
         },
         "inference": {
             "enabled": true,
-            "num_steps": 50,
+            "num_steps": 100,
             "learning_rate": 0.1
         },
         "method": "gradient",
@@ -78,8 +78,8 @@
         "decoder_layers": 3,
         "encoder_heads": 4,
         "decoder_heads": 4,
-        "encoder_hidden_dim": 256,
-        "decoder_hidden_dim": 256,
+        "encoder_hidden_dim": 60,
+        "decoder_hidden_dim": 60,
         "latent_dim": 128,
         "dropout": 1e-6,
         "decoder_input_dropout": 0,
