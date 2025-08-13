@@ -20,7 +20,7 @@
       "use_mixed_precision": true,
       "save_checkpoint_interval": 1,
       "infinite_dataloader": true,
-      "batches_per_epoch": 20,
+      "batches_per_epoch": 5,
       "return_task_keys": true,
       "cross_pair_loss": {
         "enabled": true,

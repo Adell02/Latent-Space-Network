@@ -531,9 +531,9 @@ class TransformerDecoder(nn.Module):
             # Apply transformer
             output = self.layer_norm(self.transformer(seq_emb))
             
-            # FIXED: Extract from correct positions
-            shape_logits = self.shape_output(output[:, 900:902])  # Shape positions
-            grid_logits = self.grid_output(output[:, :900])        # Grid positions
+            # CORRECT: Extract from TARGET positions
+            shape_logits = self.shape_output(output[:, 1802:1804])  # Target shape positions
+            grid_logits = self.grid_output(output[:, 902:1802])     # Target grid positions
             
             return shape_logits, grid_logits
 

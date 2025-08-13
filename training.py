@@ -1288,10 +1288,10 @@ def comprehensive_evaluation_after_epoch(
     3. Plot latent space with support and query samples colored by keys
     """
     import matplotlib
-    matplotlib.use('Agg')
+    matplotlib.use('Agg')  # Use non-interactive backend
     import matplotlib.pyplot as plt
     plt.rcParams['figure.max_open_warning'] = 0
-
+    
     import numpy as np
     from sklearn.manifold import TSNE
     from evaluation import main_test
@@ -1333,28 +1333,20 @@ def comprehensive_evaluation_after_epoch(
         all_training_latents = np.array(all_training_latents)
         print(f"REAL OPTIMIZED training latents shape: {all_training_latents.shape}")
 
-        # Apply t-SNE with safe fallback
+        # Apply t-SNE
         print("  Applying t-SNE to REAL OPTIMIZED training latents...")
-        try:
-            tsne = TSNE(n_components=2, random_state=data_settings.get('training_seed', 42), perplexity=min(30, max(1, len(all_training_latents)//4)))
-            tsne_coords = tsne.fit_transform(all_training_latents)
-        except Exception as e:
-            print(f"  [WARNING] t-SNE failed ({e}); falling back to PCA")
-            try:
-                from sklearn.decomposition import PCA
-                pca = PCA(n_components=2, random_state=data_settings.get('training_seed', 42))
-                tsne_coords = pca.fit_transform(all_training_latents)
-                print("  [OK] PCA fallback succeeded")
-            except Exception as e2:
-                print(f"  [ERROR] PCA fallback also failed: {e2}; skipping latent plot generation")
-                tsne_coords = None
+        calculated_perplexity = min(30, max(1, len(all_training_latents)//4))
+        print(f"    DEBUG: t-SNE perplexity calculation - samples: {len(all_training_latents)}, calculated: {calculated_perplexity}")
+        if calculated_perplexity < 2:
+            calculated_perplexity = 2
+            print(f"    WARNING: Perplexity too low, setting to minimum value: {calculated_perplexity}")
+        
+        tsne = TSNE(n_components=2, random_state=data_settings.get('training_seed', 42), perplexity=calculated_perplexity)
+        tsne_coords = tsne.fit_transform(all_training_latents)
 
-        if tsne_coords is None:
-            print("  [WARNING] Skipping latent visualization due to embedding failure")
-        else:
-            # Create visualization
-            unique_keys = sorted(list(set(all_training_keys)))
-            unique_encoders = sorted(list(set(all_encoder_indices)))
+        # Create visualization
+        unique_keys = sorted(list(set(all_training_keys)))
+        unique_encoders = sorted(list(set(all_encoder_indices)))
         
         # Debug: Show encoder distribution
         encoder_counts = {}
@@ -1382,9 +1374,9 @@ def comprehensive_evaluation_after_epoch(
             print(f"  [WARNING] Too many keys ({len(unique_keys)}), using continuous color map")
             key_colors = {k: plt.cm.viridis(i / len(unique_keys)) for i, k in enumerate(unique_keys)}
 
-            encoder_markers = ['o', 's', '^', 'v', 'D', 'p', '*', 'h', 'H', '+']
+        encoder_markers = ['o', 's', '^', 'v', 'D', 'p', '*', 'h', 'H', '+']
 
-            plt.figure(figsize=(16, 12))
+        plt.figure(figsize=(16, 12))
         
         # Plot by key (colored) and encoder (markers) WITH LABELS
         for coord, key, encoder_idx in zip(tsne_coords, all_training_keys, all_encoder_indices):
@@ -1427,18 +1419,18 @@ def comprehensive_evaluation_after_epoch(
             legend_elements.append(plt.Line2D([0], [0], marker=marker, color='k', linestyle='',
                                                markersize=8, label=f'Encoder {encoder_idx}'))
 
-            plt.legend(handles=legend_elements, loc='upper right', fontsize=8, ncol=2)
-            plt.title(f'REAL Training Latent Space - Epoch {epoch+1}\n(Actual samples used in training - Colored by Key, Markers by Encoder)', fontsize=12)
-            plt.xlabel('Dim 1')
-            plt.ylabel('Dim 2')
+        plt.legend(handles=legend_elements, loc='upper right', fontsize=8, ncol=2)
+        plt.title(f'REAL Training Latent Space - Epoch {epoch+1}\n(Actual samples used in training - Colored by Key, Markers by Encoder)', fontsize=12)
+        plt.xlabel('t-SNE Dimension 1')
+        plt.ylabel('t-SNE Dimension 2')
 
-            plot_path = os.path.join(run_dir, 'latent_space_plots', f'training_latent_space_epoch_{epoch+1}.png')
-            os.makedirs(os.path.dirname(plot_path), exist_ok=True)
-            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-            plt.close()
+        plot_path = os.path.join(run_dir, 'latent_space_plots', f'training_latent_space_epoch_{epoch+1}.png')
+        os.makedirs(os.path.dirname(plot_path), exist_ok=True)
+        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+        plt.close()
 
-            print(f"  [OK] REAL training latent space plot saved: {plot_path}")
-            print(f"  [INFO] Visualization shows {len(all_training_latents)} REAL samples from {len(unique_keys)} unique keys used in training")
+        print(f"  [OK] REAL training latent space plot saved: {plot_path}")
+        print(f"  [INFO] Visualization shows {len(all_training_latents)} REAL samples from {len(unique_keys)} unique keys used in training")
 
         if wandb_logger:
             try:
@@ -1478,7 +1470,7 @@ def comprehensive_evaluation_after_epoch(
                     encoder_task_mapping[encoder_idx].append(key)
             print(f"    DEBUG: Using actual sampled keys (fallback): {encoder_task_mapping}")
 
-            plt.figure(figsize=(16, 12))
+        plt.figure(figsize=(16, 12))
         # Fix: Handle None encoder_idx in color mapping
         encoder_colors = {enc: plt.cm.tab10(enc % 10) for enc in unique_encoders if enc is not None}
         # Add a default color for None encoder_idx
@@ -1523,17 +1515,17 @@ def comprehensive_evaluation_after_epoch(
                     actual_unique = list(set(actual_keys))
                     print(f"      Encoder {enc_idx}: {len(actual_unique)} unique keys sampled")
 
-            plt.legend(handles=legend_elements, loc='upper right')
-            plt.title(f'REAL Encoder-Specific Training Latent Space - Epoch {epoch+1}\n(Actual samples used in training - Colored by Encoder, Tasks Listed in Legend)')
-            plt.xlabel('Dim 1')
-            plt.ylabel('Dim 2')
+        plt.legend(handles=legend_elements, loc='upper right')
+        plt.title(f'REAL Encoder-Specific Training Latent Space - Epoch {epoch+1}\n(Actual samples used in training - Colored by Encoder, Tasks Listed in Legend)')
+        plt.xlabel('t-SNE Dimension 1')
+        plt.ylabel('t-SNE Dimension 2')
 
-            encoder_plot_path = os.path.join(run_dir, 'latent_space_plots', f'encoder_training_latent_space_epoch_{epoch+1}.png')
-            os.makedirs(os.path.dirname(encoder_plot_path), exist_ok=True)
-            plt.savefig(encoder_plot_path, dpi=300, bbox_inches='tight')
-            plt.close()
+        encoder_plot_path = os.path.join(run_dir, 'latent_space_plots', f'encoder_training_latent_space_epoch_{epoch+1}.png')
+        os.makedirs(os.path.dirname(encoder_plot_path), exist_ok=True)
+        plt.savefig(encoder_plot_path, dpi=300, bbox_inches='tight')
+        plt.close()
 
-            print(f"  [OK] REAL encoder-specific training latent space plot saved: {encoder_plot_path}")
+        print(f"  [OK] REAL encoder-specific training latent space plot saved: {encoder_plot_path}")
 
         if wandb_logger:
             try:
@@ -1802,14 +1794,14 @@ def comprehensive_evaluation_after_epoch(
                     for key in unique_keys:
                         color = key_colors[key]
                         legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=color,
-                                                          markersize=8, label=f'Support: {key[:8]}'))
+                                                          markersize=6, label=f'Support: {key[:8]}'))
                         legend_elements.append(plt.Line2D([0], [0], marker='s', color='w', markerfacecolor=color,
-                                                          markersize=10, label=f'Query: {key[:8]}'))
+                                                          markersize=6, label=f'Query: {key[:8]}'))
 
                     plt.legend(handles=legend_elements, loc='upper right')
                     plt.title(f'Evaluation Latent Space - Epoch {epoch+1}\n(Support: circles, Query: squares)')
-                    plt.xlabel('t-SNE Dimension 1')
-                    plt.ylabel('t-SNE Dimension 2')
+                    plt.xlabel('Dim 1')
+                    plt.ylabel('Dim 2')
 
                     plot_path = os.path.join(run_dir, 'latent_space_plots', f'evaluation_latent_space_epoch_{epoch+1}.png')
                     os.makedirs(os.path.dirname(plot_path), exist_ok=True)
