@@ -378,9 +378,9 @@ def generate_specialist_reconstruction_plot(model, dataloader, device, epoch, ph
             
             # Reconstruct the output sequence and extract grid
             recon_seq = target_sample[0].cpu().numpy().copy()
-            recon_seq[900:902] = shape_pred  # Shape dimensions
+            recon_seq[0:2] = shape_pred  # Shape dimensions
             if len(shape_pred) >= 2 and shape_pred[0] > 0 and shape_pred[1] > 0:
-                recon_seq[:min(len(grid_pred), 900)] = grid_pred[:min(len(grid_pred), 900)]
+                recon_seq[2:2+min(len(grid_pred), 900)] = grid_pred[:min(len(grid_pred), 900)]
             
             recon_grid, recon_shape = extract_grid_from_sequence(recon_seq)
             
@@ -695,9 +695,9 @@ def _create_comprehensive_analysis_plot(model, data_source, device, data_type, n
                 shape_pred = shape_logits[0].argmax(dim=-1).cpu().numpy()
                 grid_pred = grid_logits[0].argmax(dim=-1).cpu().numpy()
                 recon_seq = target_seq[0].cpu().numpy().copy()
-                recon_seq[900:902] = shape_pred
+                recon_seq[0:2] = shape_pred
                 if len(shape_pred) >= 2 and shape_pred[0] > 0 and shape_pred[1] > 0:
-                    recon_seq[:min(len(grid_pred), 900)] = grid_pred[:min(len(grid_pred), 900)]
+                    recon_seq[2:2+min(len(grid_pred), 900)] = grid_pred[:min(len(grid_pred), 900)]
                 recon_grid, recon_shape = extract_grid_from_sequence(recon_seq)
                 encoder_reconstructions.append((recon_grid, recon_shape))
             
@@ -709,9 +709,9 @@ def _create_comprehensive_analysis_plot(model, data_source, device, data_type, n
             shape_pred_poe = shape_logits_poe[0].argmax(dim=-1).cpu().numpy()
             grid_pred_poe = grid_logits_poe[0].argmax(dim=-1).cpu().numpy()
             recon_seq_poe = target_seq[0].cpu().numpy().copy()
-            recon_seq_poe[900:902] = shape_pred_poe
+            recon_seq_poe[0:2] = shape_pred_poe
             if len(shape_pred_poe) >= 2 and shape_pred_poe[0] > 0 and shape_pred_poe[1] > 0:
-                recon_seq_poe[:min(len(grid_pred_poe), 900)] = grid_pred_poe[:min(len(grid_pred_poe), 900)]
+                recon_seq_poe[2:2+min(len(grid_pred_poe), 900)] = grid_pred_poe[:min(len(grid_pred_poe), 900)]
             poe_recon_grid, poe_recon_shape = extract_grid_from_sequence(recon_seq_poe)
             
             sample_data.append({

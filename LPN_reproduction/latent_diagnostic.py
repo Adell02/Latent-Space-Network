@@ -210,19 +210,20 @@ def analyze_gradient_norms_during_optimization(model, trajectory_info_list, devi
         shape_logits, grid_logits = model.decoder(z, input_sample, target_seq=target_sample)
         
         # Compute loss
-        shape_targets = target_sample[:, 900:902].long()
+        shape_targets_raw = target_sample[:, 0:2].long()
+        shape_targets = torch.clamp(shape_targets_raw, 1, 30) - 1  # Convert to [0,29]
         shape_loss = F.cross_entropy(shape_logits.reshape(-1, 30), shape_targets.reshape(-1))
         
         # Grid loss
         grid_loss_list = []
         batch_size = input_sample.size(0)
         for i in range(batch_size):
-            tgt_rows = int(target_sample[i, 900].item())
-            tgt_cols = int(target_sample[i, 901].item())
+            tgt_rows = int(target_sample[i, 0].item())
+            tgt_cols = int(target_sample[i, 1].item())
             active_pixels = tgt_rows * tgt_cols
             if active_pixels > 0:
                 loss_i = F.cross_entropy(grid_logits[i, :active_pixels],
-                                       target_sample[i, :active_pixels].long())
+                                       target_sample[i, 2:2+active_pixels].long())
                 grid_loss_list.append(loss_i)
 
         grid_loss = sum(grid_loss_list) / len(grid_loss_list) if grid_loss_list else \

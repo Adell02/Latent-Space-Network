@@ -1010,6 +1010,7 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
     
     # ROW 0: INPUT SAMPLE | LATENT SPACE | LOSS PROGRESSION
     input_seq = trajectory_info['input_sample']
+    assert len(input_seq) == 902, f"input_seq length {len(input_seq)} != 902"
     input_grid, input_shape = extract_grid_from_sequence(input_seq)
     ax_input = fig.add_subplot(gs[0, 0])
     ax_input.imshow(input_grid, cmap='viridis')
@@ -1025,6 +1026,7 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
     
     # ROW 1: TARGET SAMPLE | RECONSTRUCTIONS FOR EACH ENCODER | POE INITIAL/MID/FINAL OPTIMISATION
     target_seq = trajectory_info['target_sample']
+    assert len(target_seq) == 902, f"target_seq length {len(target_seq)} != 902"
     target_grid, target_shape = extract_grid_from_sequence(target_seq)
     ax_target = fig.add_subplot(gs[1, 0])
     ax_target.imshow(target_grid, cmap='viridis')
@@ -1052,6 +1054,7 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
     query_input = trajectory_info.get('query_input')
     print(f"DEBUG: query_input available: {query_input is not None}")
     if query_input is not None:
+        assert len(query_input) == 902, f"query_input length {len(query_input)} != 902"
         query_input_grid, query_input_shape = extract_grid_from_sequence(query_input)
         ax_query_input.imshow(query_input_grid, cmap='viridis')
         ax_query_input.set_title(f'Input Query\n{query_input_shape[0]}×{query_input_shape[1]}')
@@ -1065,6 +1068,7 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
     query_target = trajectory_info.get('query_target')
     print(f"DEBUG: query_target available: {query_target is not None}")
     if query_target is not None:
+        assert len(query_target) == 902, f"query_target length {len(query_target)} != 902"
         query_target_grid, query_target_shape = extract_grid_from_sequence(query_target)
         ax_query_target.imshow(query_target_grid, cmap='viridis')
         ax_query_target.set_title(f'Target Query\n{query_target_shape[0]}×{query_target_shape[1]}')

@@ -286,9 +286,9 @@ def create_visualization_plots(swap_results_tuple, zero_random_results, latents_
                 axes[0, idx].axis('off')
                 # Correct reconstruction
                 corr_seq = correct_recons[idx]['target_seq'].copy()
-                corr_seq[900:902] = correct_recons[idx]['shape_logits']
+                corr_seq[0:2] = correct_recons[idx]['shape_logits']
                 if len(correct_recons[idx]['shape_logits']) >= 2 and correct_recons[idx]['shape_logits'][0] > 0:
-                    corr_seq[:min(len(correct_recons[idx]['grid_logits']), 900)] = correct_recons[idx]['grid_logits'][:900]
+                    corr_seq[2:2+min(len(correct_recons[idx]['grid_logits']), 900)] = correct_recons[idx]['grid_logits'][:900]
                 corr_grid, _ = extract_grid_from_sequence(corr_seq)
                 axes[1, idx].imshow(corr_grid, cmap='viridis', interpolation='nearest')
                 axes[1, idx].set_title('Correct Recon')
@@ -297,9 +297,9 @@ def create_visualization_plots(swap_results_tuple, zero_random_results, latents_
                 swap = next((s for s in swap_results if s['input_source'] == idx), None)
                 if swap:
                     swap_seq = swap['target_seq'].copy()
-                    swap_seq[900:902] = swap['shape_logits']
+                    swap_seq[0:2] = swap['shape_logits']
                     if len(swap['shape_logits']) >= 2 and swap['shape_logits'][0] > 0:
-                        swap_seq[:min(len(swap['grid_logits']), 900)] = swap['grid_logits'][:900]
+                        swap_seq[2:2+min(len(swap['grid_logits']), 900)] = swap['grid_logits'][:900]
                     swap_grid, _ = extract_grid_from_sequence(swap_seq)
                     axes[2, idx].imshow(swap_grid, cmap='viridis', interpolation='nearest')
                     axes[2, idx].set_title(f'Swapped Recon\n(Latent {swap["latent_source"]} → Input {swap["input_source"]})')
@@ -334,27 +334,27 @@ def create_visualization_plots(swap_results_tuple, zero_random_results, latents_
                 axes[0, idx].axis('off')
                 # Correct reconstruction
                 corr_seq = zero_random_results['correct'][idx]['target_seq'].copy()
-                corr_seq[900:902] = zero_random_results['correct'][idx]['shape_logits']
+                corr_seq[0:2] = zero_random_results['correct'][idx]['shape_logits']
                 if len(zero_random_results['correct'][idx]['shape_logits']) >= 2 and zero_random_results['correct'][idx]['shape_logits'][0] > 0:
-                    corr_seq[:min(len(zero_random_results['correct'][idx]['grid_logits']), 900)] = zero_random_results['correct'][idx]['grid_logits'][:900]
+                    corr_seq[2:2+min(len(zero_random_results['correct'][idx]['grid_logits']), 900)] = zero_random_results['correct'][idx]['grid_logits'][:900]
                 corr_grid, _ = extract_grid_from_sequence(corr_seq)
                 axes[1, idx].imshow(corr_grid, cmap='viridis', interpolation='nearest')
                 axes[1, idx].set_title('Correct Recon')
                 axes[1, idx].axis('off')
                 # Zero latent reconstruction
                 zero_seq = zero_random_results['zero'][idx]['target_seq'].copy()
-                zero_seq[900:902] = zero_random_results['zero'][idx]['shape_logits']
+                zero_seq[0:2] = zero_random_results['zero'][idx]['shape_logits']
                 if len(zero_random_results['zero'][idx]['shape_logits']) >= 2 and zero_random_results['zero'][idx]['shape_logits'][0] > 0:
-                    zero_seq[:min(len(zero_random_results['zero'][idx]['grid_logits']), 900)] = zero_random_results['zero'][idx]['grid_logits'][:900]
+                    zero_seq[2:2+min(len(zero_random_results['zero'][idx]['grid_logits']), 900)] = zero_random_results['zero'][idx]['grid_logits'][:900]
                 zero_grid, _ = extract_grid_from_sequence(zero_seq)
                 axes[2, idx].imshow(zero_grid, cmap='viridis', interpolation='nearest')
                 axes[2, idx].set_title('Zero Latent')
                 axes[2, idx].axis('off')
                 # Random latent reconstruction
                 rand_seq = zero_random_results['random'][idx]['target_seq'].copy()
-                rand_seq[900:902] = zero_random_results['random'][idx]['shape_logits']
+                rand_seq[0:2] = zero_random_results['random'][idx]['shape_logits']
                 if len(zero_random_results['random'][idx]['shape_logits']) >= 2 and zero_random_results['random'][idx]['shape_logits'][0] > 0:
-                    rand_seq[:min(len(zero_random_results['random'][idx]['grid_logits']), 900)] = zero_random_results['random'][idx]['grid_logits'][:900]
+                    rand_seq[2:2+min(len(zero_random_results['random'][idx]['grid_logits']), 900)] = zero_random_results['random'][idx]['grid_logits'][:900]
                 rand_grid, _ = extract_grid_from_sequence(rand_seq)
                 axes[3, idx].imshow(rand_grid, cmap='viridis', interpolation='nearest')
                 axes[3, idx].set_title('Random Latent')
