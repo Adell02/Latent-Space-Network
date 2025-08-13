@@ -338,6 +338,124 @@ def get_comprehensive_latent_data_for_trajectory(run_dir):
         return None, None, None, None
 
 ##############################
+# SAMPLES USED GENERATION
+##############################
+
+def generate_samples_used_folder(run_dir, training_keys=None, eval_keys=None, n_samples=5):
+    """
+    Generate a 'samples_used' folder with train/eval subdirectories containing
+    input-output sample visualizations for the keys used in training and evaluation.
+    
+    Args:
+        run_dir: Directory to save the samples_used folder
+        training_keys: List of keys used for training
+        eval_keys: List of keys used for evaluation  
+        n_samples: Number of samples to generate per key (default: 5)
+    """
+    from utils.data_preparation import extract_grid_from_sequence
+    from re_arc.main import generate_and_process_tasks
+    import matplotlib.pyplot as plt
+    import numpy as np
+    
+    samples_dir = os.path.join(run_dir, "samples_used")
+    train_dir = os.path.join(samples_dir, "train")
+    eval_dir = os.path.join(samples_dir, "eval")
+    
+    os.makedirs(train_dir, exist_ok=True)
+    os.makedirs(eval_dir, exist_ok=True)
+    
+    print(f"\n=== GENERATING SAMPLES_USED FOLDER ===")
+    print(f"Output directory: {samples_dir}")
+    
+    # Color scheme matching the rest of the repo (from visualizers.py:1054-1058)
+    # Use the same color maps as the training latent space visualization
+    colors1 = plt.cm.tab20(np.linspace(0, 1, 20))
+    colors2 = plt.cm.Set3(np.linspace(0, 1, 12))
+    colors3 = plt.cm.Pastel1(np.linspace(0, 1, 9))
+    colors4 = plt.cm.Paired(np.linspace(0, 1, 12))
+    all_colors = np.vstack([colors1, colors2, colors3, colors4])
+    
+    def save_samples_for_keys(keys, save_dir, data_type="training"):
+        """Save sample visualizations for a list of keys."""
+        if not keys:
+            print(f"  No {data_type} keys provided, skipping")
+            return
+            
+        print(f"  Generating {n_samples} samples for {len(keys)} {data_type} keys: {keys[:5]}{'...' if len(keys) > 5 else ''}")
+        
+        for i, key in enumerate(keys):
+            try:
+                # Generate samples for this key
+                _, _, _, inputs, outputs = generate_and_process_tasks(key, n_samples)
+                
+                if not inputs or not outputs:
+                    print(f"    [WARNING] No data generated for key '{key}'")
+                    continue
+                
+                # Get color for this key (cycling through available colors)
+                key_color = all_colors[i % len(all_colors)]
+                
+                # Create a figure for this key's samples
+                fig, axes = plt.subplots(2, n_samples, figsize=(3*n_samples, 6))
+                if n_samples == 1:
+                    axes = axes.reshape(2, 1)
+                
+                fig.suptitle(f'{data_type.capitalize()} Key: {key}', fontsize=14, fontweight='bold')
+                
+                for j in range(min(n_samples, len(inputs))):
+                    try:
+                        # Extract grids from sequences
+                        input_grid, input_shape = extract_grid_from_sequence(inputs[j])
+                        output_grid, output_shape = extract_grid_from_sequence(outputs[j])
+                        
+                        # Plot input
+                        axes[0, j].imshow(input_grid, cmap='viridis', interpolation='nearest')
+                        axes[0, j].set_title(f'Input {j+1}\n{input_shape[0]}x{input_shape[1]}', fontsize=10)
+                        axes[0, j].axis('off')
+                        
+                        # Plot output
+                        axes[1, j].imshow(output_grid, cmap='viridis', interpolation='nearest')
+                        axes[1, j].set_title(f'Output {j+1}\n{output_shape[0]}x{output_shape[1]}', fontsize=10)
+                        axes[1, j].axis('off')
+                        
+                    except Exception as e:
+                        print(f"    [WARNING] Failed to process sample {j} for key '{key}': {e}")
+                        # Show empty plot with error message
+                        axes[0, j].text(0.5, 0.5, f'Error\nSample {j+1}', ha='center', va='center', 
+                                       transform=axes[0, j].transAxes, fontsize=8)
+                        axes[1, j].text(0.5, 0.5, f'Error\nSample {j+1}', ha='center', va='center',
+                                       transform=axes[1, j].transAxes, fontsize=8)
+                        axes[0, j].axis('off')
+                        axes[1, j].axis('off')
+                
+                # Save the figure
+                safe_key = str(key).replace('/', '_').replace('\\', '_')[:50]  # Safe filename
+                save_path = os.path.join(save_dir, f'{safe_key}_samples.png')
+                plt.tight_layout()
+                plt.savefig(save_path, dpi=150, bbox_inches='tight', facecolor='white')
+                plt.close()
+                
+                print(f"    [OK] Saved samples for key '{key}': {save_path}")
+                
+            except Exception as e:
+                print(f"    [ERROR] Failed to generate samples for key '{key}': {e}")
+                continue
+    
+    # Generate training samples
+    if training_keys:
+        print(f"\nGenerating training samples...")
+        save_samples_for_keys(training_keys, train_dir, "training")
+    
+    # Generate evaluation samples
+    if eval_keys:
+        print(f"\nGenerating evaluation samples...")
+        save_samples_for_keys(eval_keys, eval_dir, "evaluation")
+    
+    print(f"\n[OK] Samples generation completed!")
+    print(f"Training samples: {train_dir}")
+    print(f"Evaluation samples: {eval_dir}")
+
+##############################
 # CORE PLOTTING FUNCTIONS
 ##############################
 

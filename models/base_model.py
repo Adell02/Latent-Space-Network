@@ -368,7 +368,7 @@ class TransformerEncoder(nn.Module):
 class TransformerDecoder(nn.Module):
     def __init__(self, output_dim: int, hidden_dim: int = None,
                  num_layers: int = None, num_heads: int = None,
-                 dropout: float = None):
+                 dropout: float = None, latent_dim: int = None):
         super().__init__()
 
         # Load hyperparameters from settings if not provided
@@ -394,8 +394,9 @@ class TransformerDecoder(nn.Module):
         # Col embedding: indices 0-30 (0-29 for grid, 30 for shape tokens)
         self.col_embedding = nn.Embedding(31, hidden_dim)  # Was 31, now 31
 
-        # Latent projection
-        self.latent_projection = nn.Linear(LATENT_DIM, hidden_dim)
+        # Latent projection (fetch latent dim from provided arg or current settings)
+        used_latent_dim = latent_dim if latent_dim is not None else get_latent_dim()
+        self.latent_projection = nn.Linear(used_latent_dim, hidden_dim)
 
         # CONVERTED: Transformer encoder layers (prefix token architecture)
         encoder_layer = nn.TransformerEncoderLayer(
@@ -597,12 +598,12 @@ class MultiEncoderLPN(nn.Module):
         
         # ---- Create independent decoders for each encoder ----
         self.independent_decoders = nn.ModuleList([
-            TransformerDecoder(1, decoder_hidden_dim, decoder_layers, decoder_heads, dropout)
+            TransformerDecoder(1, decoder_hidden_dim, decoder_layers, decoder_heads, dropout, latent_dim=latent_dim)
             for _ in range(num_encoders)
         ])
         
         # ---- Shared decoder for PoE ----
-        self.shared_decoder = TransformerDecoder(1, decoder_hidden_dim, decoder_layers, decoder_heads, dropout)
+        self.shared_decoder = TransformerDecoder(1, decoder_hidden_dim, decoder_layers, decoder_heads, dropout, latent_dim=latent_dim)
         
         # ---- Legacy compatibility ----
         self.decoder = self.shared_decoder  # For backward compatibility

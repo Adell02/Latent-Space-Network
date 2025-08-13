@@ -12,7 +12,7 @@ from utils.model_utils import (
 
 from utils.evaluation_utils import get_evaluation_keys_with_all_support
 
-from utils.visualizers import visualize_stored_results
+from utils.visualizers import visualize_stored_results, generate_samples_used_folder
 from utils.settings_manager import init_settings
 from utils.wandb_logger import init_wandb_for_mode, get_wandb_logger
 import datetime
@@ -75,6 +75,7 @@ def main_args():
     # Get settings from settings manager
     data_settings = settings.get_data_settings()
     evaluation_settings = settings.get_evaluation_settings()
+    training_settings = settings.get_training_settings()
     wandb_settings = settings.get_wandb_settings()
 
     BASE_DIR = data_settings['run_base_dir']
@@ -414,6 +415,61 @@ def main_args():
                     print(f"[OK] Visualization completion logged to WandB at step {step_counter}")
                 except Exception as e:
                     print(f"[WARNING] Failed to log visualization completion: {e}")
+        
+        # ----------------------
+        # GENERATE SAMPLES_USED FOLDER
+        # ----------------------
+        # Generate samples_used folder with train/eval subdirectories
+        # This runs after both training and evaluation are complete
+        try:
+            print("\n=== GENERATING SAMPLES_USED FOLDER ===")
+            
+            # Get training keys from settings (try for any mode, not just training)
+            training_keys = None
+            # First try training_settings
+            training_keys = training_settings.get('task_keys', None)
+            if not training_keys:
+                # Fallback: try to get from data_settings
+                training_keys = data_settings.get('task_keys', None)
+            if not training_keys:
+                # Another fallback: try training_keys key in data_settings
+                training_keys = data_settings.get('training_keys', None)
+            
+            # Handle "all" case for training keys (similar to training.py logic)
+            if isinstance(training_keys, str) and training_keys.lower() == 'all':
+                print("  [INFO] Training keys set to 'all', getting keys from tasks directory...")
+                tasks_dir = os.path.join(os.path.dirname(__file__), 're_arc', 're_arc', 'tasks')
+                all_keys = [fname[:-5] for fname in os.listdir(tasks_dir) if fname.endswith('.json')]
+                all_keys.sort()
+                n_max_keys = data_settings.get('n_max_keys', None)
+                if n_max_keys is not None:
+                    try:
+                        n_max_keys = int(n_max_keys)
+                        all_keys = all_keys[:n_max_keys]
+                    except Exception:
+                        pass
+                training_keys = all_keys
+                print(f"  [INFO] Selected {len(training_keys)} training keys: {training_keys}")
+            
+            # Get evaluation keys (use DEFAULT_EVAL_KEYS if available for any mode)
+            eval_keys = DEFAULT_EVAL_KEYS if DEFAULT_EVAL_KEYS else None
+            
+            # Generate the samples folder if we have any keys
+            if training_keys or eval_keys:
+                generate_samples_used_folder(
+                    run_dir=run_dir,
+                    training_keys=training_keys,
+                    eval_keys=eval_keys,
+                    n_samples=5
+                )
+                print("[OK] Samples_used folder generation completed!")
+            else:
+                print("[INFO] No training or evaluation keys available, skipping samples_used generation")
+                
+        except Exception as e:
+            print(f"[WARNING] Failed to generate samples_used folder: {e}")
+            import traceback
+            traceback.print_exc()
 
     except Exception as e:
         # Log error with step counter

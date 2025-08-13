@@ -196,8 +196,8 @@ def create_sweep_opt_configurations() -> List[Tuple[str, Dict[str, Any]]]:
     
     print("Base config loaded from model_settings.json for optimization sweep")
     
-    # Reduced latent dimensions to test
-    latent_dims = [32, 256, 1024]  # Reduced from [32, 64, 128, 256, 512, 1024]
+    # Specific latent dimensions to test
+    latent_dims = [32, 256, 1024]
     
     # Training configurations (one per latent dimension)
     for latent_dim in latent_dims:
@@ -226,8 +226,6 @@ def create_sweep_opt_configurations() -> List[Tuple[str, Dict[str, Any]]]:
     
     # Base parameters for optimization
     base_learning_rate = 0.1
-    base_steps = 50  # Shorter for sweep
-    base_generations = 25  # Shorter for sweep
     
     for latent_dim in latent_dims:
         for opt_method in optimization_methods:
@@ -241,8 +239,8 @@ def create_sweep_opt_configurations() -> List[Tuple[str, Dict[str, Any]]]:
             
             # Configure optimization-specific settings
             if opt_method == 'gradient':
-                # Reduced step counts: only 25 and 100
-                step_counts = [25, 100]  # Reduced from [25, 50, 100]
+                # Specific step counts: 10 and 100
+                step_counts = [10, 100]
                 
                 for steps in step_counts:
                     config_gradient = copy.deepcopy(config_eval)
@@ -260,21 +258,9 @@ def create_sweep_opt_configurations() -> List[Tuple[str, Dict[str, Any]]]:
                 # Apply mathematical relationships for evolutionary parameters
                 mutation_std = (2 * base_learning_rate) ** 0.5  # σ ≈ √(2η)
                 
-                # Reduced population sizes and generations
-                # Calculate minimum population size based on latent dimension
-                c = 6  # middle value between 4-10
-                min_population = int(c * latent_dim / (mutation_std ** 2))
-                
-                # Reduced population sizes: only 25 and 100
-                if latent_dim <= 64:
-                    population_sizes = [max(min_population, 25), max(min_population, 100)]  # Reduced from [25, 50, 100]
-                elif latent_dim <= 256:
-                    population_sizes = [max(min_population, 25), max(min_population, 100)]  # Reduced from [50, 100, 200]
-                else:  # 1024
-                    population_sizes = [max(min_population, 25), max(min_population, 100)]  # Reduced from [100, 200, 400]
-                
-                # Reduced generation counts: only 25 and 100
-                generation_counts = [25, 100]  # Reduced from [25, 50, 100]
+                # Specific population sizes and generations: 10 and 100
+                population_sizes = [10, 100]
+                generation_counts = [10, 100]
                 
                 for pop_size in population_sizes:
                     for generations in generation_counts:
