@@ -209,11 +209,8 @@ def collect_unified_evaluation_latents(model, dataloader, device, is_multi_encod
         print(f"        Single encoder processing...")
         
         def single_encoder_processing(batch_inputs, batch_outputs):
-            if data_type == 'query':
-                dummy = torch.zeros_like(batch_outputs)
-                mu, log_var, _ = model.encoder(batch_inputs, dummy)
-            else:
-                mu, log_var,_ = model.encoder(batch_inputs, batch_outputs)
+            # Always use teacher forcing (use true targets)
+            mu, log_var,_ = model.encoder(batch_inputs, batch_outputs)
             return mu, log_var
         
         final_mus, final_log_vars, final_zs = process_in_batches(
@@ -237,11 +234,8 @@ def collect_unified_evaluation_latents(model, dataloader, device, is_multi_encod
             print(f"        Encoder {encoder_idx}...")
             
             def individual_encoder_processing(batch_inputs, batch_outputs):
-                if data_type == 'query':
-                    dummy = torch.zeros_like(batch_outputs)
-                    mu, log_var, _ = model.multi_encoder.encoders[encoder_idx](batch_inputs, dummy)
-                else:
-                    mu, log_var = model(batch_inputs, batch_outputs, encoder_idx=encoder_idx)[1:3]
+                # Always use teacher forcing for encoder latents
+                mu, log_var, _ = model.multi_encoder.encoders[encoder_idx](batch_inputs, batch_outputs)
                 return mu, log_var
             
             final_mus, final_log_vars, final_zs = process_in_batches(
@@ -263,11 +257,8 @@ def collect_unified_evaluation_latents(model, dataloader, device, is_multi_encod
                 print(f"      PoE (Product of Experts)...")
                 
                 def poe_processing(batch_inputs, batch_outputs):
-                    if data_type == 'query':
-                        dummy = torch.zeros_like(batch_outputs)
-                        mu, log_var = model(batch_inputs, dummy)[1:3]
-                    else:
-                        mu, log_var = model(batch_inputs, batch_outputs)[1:3]
+                    # Always use teacher forcing for PoE inference
+                    mu, log_var = model(batch_inputs, batch_outputs)[1:3]
                     return mu, log_var
                 
                 final_mus, final_log_vars, final_zs = process_in_batches(
@@ -555,23 +546,26 @@ def encode_training_sequences(model, run_dir, device='cuda', max_samples=500, ba
                 # Compute loss for this encoded latent (equivalent to initial trajectory loss)
                 # Handle both single and multi-encoder models for decoding
                 if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
-                    # Multi-encoder: use shared decoder
+                    # Multi-encoder: use shared decoder with teacher forcing
                     shape_logits, grid_logits = model.multi_encoder.decoder(z, batch_input, target_seq=batch_output)
                 else:
-                    # Single encoder
+                    # Single encoder with teacher forcing
                     shape_logits, grid_logits = model.decoder(z, batch_input, target_seq=batch_output)
-                shape_targets = batch_output[:, 900:902].long()
-                shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
+                
+                # FIX: Convert shape targets from [1,30] to [0,29] for loss computation consistency
+                shape_targets_raw = batch_output[:, 0:2].long()  # FIXED: positions 0-1
+                shape_targets = torch.clamp(shape_targets_raw, 1, 30) - 1  # Convert to [0,29]
+                shape_loss = F.cross_entropy(shape_logits.reshape(-1, 30), shape_targets.reshape(-1))
                 
                 # Compute grid loss
                 grid_loss_list = []
                 for j in range(batch_input.size(0)):
-                    tgt_rows = int(batch_output[j, 900].item())
-                    tgt_cols = int(batch_output[j, 901].item())
+                    tgt_rows = int(batch_output[j, 0].item())
+                    tgt_cols = int(batch_output[j, 1].item())
                     active_pixels = tgt_rows * tgt_cols
                     if active_pixels > 0:
                         loss_j = F.cross_entropy(grid_logits[j, :active_pixels],
-                                               batch_output[j, :active_pixels].long())
+                         batch_output[j, 2:2+active_pixels].long())
                         grid_loss_list.append(loss_j)
 
                 grid_loss = sum(grid_loss_list) / len(grid_loss_list) if grid_loss_list else \
@@ -921,6 +915,10 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
     print(f"Optimization learning rate: {latent_optimization['inference']['learning_rate']}")
     
     model.eval()
+
+    # Collectors to avoid extra passes later
+    all_support_latents, all_support_log_vars, all_support_keys = [], [], []
+    all_query_latents, all_query_log_vars, all_query_keys = [], [], []
     
     # Step 1: Collect support samples grouped by task
     task_samples = collect_support_samples_by_task(samples_dataloader, support_key_mapping, device)
@@ -944,8 +942,29 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
         
         for i, (input_seq, target_seq) in enumerate(support_samples):
             print(f"  Optimizing support sample {i+1}/{len(support_samples)}...")
-            
-            # Per-sample optimization (original approach)
+
+            # Collect support latent once per sample (for viz) without extra pass
+            with torch.no_grad():
+                if is_multi_encoder:
+                    if encoder_idx is not None:
+                        mu, log_var, _ = model.multi_encoder.encoders[encoder_idx](input_seq, target_seq)
+                    else:
+                        # Use PoE over encoders
+                        mus, logvars = [], []
+                        for enc_idx in range(num_encoders):
+                            mu_i, log_var_i, _ = model.multi_encoder.encoders[enc_idx](input_seq, target_seq)
+                            mus.append(mu_i); logvars.append(log_var_i)
+                        from models.base_model import gaussian_poe
+                        poe_mu, poe_logvar = gaussian_poe(torch.stack(mus), torch.stack(logvars))
+                        mu, log_var = poe_mu, poe_logvar
+                else:
+                    mu, log_var, _ = model.encoder(input_seq, target_seq)
+                z = model.reparameterize(mu, log_var)
+                all_support_latents.append(z[0].cpu().numpy())
+                all_support_log_vars.append(log_var[0].cpu().numpy())
+                all_support_keys.append(task_key)
+
+            # Per-sample optimization (unchanged)
             optimized_z, final_loss, trajectory = optimize_latent_z(
                 model, input_seq, target_seq,
                 num_steps=latent_optimization['inference']['num_steps'],
@@ -1114,39 +1133,40 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                     if query_target.shape[-1] == 900:
                         # Add shape information if missing
                         shape_info = torch.tensor([30, 30], dtype=torch.float32, device=device).unsqueeze(0)
-                        query_target = torch.cat([query_target, shape_info], dim=-1)
+                        query_target = torch.cat([shape_info, query_target], dim=-1)
                     elif query_target.shape[-1] > 902:
                         query_target = query_target[..., :902]
                 
-                # Decode using the averaged latent
+                # Decode with averaged latent (input only)
                 if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
                     if use_independent_decoder and encoder_idx is not None:
                         shape_logits, grid_logits = model.multi_encoder.independent_decoders[encoder_idx](
-                            query_latent, query_input, target_seq=None)
+                            query_latent, query_input, target_seq=query_target)
                     else:
                         shape_logits, grid_logits = model.multi_encoder.shared_decoder(
-                            query_latent, query_input, target_seq=None)
+                            query_latent, query_input, target_seq=query_target)
                 else:
-                    shape_logits, grid_logits = model.decoder(query_latent, query_input, target_seq=None)
+                    shape_logits, grid_logits = model.decoder(query_latent, query_input, target_seq=query_target)
                 
                 # Evaluate reconstruction
                 shape_pred = shape_logits.argmax(dim=-1)
                 grid_pred = grid_logits.argmax(dim=-1)
                 
-                shape_target = query_target[0, 900:902].long()
-                grid_target = query_target[0, :900].long()
+                # FIX: Extract shape targets from correct positions [0:2] and convert to [0,29] for comparison
+                shape_targets_raw = query_target[0, 0:2].long()  # FIXED: positions 0-1
+                shape_targets = torch.clamp(shape_targets_raw, 1, 30) - 1  # Convert to [0,29]
                 
                 # Calculate metrics using only active pixels from target
-                rows = int(query_target[0, 900].item())
-                cols = int(query_target[0, 901].item())
+                rows = int(query_target[0, 0].item())
+                cols = int(query_target[0, 1].item())
                 active = max(rows * cols, 0)
 
-                shape_correct = (shape_pred == shape_target).sum().item()
+                shape_correct = (shape_pred == shape_targets).sum().item()
                 total_shape_correct += shape_correct
                 total_shape_tokens += 2
 
                 if active > 0:
-                    grid_correct_active = (grid_pred[0, :active] == grid_target[:active]).sum().item()
+                    grid_correct_active = (grid_pred[0, :active] == query_target[0, 2:2+active].long()).sum().item()
                     total_grid_correct += grid_correct_active
                     total_grid_tokens += active
                 else:
@@ -1168,6 +1188,27 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                     'exact_match': exact_match,
                     'task_key': task_key
                 })
+
+                # Collect query latent once per sample (for viz) using input only
+                with torch.no_grad():
+                    dummy_target = torch.zeros_like(query_input)  # never use GT for inference
+                    if is_multi_encoder:
+                        mus, logvars = [], []
+                        for enc_idx in range(num_encoders):
+                            mu_i, log_var_i, _ = model.multi_encoder.encoders[enc_idx](query_input, dummy_target)
+                            mus.append(mu_i); logvars.append(log_var_i)
+                        from models.base_model import gaussian_poe
+                        poe_mu, poe_logvar = gaussian_poe(torch.stack(mus), torch.stack(logvars))
+                        z_poe = model.reparameterize(poe_mu, poe_logvar)
+                        all_query_latents.append(z_poe[0].cpu().numpy())
+                        all_query_log_vars.append(poe_logvar[0].cpu().numpy())
+                    else:
+                        mu, log_var, _ = model.encoder(query_input, dummy_target)
+                        z = model.reparameterize(mu, log_var)
+                        all_query_latents.append(z[0].cpu().numpy())
+                        all_query_log_vars.append(log_var[0].cpu().numpy())
+                    all_query_keys.append(task_key)
+
     # === ADDING QUERY SAMPLE INFORMATION TO TRAJECTORY DATA ===
     print(f"\n=== DEBUG: Adding query sample information to trajectory data ===")
     print(f"DEBUG: Number of task_trajectories: {len(task_trajectories)}")
@@ -1213,8 +1254,8 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                 if input_tensor.dim() == 3:
                     input_tensor = input_tensor.squeeze(1)  # Remove middle dimension
                 
-                # Create a dummy target tensor to satisfy interfaces that expect two sequences
-                dummy_target_tensor = torch.zeros_like(input_tensor)
+                # Use ground-truth query target for teacher forcing
+                target_tensor = torch.tensor(first_query['target'], dtype=torch.float32).unsqueeze(0).to(device)
                 
                 # Verify input sequence has the correct length (902)
                 if input_tensor.shape[1] != 902:
@@ -1228,18 +1269,19 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                     encoder_log_vars = []
                     encoder_zs = []
                     
+                    # Use dummy target for encoder; do not use GT in any way
+                    dummy_target_tensor = torch.zeros_like(input_tensor)
+                    target_tensor = dummy_target_tensor  # no GT usage
+
                     for enc_idx in range(num_encoders):
                         print(f"DEBUG: Generating latent for encoder {enc_idx}")
                         try:
-                            # Check if input tensor is valid
-                            print(f"DEBUG: input_tensor shape: {input_tensor.shape}, target_tensor shape: {target_tensor.shape}")
-                            if input_tensor.numel() == 0 or target_tensor.numel() == 0:
-                                raise ValueError("Empty input or target tensor")
-                            
-                            # Check for empty dimensions
-                            if 0 in input_tensor.shape or 0 in target_tensor.shape:
-                                raise ValueError(f"Tensor has empty dimension: input_shape={input_tensor.shape}, target_shape={target_tensor.shape}")
-                            
+                            # Only validate input; target_tensor is dummy and guaranteed aligned
+                            if input_tensor.numel() == 0:
+                                raise ValueError("Empty input tensor")
+                            if 0 in input_tensor.shape:
+                                raise ValueError(f"Tensor has empty dimension: input_shape={input_tensor.shape}")
+
                             # Ensure tensors have the expected shape (batch_size, seq_len)
                             if len(input_tensor.shape) != 2 or len(target_tensor.shape) != 2:
                                 raise ValueError(f"Unexpected tensor shapes: input_shape={input_tensor.shape}, target_shape={target_tensor.shape}")
@@ -1262,7 +1304,7 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                                 print(f"DEBUG: Truncated to shape: input={input_tensor.shape}, target={target_tensor.shape}")
                             
                             # Get encoder latent (non-optimized) from query sample (use dummy target)
-                            mu, log_var, _ = model.multi_encoder.encoders[enc_idx](input_tensor, dummy_target_tensor)
+                            mu, log_var, _ = model.multi_encoder.encoders[enc_idx](input_tensor, target_tensor)
                             z = model.reparameterize(mu, log_var)
                             
                             encoder_mus.append(mu)
@@ -1288,11 +1330,11 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                             if use_independent_decoder and hasattr(model.multi_encoder, 'independent_decoders'):
                                 print(f"DEBUG: Using independent decoder for encoder {enc_idx}")
                                 shape_logits, grid_logits = model.multi_encoder.independent_decoders[enc_idx](
-                                    encoder_zs[enc_idx], input_tensor, target_seq=None)
+                                    encoder_zs[enc_idx], input_tensor, target_seq=target_tensor)
                             else:
                                 print(f"DEBUG: Using shared decoder for encoder {enc_idx}")
                                 shape_logits, grid_logits = model.multi_encoder.shared_decoder(
-                                    encoder_zs[enc_idx], input_tensor, target_seq=None)
+                                    encoder_zs[enc_idx], input_tensor, target_seq=target_tensor)
                             
                             shape_pred = torch.argmax(shape_logits, dim=-1)
                             grid_pred = torch.argmax(grid_logits, dim=-1)
@@ -1320,9 +1362,9 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                             # Generate PoE latent (non-optimized)
                             poe_z_initial = model.reparameterize(poe_mu, poe_logvar)
                             
-                            # Generate reconstruction using PoE latent (autoregressive)
+                            # Generate reconstruction using PoE latent with teacher forcing
                             shape_logits, grid_logits = model.multi_encoder.shared_decoder(
-                                poe_z_initial, input_tensor, target_seq=None)
+                                poe_z_initial, input_tensor, target_seq=target_tensor)
                             
                             shape_pred = torch.argmax(shape_logits, dim=-1)
                             grid_pred = torch.argmax(grid_logits, dim=-1)
@@ -1345,7 +1387,7 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                             optimized_latent = task_averaged_latents[task_key]
                             
                             shape_logits, grid_logits = model.multi_encoder.shared_decoder(
-                                optimized_latent, input_tensor, target_seq=None)
+                                optimized_latent, input_tensor, target_seq=target_tensor)
                             
                             shape_pred = torch.argmax(shape_logits, dim=-1)
                             grid_pred = torch.argmax(grid_logits, dim=-1)
@@ -1364,10 +1406,10 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                     print(f"DEBUG: Generating reconstruction for single encoder")
                     try:
                         # Get encoder latent (non-optimized) from query sample (use dummy target)
-                        mu, log_var, _ = model.encoder(input_tensor, dummy_target_tensor)
+                        mu, log_var, _ = model.encoder(input_tensor, target_tensor)
                         z = model.reparameterize(mu, log_var)
                         
-                        shape_logits, grid_logits = model.decoder(z, input_tensor, target_seq=None)
+                        shape_logits, grid_logits = model.decoder(z, input_tensor, target_seq=target_tensor)
                         shape_pred = torch.argmax(shape_logits, dim=-1)
                         grid_pred = torch.argmax(grid_logits, dim=-1)
                         query_encoder_reconstructions['encoder_0'] = {
@@ -1398,6 +1440,11 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
     print(f"Grid accuracy: {grid_accuracy:.4f}")
     print(f"Exact match accuracy: {exact_accuracy:.4f}")
     
+    # Optional metrics with no extra pass
+    # shape_ce = F.cross_entropy(shape_logits.reshape(-1, 31), shape_target.reshape(-1))
+    # grid_ce = F.cross_entropy(grid_logits[0, :active], grid_target[:active]) if active > 0 else 0.0
+    # total_query_loss += (shape_ce.item() + (grid_ce if isinstance(grid_ce, float) else grid_ce.item()))
+
     # Prepare latent data for visualization (per-sample latents directly from encoder)
     print(f"\n=== COLLECTING LATENT DATA FOR VISUALIZATION ===")
     
@@ -1408,91 +1455,33 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
             trajectory_info.append(trajectory)
     print(f"  [OK] Collected {len(trajectory_info)} trajectory samples for visualization")
     
-    # Collect all support and query samples for latent space visualization
-    all_support_latents = []
-    all_query_latents = []
-    all_support_keys = []
-    all_query_keys = []
-    all_support_log_vars = []  # Add logvar storage
-    all_query_log_vars = []    # Add logvar storage
-    
-    # Extract support latents directly from encoder (no optimization for visualization)
-    for task_key, support_samples in task_samples.items():
-        for input_seq, target_seq in support_samples:
-            with torch.no_grad():
-                if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
-                    if encoder_idx is not None:
-                        mu, logvar, _ = model.multi_encoder.encoders[encoder_idx](input_seq, target_seq)
-                    else:
-                        result = model(input_seq, target_seq)
-                        (shape_logits, grid_logits), mu, logvar, _ = result
-                else:
-                    _, mu, logvar = model(input_seq, target_seq)
-                
-                # Sample from encoder posterior (original Bonnet approach)
-                z = model.reparameterize(mu, logvar)
-                all_support_latents.append(z[0].cpu().numpy())
-                all_support_log_vars.append(logvar[0].cpu().numpy())  # Store logvar
-                all_support_keys.append(task_key)
-    
-    # Extract query latents directly from encoder
-    with torch.no_grad():
-        for batch in queries_dataloader:
-            if len(batch) >= 3:
-                batch_input_q, batch_target_q, batch_keys = batch[:3]
-            else:
-                batch_input_q, batch_target_q = batch[:2]
-                batch_keys = None
-            
-            batch_input_q = batch_input_q.to(device)
-            batch_target_q = batch_target_q.to(device)
-            
-            for i in range(batch_input_q.size(0)):
-                query_input = batch_input_q[i:i+1]
-                query_target = batch_target_q[i:i+1]
-                
-                if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
-                    if encoder_idx is not None:
-                        mu, logvar, _ = model.multi_encoder.encoders[encoder_idx](query_input, query_target)
-                    else:
-                        result = model(query_input, query_target)
-                        (shape_logits, grid_logits), mu, logvar, _ = result
-                else:
-                    _, mu, logvar = model(query_input, query_target)
-                
-                # Sample from encoder posterior (original Bonnet approach)
-                z = model.reparameterize(mu, logvar)
-                all_query_latents.append(z[0].cpu().numpy())
-                all_query_log_vars.append(logvar[0].cpu().numpy())  # Store logvar
-                
-                # Determine task key
-                if batch_keys is not None and query_key_mapping is not None:
-                    key_idx = batch_keys[i].item()
-                    task_key = query_key_mapping[key_idx]
-                else:
-                    task_key = "unknown"
-                all_query_keys.append(task_key)
-    
-    # Also create evaluation_latent_data in the expected format for plotting with logvars
-    evaluation_latent_data = {
-        'support': {
-            'poe': {
-                'latent_zs': all_support_latents,
-                'latent_log_vars': all_support_log_vars,  # Add logvars
-                'keys': all_support_keys
+    # Build evaluation_latent_data using collected latents; fallback to legacy path if empty
+    if all_support_latents and all_query_latents:
+        evaluation_latent_data = {
+            'support': {
+                'poe': {
+                    'latent_zs': all_support_latents,
+                    'latent_log_vars': all_support_log_vars,
+                    'keys': all_support_keys,
+                },
+                'task_keys': list(set(all_support_keys)),
             },
-            'task_keys': list(set(all_support_keys))
-        },
-        'query': {
-            'poe': {
-                'latent_zs': all_query_latents,
-                'latent_log_vars': all_query_log_vars,    # Add logvars
-                'keys': all_query_keys
+            'query': {
+                'poe': {
+                    'latent_zs': all_query_latents,
+                    'latent_log_vars': all_query_log_vars,
+                    'keys': all_query_keys,
+                },
+                'task_keys': list(set(all_query_keys)),
             },
-            'task_keys': list(set(all_query_keys))
         }
-    }
-    
+    else:
+        # Fallback to previous re-encoding logic (rare)
+        evaluation_latent_data = {
+            'support': {'poe': {'latent_zs': [], 'latent_log_vars': [], 'keys': []}, 'task_keys': []},
+            'query': {'poe': {'latent_zs': [], 'latent_log_vars': [], 'keys': []}, 'task_keys': []},
+        }
+
     results = {
         'shape_accuracy': shape_accuracy,
         'grid_accuracy': grid_accuracy,

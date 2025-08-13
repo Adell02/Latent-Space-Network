@@ -8,7 +8,7 @@ import os
 from models.base_model import LatentProgramNetwork, compute_loss, gaussian_poe
 from utils.settings_manager import settings
 from re_arc.main import generate_and_process_tasks
-from utils.data_preparation import generate_per_key_ood_samples
+from utils.data_preparation import generate_per_key_ood_samples, generate_ood_evaluation_dataset, extract_grid_from_sequence
 from utils.latent_functions import get_optimized_z
 from utils.data_preparation import split_dataset_by_keys_for_multi_encoder
 from utils.training_helpers import create_mixed_domains_dataloader, create_infinite_dataloader
@@ -27,7 +27,7 @@ from utils.model_utils import (
 )
 
 from utils.wandb_logger import init_wandb_for_mode, get_wandb_logger
-from utils.evaluation_utils import run_quick_evaluation, should_run_evaluation, log_evaluation_to_wandb
+from utils.evaluation_utils import run_quick_evaluation, should_run_evaluation, log_evaluation_to_wandb, get_evaluation_keys_with_all_support
 from utils.visualizers import plot_training_latent_space_per_epoch
 
 
@@ -120,34 +120,30 @@ def evaluate_accuracy(model, dataloader, device, is_multi_encoder=False, encoder
                     z_eval = model.reparameterize(mu_eval, log_var_eval)
 
             # Decode
-            shape_logits_eval, grid_logits_eval = model.decoder(z_eval, batch_input_eval, target_seq=None)
+            shape_logits_eval, grid_logits_eval = model.decoder(z_eval, batch_input_eval, target_seq=batch_target_eval)
             
-            shape_pred_eval = shape_logits_eval.argmax(dim=-1)
+            shape_pred_eval = shape_logits_eval.argmax(dim=-1)  # Range [0,29]
             grid_pred_eval = grid_logits_eval.argmax(dim=-1)
-            shape_tgt_eval = batch_target_eval[:, 900:902].long()
-            grid_tgt_eval = batch_target_eval[:, :900].long()
-
-            # Debug shape predictions
-            print(f"        DEBUG: Batch {batch_idx_eval} - shape_logits range: [{shape_logits_eval.min().item():.4f}, {shape_logits_eval.max().item():.4f}]")
-            print(f"        DEBUG: Batch {batch_idx_eval} - shape_pred: {shape_pred_eval.flatten().tolist()}")
-            print(f"        DEBUG: Batch {batch_idx_eval} - shape_tgt: {shape_tgt_eval.flatten().tolist()}")
-            print(f"        DEBUG: Batch {batch_idx_eval} - shape_matches: {(shape_pred_eval == shape_tgt_eval).sum().item()}/{shape_tgt_eval.numel()}")
-
-            epoch_shape_correct += (shape_pred_eval == shape_tgt_eval).sum().item()
-            epoch_shape_tokens += shape_tgt_eval.numel()
+            shape_tgt_eval_raw = batch_target_eval[:, 0:2].long()  # FIXED: positions 0-1
+            # FIX: Convert targets to [0,29] for comparison with predictions
+            # Sequence stores [1,30], but predictions are [0,29]
+            shape_tgt_eval = torch.clamp(shape_tgt_eval_raw, 1, 30) - 1  # Convert to [0,29]
             
-            for i in range(batch_input_eval.size(0)):
-                tgt_rows_eval = int(batch_target_eval[i, 900].item())
-                tgt_cols_eval = int(batch_target_eval[i, 901].item())
-                active_pixels_eval = tgt_rows_eval * tgt_cols_eval
-                if active_pixels_eval > 0:
-                    epoch_grid_correct += (grid_pred_eval[i, :active_pixels_eval] == grid_tgt_eval[i, :active_pixels_eval]).sum().item()
-                    epoch_grid_tokens += active_pixels_eval
-                    if torch.all(shape_pred_eval[i] == shape_tgt_eval[i]) and \
-                       torch.all(grid_pred_eval[i, :active_pixels_eval] == grid_tgt_eval[i, :active_pixels_eval]):
-                        sample_exact_correct += 1
-                elif torch.all(shape_pred_eval[i] == shape_tgt_eval[i]):
-                    sample_exact_correct += 1
+            shape_correct_eval = (shape_pred_eval == shape_tgt_eval).sum().item()
+            total_shape_correct_eval += shape_correct_eval
+            total_shape_eval += shape_pred_eval.numel()
+            
+            # Grid accuracy (only for active pixels)
+            for j in range(batch_input_eval.size(0)):
+                # Extract shape from sequence (stored as [1,30])
+                tgt_rows = int(batch_target_eval[j, 0].item())  # [1,30] range
+                tgt_cols = int(batch_target_eval[j, 1].item())  # [1,30] range
+                active_pixels = tgt_rows * tgt_cols
+                if active_pixels > 0:
+                    grid_correct_j = (grid_pred_eval[j, :active_pixels] == 
+                                   batch_target_eval[j, 2:2+active_pixels].long()).sum().item()
+                    total_grid_correct_eval += grid_correct_j
+                    total_grid_eval += active_pixels
 
     # Calculate accuracies
     print(f"        DEBUG: Accuracy calculation:")
@@ -492,6 +488,137 @@ def main_training(file_store_name, run_dir=None, notes=None):  # ← ADD notes p
     logger.info(f"Starting training for ARC problems {len(TRAINING_KEYS)} keys.")
     logger.info(f"Full settings dump: {json.dumps(settings.get_settings(), indent=2)}")
     print("Using run directory:", run_dir)
+
+    # --- Save one sample per training key and per eval key (support+query) at run start ---
+    try:
+        from utils.data_preparation import generate_ood_evaluation_dataset
+        from utils.evaluation_utils import get_evaluation_keys_with_all_support
+        import numpy as np
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from matplotlib.colors import ListedColormap
+
+        def _save_grid_image(seq_like, save_path, title=None):
+            try:
+                grid, shape = extract_grid_from_sequence(seq_like)  # respects rows/cols
+                grid = np.asarray(grid, dtype=int)
+                grid = np.clip(grid, 0, 9)
+                plt.figure(figsize=(4, 4))
+                plt.imshow(grid, cmap='viridis', interpolation='nearest', aspect='equal')
+                plt.axis('off')
+                if title is None and isinstance(shape, (tuple, list)) and len(shape) == 2:
+                    title = f"{shape[0]}×{shape[1]}"
+                if title:
+                    plt.title(title)
+                plt.savefig(save_path, bbox_inches='tight', pad_inches=0)
+                plt.close()
+            except Exception as e:
+                logger.warning(f"[SAMPLES] Failed saving grid image {save_path}: {e}")
+
+        samples_root = os.path.join(run_dir, 'SAMPLES_USED')
+        train_samples_dir = os.path.join(samples_root, 'TRAINING')
+        eval_samples_dir = os.path.join(samples_root, 'EVAL')
+        os.makedirs(train_samples_dir, exist_ok=True)
+        os.makedirs(eval_samples_dir, exist_ok=True)
+
+        # 1) One training sample per TRAINING_KEYS
+        logger.info(f"[SAMPLES] Saving 1 training sample per key to {train_samples_dir}")
+        for key in TRAINING_KEYS:
+            try:
+                _, _, _, in_seqs, out_seqs = generate_and_process_tasks(key, 1)
+                if in_seqs and out_seqs:
+                    sample = {
+                        'key': key,
+                        'input': in_seqs[0].tolist() if hasattr(in_seqs[0], 'tolist') else list(in_seqs[0]),
+                        'output': out_seqs[0].tolist() if hasattr(out_seqs[0], 'tolist') else list(out_seqs[0]),
+                    }
+                    with open(os.path.join(train_samples_dir, f'{key}.json'), 'w') as f:
+                        json.dump(sample, f)
+                    # Save images
+                    _save_grid_image(in_seqs[0], os.path.join(train_samples_dir, f'{key}_input.png'))
+                    _save_grid_image(out_seqs[0], os.path.join(train_samples_dir, f'{key}_output.png'))
+                else:
+                    logger.warning(f"[SAMPLES] No training sample generated for key {key}")
+            except Exception as e:
+                logger.warning(f"[SAMPLES] Could not generate training sample for key {key}: {e}")
+
+        # 2) One eval sample per eval key: support + query
+        evaluation_settings = settings.get_evaluation_settings()
+        data_settings_local = settings.get_data_settings()
+        eval_seed = data_settings_local.get('eval_seed', 42)
+        raw_eval_keys = evaluation_settings.get('eval_keys', TRAINING_KEYS[: min(10, len(TRAINING_KEYS))])
+        eval_keys = get_evaluation_keys_with_all_support(raw_eval_keys, evaluation_settings.get('n_max_eval_keys', 10))
+
+        use_ood_for_eval = settings.get_evaluation_data_settings().get('use_ood_for_evaluation', True)
+        logger.info(f"[SAMPLES] Saving 1 support+query eval sample per key to {eval_samples_dir} (OOD={use_ood_for_eval})")
+
+        if use_ood_for_eval:
+            ood_eval = generate_ood_evaluation_dataset(eval_keys, n_samples=1, n_queries=1, seed=eval_seed)
+            for key in eval_keys:
+                try:
+                    kd = ood_eval.get(key, {})
+                    supp_in = kd.get('support', {}).get('input_sequences', [])
+                    supp_out = kd.get('support', {}).get('output_sequences', [])
+                    qry_in = kd.get('query', {}).get('input_sequences', [])
+                    qry_out = kd.get('query', {}).get('output_sequences', [])
+                    if supp_in and supp_out and qry_in and qry_out:
+                        payload = {
+                            'key': key,
+                            'support': {
+                                'input': supp_in[0].tolist() if hasattr(supp_in[0], 'tolist') else list(supp_in[0]),
+                                'output': supp_out[0].tolist() if hasattr(supp_out[0], 'tolist') else list(supp_out[0]),
+                            },
+                            'query': {
+                                'input': qry_in[0].tolist() if hasattr(qry_in[0], 'tolist') else list(qry_in[0]),
+                                'output': qry_out[0].tolist() if hasattr(qry_out[0], 'tolist') else list(qry_out[0]),
+                            },
+                            'ood_task_keys': kd.get('ood_task_keys', []),
+                        }
+                        with open(os.path.join(eval_samples_dir, f'{key}.json'), 'w') as f:
+                            json.dump(payload, f)
+                        # Save images
+                        _save_grid_image(supp_in[0], os.path.join(eval_samples_dir, f'{key}_support_input.png'))
+                        _save_grid_image(supp_out[0], os.path.join(eval_samples_dir, f'{key}_support_output.png'))
+                        _save_grid_image(qry_in[0], os.path.join(eval_samples_dir, f'{key}_query_input.png'))
+                        _save_grid_image(qry_out[0], os.path.join(eval_samples_dir, f'{key}_query_output.png'))
+                    else:
+                        logger.warning(f"[SAMPLES] OOD eval data empty for key {key}")
+                except Exception as e:
+                    logger.warning(f"[SAMPLES] Could not save OOD eval sample for key {key}: {e}")
+        else:
+            for key in eval_keys:
+                try:
+                    # Generate 2 samples; use [0] as support, [1] as query
+                    _, _, _, all_in, all_out = generate_and_process_tasks(key, 2)
+                    if len(all_in) >= 2 and len(all_out) >= 2:
+                        payload = {
+                            'key': key,
+                            'support': {
+                                'input': all_in[0].tolist() if hasattr(all_in[0], 'tolist') else list(all_in[0]),
+                                'output': all_out[0].tolist() if hasattr(all_out[0], 'tolist') else list(all_out[0]),
+                            },
+                            'query': {
+                                'input': all_in[1].tolist() if hasattr(all_in[1], 'tolist') else list(all_in[1]),
+                                'output': all_out[1].tolist() if hasattr(all_out[1], 'tolist') else list(all_out[1]),
+                            },
+                        }
+                        with open(os.path.join(eval_samples_dir, f'{key}.json'), 'w') as f:
+                            json.dump(payload, f)
+                        # Save images
+                        _save_grid_image(all_in[0], os.path.join(eval_samples_dir, f'{key}_support_input.png'))
+                        _save_grid_image(all_out[0], os.path.join(eval_samples_dir, f'{key}_support_output.png'))
+                        _save_grid_image(all_in[1], os.path.join(eval_samples_dir, f'{key}_query_input.png'))
+                        _save_grid_image(all_out[1], os.path.join(eval_samples_dir, f'{key}_query_output.png'))
+                    else:
+                        logger.warning(f"[SAMPLES] Not enough synthetic eval samples for key {key}")
+                except Exception as e:
+                    logger.warning(f"[SAMPLES] Could not generate synthetic eval sample for key {key}: {e}")
+
+        logger.info("[SAMPLES] Samples saved successfully.")
+    except Exception as e:
+        logger.warning(f"[SAMPLES] Failed at saving samples used: {e}")
+    # --- end SAMPLES_USED block ---
 
     # Initialize results dictionary early
     results = {
@@ -896,7 +1023,7 @@ def main_training(file_store_name, run_dir=None, notes=None):  # ← ADD notes p
                             assigned_keys = model.training_metadata['key_to_encoder_mapping'].get(enc_idx, [])
                         else:
                             # When split_across_encoders = false, all encoders see all keys
-                            assigned_keys = training_keys
+                            assigned_keys = TRAINING_KEYS
                         print(f"  Training Encoder {enc_idx} on keys: {assigned_keys[:5]}{'...' if len(assigned_keys) > 5 else ''}")
 
                         # Train this encoder on its assigned keys only
@@ -1048,7 +1175,7 @@ def main_training(file_store_name, run_dir=None, notes=None):  # ← ADD notes p
                 
                 # Run comprehensive evaluation
                 try:
-                    comprehensive_evaluation_after_epoch(
+                    eval_ok = comprehensive_evaluation_after_epoch(
                         model=model,
                         dataloader=dataloader,
                         device=device,
@@ -1066,6 +1193,27 @@ def main_training(file_store_name, run_dir=None, notes=None):  # ← ADD notes p
                     )
                     print(f"[OK] Comprehensive evaluation completed for epoch {epoch+1}")
                     
+                    # Reuse aggregated accuracy metrics from last evaluation if available
+                    try:
+                        # evaluation.py saves results via save_evaluation_results; also returns eval_results inside the function
+                        # We can optionally load the last eval_results saved path or have the function return metrics.
+                        # For now, check if eval_ok is a dict with aggregated metrics
+                        if isinstance(eval_ok, dict) and 'aggregated_metrics' in eval_ok:
+                            agg = eval_ok['aggregated_metrics']
+                            # Store a compact accuracy record per epoch
+                            epoch_acc = {
+                                'epoch': epoch + 1,
+                                'shape_accuracy': agg.get('average_metrics', {}).get('avg_shape_accuracy', 0.0),
+                                'grid_accuracy': agg.get('average_metrics', {}).get('avg_grid_accuracy', 0.0),
+                                'sample_exact_accuracy': agg.get('average_metrics', {}).get('avg_sample_exact_accuracy', 0.0),
+                                'source': 'evaluation_dataset'
+                            }
+                            results['epoch_accuracies'].append(epoch_acc)
+                            # Log to wandb
+                            if wandb_logger:
+                                wandb_logger.log_accuracy_metrics(epoch + 1, epoch_acc)
+                    except Exception:
+                        pass
                 except Exception as e:
                     logger.error(f"Error during comprehensive evaluation at epoch {epoch+1}: {e}")
                     print(f"[WARNING] Error during comprehensive evaluation at epoch {epoch+1}: {e}")
@@ -1090,134 +1238,10 @@ def main_training(file_store_name, run_dir=None, notes=None):  # ← ADD notes p
             logger.info(f"Average Loss: {avg_loss:.4f}")
             print(f"Epoch {epoch+1} completed. Average Loss: {avg_loss:.4f}")
 
-        # Evaluate accuracy at the end of each epoch.
+        # Skip per-batch training-dataloader accuracy; reuse comprehensive evaluation metrics
         logger.info("\n" + "=" * 40)
-        logger.info(f"Evaluating accuracy at end of Epoch {epoch+1}")
+        logger.info(f"Skipping training-dataloader accuracy; will reuse comprehensive evaluation metrics for Epoch {epoch+1}")
         logger.info("=" * 40)
-        
-        if is_multi_encoder:
-            # Multi-encoder: evaluate each encoder individually + PoE
-            epoch_accuracy_data = {
-                'epoch': epoch + 1,
-                'individual_encoders': {},
-                'poe_accuracy': {}
-            }
-            
-            # Evaluate each encoder individually on its own data
-            for eval_encoder_idx in range(NUM_ENCODERS):
-                dataloader = encoder_dataloaders[eval_encoder_idx]
-                if dataloader is None:
-                    continue # Skip encoders with no data
-                logger.info(f"\n--- Evaluating Encoder {eval_encoder_idx} ---")
-                print(f"Evaluating Encoder {eval_encoder_idx}...")
-                
-                # Use the specific encoder's dataloader for individual evaluation
-                encoder_accuracy = evaluate_accuracy(
-                    model, dataloader, device, 
-                    is_multi_encoder=True, encoder_idx=eval_encoder_idx, 
-                    optimize_z=OPTIMIZE_Z, logger=logger
-                )
-                
-                epoch_accuracy_data['individual_encoders'][eval_encoder_idx] = encoder_accuracy
-                print(f"Encoder {eval_encoder_idx} - Shape: {encoder_accuracy['shape_accuracy']:.4f}, "
-                      f"Grid: {encoder_accuracy['grid_accuracy']:.4f}, "
-                      f"Overall: {encoder_accuracy['overall_accuracy']:.4f}, "
-                      f"Sample Exact: {encoder_accuracy['sample_exact_accuracy']:.4f}")
-            
-            logger.info("\n--- Multi-encoder Training: Individual Encoder Evaluation Only ---")
-            print("Note: PoE evaluation removed from training. PoE will be evaluated during inference/evaluation phase.")
-            
-            # Store both detailed and summary accuracy data
-            results['epoch_accuracies'].append(epoch_accuracy_data)
-            
-            # Remove duplicate legacy format - visualizers will extract what they need from detailed data
-            # results['epoch_accuracies'].append({
-            #     'epoch': epoch + 1,
-            #     'shape_accuracy': poe_accuracy['shape_accuracy'],
-            #     'grid_accuracy': poe_accuracy['grid_accuracy'],
-            #     'overall_accuracy': poe_accuracy['overall_accuracy'],
-            #     'sample_exact_accuracy': poe_accuracy['sample_exact_accuracy']
-            # })
-        else:
-            # Single encoder: standard evaluation
-            logger.info("\n--- Evaluating Single Encoder ---")
-            print("Evaluating model...")
-            
-            single_accuracy = evaluate_accuracy(
-                model, dataloader, device,
-                is_multi_encoder=False, encoder_idx=None,
-                optimize_z=OPTIMIZE_Z, logger=logger
-            )
-            
-            # Store accuracy data (add epoch info)
-            single_accuracy['epoch'] = epoch + 1
-            results['epoch_accuracies'].append(single_accuracy)
-            
-            print(f"Model - Shape: {single_accuracy['shape_accuracy']:.4f}, "
-                  f"Grid: {single_accuracy['grid_accuracy']:.4f}, "
-                  f"Overall: {single_accuracy['overall_accuracy']:.4f}, "
-                  f"Sample Exact: {single_accuracy['sample_exact_accuracy']:.4f}")
-
-        model.train() # Already called at the start of train_model function for the next epoch
-
-        # Log training metrics to wandb
-        if wandb_logger:
-            if is_multi_encoder:
-                if use_joint_training:
-                    # Log joint training metrics including repulsion loss
-                    wandb_logger.log_training_metrics(epoch + 1, {
-                        'avg_shape_loss': avg_shape_loss,
-                        'avg_grid_loss': avg_grid_loss,
-                        'avg_kl_loss': avg_kl_loss,
-                        'avg_repulsion_loss': avg_repulsion_loss,
-                        'repulsion_lambda': current_lambda_rep,
-                        'avg_total_loss': avg_loss,
-                        'training_mode': 'joint'
-                    })
-                else:
-                    # Log average metrics across encoders
-                    wandb_logger.log_training_metrics(epoch + 1, {
-                        'avg_shape_loss': sum(m['avg_shape_loss'] for m in epoch_metrics_list) / len(epoch_metrics_list),
-                        'avg_grid_loss': sum(m['avg_grid_loss'] for m in epoch_metrics_list) / len(epoch_metrics_list),
-                        'avg_kl_loss': sum(m['avg_kl_loss'] for m in epoch_metrics_list) / len(epoch_metrics_list),
-                        'avg_total_loss': avg_epoch_loss,
-                        'training_mode': 'individual'
-                    })
-                # Log accuracy metrics
-                wandb_logger.log_accuracy_metrics(epoch + 1, epoch_accuracy_data)
-            else:
-                # Single encoder logging
-                log_dict = {
-                    'avg_shape_loss': avg_shape_loss,
-                    'avg_grid_loss': avg_grid_loss,
-                    'avg_kl_loss': avg_kl_loss,
-                    'avg_total_loss': avg_loss
-                }
-                
-                # Add VQ-VAE metrics if enabled
-                if hasattr(model, 'is_using_vq_vae') and model.is_using_vq_vae():
-                    vq_metrics = model.get_vq_metrics()
-                    if vq_metrics:
-                        log_dict.update({
-                            'vq_codebook_perplexity': vq_metrics.get('codebook_perplexity', 0.0),
-                            'vq_num_embeddings': vq_metrics.get('num_embeddings', 0),
-                        })
-                        # Log codebook usage histogram
-                        codebook_usage = vq_metrics.get('codebook_usage', None)
-                        if codebook_usage is not None:
-                            log_dict['vq_codebook_usage_entropy'] = -torch.sum(codebook_usage * torch.log(codebook_usage + 1e-10)).item()
-                            log_dict['vq_codebook_usage_max'] = torch.max(codebook_usage).item()
-                            log_dict['vq_codebook_usage_min'] = torch.min(codebook_usage).item()
-                
-                wandb_logger.log_training_metrics(epoch + 1, log_dict)
-                wandb_logger.log_accuracy_metrics(epoch + 1, single_accuracy)
-
-        # Note: Comprehensive evaluation is now done after each epoch above
-        # The old interval-based evaluation has been replaced with the comprehensive evaluation
-        # that runs after every epoch and includes all three requirements:
-        # 1. Training latent space plots (colored by key + encoder)
-        # 2. Sample-level optimization with trajectory plots
-        # 3. Evaluation latent space plots (support + query samples colored by keys)
 
         # Save checkpoint and results at regular intervals or at the end
         save_interval = training_settings.get('save_checkpoint_interval', 50)
@@ -1826,4 +1850,4 @@ def comprehensive_evaluation_after_epoch(
         print("  [ WARNING ] No evaluation results available for latent space plotting")
 
     print(f"=== COMPREHENSIVE EVALUATION COMPLETED FOR EPOCH {epoch+1} ===")
-    return True
+    return eval_results

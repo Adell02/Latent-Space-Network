@@ -305,22 +305,22 @@ class TransformerEncoder(nn.Module):
         if target_seq.shape[1] < 902:
             print(f"        ERROR: Encoder target sequence too short: {target_seq.shape[1]} < 902")
         
-        # Validate and clamp input values to prevent embedding index errors
-        # Grid tokens (0-899) should be in range [0, 9]
-        input_grid_tokens = torch.clamp(input_seq[:, :900], 0, 9).long()
-        target_grid_tokens = torch.clamp(target_seq[:, :900], 0, 9).long()
+        # FIXED: Updated for new sequence structure [shape_tokens(2), grid_tokens(900)]
+        # Shape tokens (0-1) should be in range [1, 30]  
+        input_shape_tokens = torch.clamp(input_seq[:, 0:2], 1, 30).long()
+        target_shape_tokens = torch.clamp(target_seq[:, 0:2], 1, 30).long()
         
-        # Shape tokens (900-902) should be in range [0, 30]
-        input_shape_tokens = torch.clamp(input_seq[:, 900:902], 0, 30).long()
-        target_shape_tokens = torch.clamp(target_seq[:, 900:902], 0, 30).long()
+        # Grid tokens (2-901) should be in range [0, 9]
+        input_grid_tokens = torch.clamp(input_seq[:, 2:902], 0, 9).long()
+        target_grid_tokens = torch.clamp(target_seq[:, 2:902], 0, 9).long()
         
-        # Updated indexing: grid tokens first (0-899), then shape tokens (900:902)
-        input_color_emb = self.color_embedding(input_grid_tokens)
+        # Process embeddings in JAX LPN order: shape first, then grid
         input_shape_emb = self.shape_embedding(input_shape_tokens)
-        target_color_emb = self.color_embedding(target_grid_tokens)
+        input_color_emb = self.color_embedding(input_grid_tokens)
         target_shape_emb = self.shape_embedding(target_shape_tokens)
+        target_color_emb = self.color_embedding(target_grid_tokens)
 
-        # Create padding masks using the shape tokens
+        # Create padding masks using the shape tokens (which are now first)
         input_mask = self.create_padding_mask(input_shape_tokens)
         target_mask = self.create_padding_mask(target_shape_tokens)
 
@@ -342,16 +342,17 @@ class TransformerEncoder(nn.Module):
         input_emb = input_color_emb + input_pos_emb
         target_emb = target_color_emb + target_pos_emb
 
-        # Append the shape embeddings after the grid tokens and add a CLS token at the end
+        # FIXED: Sequence order now matches JAX LPN: [input_shape, input_grid, target_shape, target_grid, cls]
         cls_emb = self.cls_embedding.unsqueeze(0).repeat(batch_size, 1, 1)
-        combined_emb = torch.cat([input_emb, input_shape_emb, target_emb, target_shape_emb, cls_emb], dim=1)
+        combined_emb = torch.cat([input_shape_emb, input_emb, target_shape_emb, target_emb, cls_emb], dim=1)
 
-        # Create attention mask (for grid tokens we use input_mask and target_mask, and ones for shape/CLS tokens)
+        # Create attention mask (shapes get full attention, grids use padding masks, cls gets full attention)
         combined_mask = torch.cat([
-            input_mask,
-            torch.ones(batch_size, 2, dtype=torch.bool, device=device),
-            target_mask,
-            torch.ones(batch_size, 3, dtype=torch.bool, device=device)
+            torch.ones(batch_size, 2, dtype=torch.bool, device=device),  # input_shape (2 tokens)
+            input_mask,                                                   # input_grid (900 tokens)
+            torch.ones(batch_size, 2, dtype=torch.bool, device=device),  # target_shape (2 tokens)
+            target_mask,                                                  # target_grid (900 tokens)
+            torch.ones(batch_size, 1, dtype=torch.bool, device=device)   # cls (1 token)
         ], dim=1)
 
         encoder_output = self.transformer_encoder(combined_emb, src_key_padding_mask=~combined_mask)
@@ -390,6 +391,13 @@ class TransformerDecoder(nn.Module):
         model_arc_set = get_current_settings()['model_architecture']
         self.input_dropout_prob = model_arc_set.get('decoder_input_dropout', 0.0)
         self.hidden_dim = hidden_dim
+        
+        # NEW: Shape loss weighting configuration
+        self.shape_loss_weight = model_arc_set.get('shape_loss_weight', 5.0)
+        
+        # NEW: Scheduled sampling configuration for AR training
+        self.scheduled_sampling_prob = model_arc_set.get('scheduled_sampling_prob', 0.0)
+        self.use_scheduled_sampling = self.scheduled_sampling_prob > 0.0
 
         # Embeddings for outputs
         self.output_shape_embedding = nn.Embedding(31, hidden_dim)
@@ -406,12 +414,6 @@ class TransformerDecoder(nn.Module):
         self.latent_projection = nn.Linear(get_latent_dim(), hidden_dim)
 
         # Memory projection: latent_expanded -> memory
-        #self.memory_projection = nn.Sequential(
-        #    nn.Linear(hidden_dim, hidden_dim),
-        #    nn.LayerNorm(hidden_dim),
-        #    nn.ReLU(),
-        #    nn.Linear(hidden_dim, hidden_dim)
-        #)
         self.memory_projection = nn.Linear(hidden_dim, hidden_dim)
 
         # Transformer decoder layers
@@ -431,21 +433,24 @@ class TransformerDecoder(nn.Module):
                 layer.use_checkpoint = True
 
         # Output projections
-        self.shape_output = nn.Linear(hidden_dim, 31)
+        self.shape_output = nn.Linear(hidden_dim, 30)
         self.grid_output  = nn.Linear(hidden_dim, 10)
         self.layer_norm   = nn.LayerNorm(hidden_dim)
+        
+        # Initialize shape output with better initialization for shape prediction
+        # Use smaller initialization for shape prediction to help learning
+        with torch.no_grad():
+            self.shape_output.weight.data.normal_(0, 0.01)
+            self.shape_output.bias.data.zero_()
 
     def prepare_input_memory(self, z: torch.Tensor, input_seq: torch.Tensor) -> torch.Tensor:
         """
         Build decoder memory that conditions on both the latent vector and the input grid tokens.
-
-        - Latent contribution: project latent to hidden_dim and expand across sequence length
-        - Input contribution: embed input grid tokens with positional encodings, and input shape tokens
-        - Fuse by addition, then project to memory space
+        
+        FIXED: Updated for new sequence structure [shape_tokens(2), grid_tokens(900)]
         """
         # Handle tensors with extra dimensions (e.g., from multi-encoder)
         if z.dim() > 2:
-            # Flatten all dimensions except the last one to get [B, latent_dim]
             z = z.flatten(start_dim=0, end_dim=-2)
 
         batch_size = input_seq.size(0)
@@ -455,23 +460,28 @@ class TransformerDecoder(nn.Module):
         latent_emb = self.latent_projection(z)
         latent_expanded = latent_emb.unsqueeze(1).expand(-1, 902, -1)
 
-        # Input grid embedding with row/col positional encodings
-        inp_grid = torch.clamp(input_seq[:, :900], 0, 9).long()                    # [B, 900]
-        grid_emb = self.output_grid_embedding(inp_grid)                            # [B, 900, H]
+        # FIXED: Extract tokens from new sequence structure
+        # Shape tokens: positions 0-1 (in range [1,30])
+        inp_shape_raw = torch.clamp(input_seq[:, 0:2], 1, 30).long()
+        inp_shape = inp_shape_raw - 1  # Convert to [0,29] for embedding consistency
+        shape_emb = self.output_shape_embedding(inp_shape)  # [B, 2, H]
+
+        # Grid tokens: positions 2-901 (in range [0,9])
+        inp_grid = torch.clamp(input_seq[:, 2:902], 0, 9).long()  # [B, 900]
+        grid_emb = self.output_grid_embedding(inp_grid)  # [B, 900, H]
+        
+        # Add positional embeddings to grid
         pos_i = torch.arange(30, device=device).view(1, -1, 1).repeat(batch_size, 1, 30)
         pos_j = torch.arange(30, device=device).view(1, 1, -1).repeat(batch_size, 30, 1)
         grid_pos = (self.row_embedding(pos_i) + self.col_embedding(pos_j)).view(batch_size, 900, -1)
-        grid_emb = grid_emb + grid_pos                                             # [B, 900, H]
+        grid_emb = grid_emb + grid_pos  # [B, 900, H]
 
-        # Input shape embedding (rows, cols)
-        inp_shape = torch.clamp(input_seq[:, 900:902], 0, 30).long()               # [B, 2]
-        shape_emb = self.output_shape_embedding(inp_shape)                          # [B, 2, H]
-
-        input_emb_full = torch.cat([grid_emb, shape_emb], dim=1)                   # [B, 902, H]
+        # FIXED: Concatenate in JAX LPN order: [shape_emb, grid_emb]
+        input_emb_full = torch.cat([shape_emb, grid_emb], dim=1)  # [B, 902, H]
 
         # Fuse latent and input into memory
-        fused = latent_expanded + input_emb_full                                    # [B, 902, H]
-        memory = self.memory_projection(fused)                                      # [B, 902, H]
+        fused = latent_expanded + input_emb_full  # [B, 902, H]
+        memory = self.memory_projection(fused)  # [B, 902, H]
         return memory
 
     def get_position_embedding(self, row_idx: int, col_idx: int, device: torch.device) -> torch.Tensor:
@@ -487,12 +497,40 @@ class TransformerDecoder(nn.Module):
         memory = self.prepare_input_memory(z, input_seq)
 
         if target_seq is not None:
-            # Teacher forcing path (shape-first, then grid)
-            tgt_grid  = torch.clamp(target_seq[:, :900], 0, 9).long()
-            tgt_shape = torch.clamp(target_seq[:, 900:902], 0, 30).long()
+            # Teacher forcing path (shape-first, then grid) with optional scheduled sampling
+            # FIXED: Extract from new sequence structure [shape_tokens(2), grid_tokens(900)]
+            tgt_shape_raw = torch.clamp(target_seq[:, 0:2], 1, 30).long()  # positions 0-1
+            tgt_shape = tgt_shape_raw - 1  # Convert to [0,29] for embedding consistency
+            
+            tgt_grid = torch.clamp(target_seq[:, 2:902], 0, 9).long()  # positions 2-901
 
-            shape_emb = self.output_shape_embedding(tgt_shape)                      # [B, 2, H]
-            grid_emb  = self.output_grid_embedding(tgt_grid)                        # [B, 900, H]
+            shape_emb = self.output_shape_embedding(tgt_shape)  # [B, 2, H]
+            grid_emb = self.output_grid_embedding(tgt_grid)  # [B, 900, H]
+
+            # Apply scheduled sampling if enabled and training
+            if self.use_scheduled_sampling and self.training and torch.rand(1).item() < self.scheduled_sampling_prob:
+                # Use autoregressive prediction for shape tokens to improve AR performance
+                with torch.no_grad():
+                    # Predict shape autoregressively
+                    start_inputs = self.start_token_embedding.expand(batch_size, 1, -1)
+                    
+                    # Predict rows (output range [0,29])
+                    mask = self.create_causal_mask(start_inputs.size(1), device)
+                    dec_out = self.layer_norm(self.transformer_decoder(tgt=start_inputs, memory=memory, tgt_mask=mask))
+                    row_pred = torch.argmax(self.shape_output(dec_out[:, -1:]), dim=-1)
+                    row_pred = torch.clamp(row_pred, 0, 29)  # Keep in [0,29] for embedding
+                    row_emb_pred = self.output_shape_embedding(row_pred)
+                    ar_inputs = torch.cat([start_inputs, row_emb_pred], dim=1)
+                    
+                    # Predict cols (output range [0,29])
+                    mask = self.create_causal_mask(ar_inputs.size(1), device)
+                    dec_out = self.layer_norm(self.transformer_decoder(tgt=ar_inputs, memory=memory, tgt_mask=mask))
+                    col_pred = torch.argmax(self.shape_output(dec_out[:, -1:]), dim=-1)
+                    col_pred = torch.clamp(col_pred, 0, 29)  # Keep in [0,29] for embedding
+                    
+                    # Use predicted shape embeddings instead of ground truth
+                    predicted_shape = torch.cat([row_pred, col_pred], dim=1)  # [B, 2]
+                    shape_emb = self.output_shape_embedding(predicted_shape)
 
             # apply input-dropout on grid embeddings
             if self.input_dropout_prob > 0:
@@ -505,85 +543,134 @@ class TransformerDecoder(nn.Module):
             pos_j = torch.arange(30, device=device).view(1, 1, -1).repeat(batch_size, 30, 1)
             grid_emb = grid_emb + (self.row_embedding(pos_i) + self.col_embedding(pos_j)).view(batch_size, 900, -1)
 
-            # Sequence is [shape, grid]
-            seq_emb = torch.cat([shape_emb, grid_emb], dim=1)                       # [B, 902, H]
+            # FIXED: Sequence order matches JAX LPN: [shape, grid]
+            seq_emb = torch.cat([shape_emb, grid_emb], dim=1)  # [B, 902, H]
             teacher_inputs = torch.cat([self.start_token_embedding.expand(batch_size, 1, -1),
-                                        seq_emb], dim=1)                            # [B, 903, H]
+                                        seq_emb], dim=1)  # [B, 903, H]
 
-            mask   = self.create_causal_mask(teacher_inputs.size(1), device)
+            mask = self.create_causal_mask(teacher_inputs.size(1), device)
             output = self.layer_norm(
                 self.transformer_decoder(tgt=teacher_inputs, memory=memory, tgt_mask=mask)
             )[:, 1:]  # remove start token
 
-            # First 2 positions predict shape, remaining 900 predict grid
-            shape_logits = self.shape_output(output[:, :2])                          # [B, 2, 31]
-            grid_logits  = self.grid_output(output[:, 2:])                           # [B, 900, 10]
+            # FIXED: Output order matches input: first 2 positions predict shape, remaining 900 predict grid
+            shape_logits = self.shape_output(output[:, :2])  # [B, 2, 31]
+            grid_logits = self.grid_output(output[:, 2:])  # [B, 900, 10]
             return shape_logits, grid_logits
 
+        # === AUTOREGRESSIVE INFERENCE: JAX LPN STYLE ===
+        # Initialize output sequence like JAX: shape tokens = 1 (not 0!)
+        output_seq = torch.zeros_like(input_seq, device=device, dtype=torch.float32)
+        output_seq[:, :2] = 1.0  # Initialize shape tokens to 1 like JAX!
 
-        # Autoregressive inference: predict shape first, then grid using predicted shape
-        inputs = self.start_token_embedding.expand(batch_size, 1, -1)
-
-        # Predict rows token
-        mask = self.create_causal_mask(inputs.size(1), device)
-        dec_out = self.layer_norm(self.transformer_decoder(tgt=inputs, memory=memory, tgt_mask=mask))
-        last = dec_out[:, -1:]
-        row_logits = self.shape_output(last)                                         # [B, 1, 31]
-        row_pred = torch.argmax(row_logits, dim=-1)                                  # [B, 1]
-        row_emb = self.output_shape_embedding(row_pred)                              # [B, 1, H]
-        inputs = torch.cat([inputs, row_emb], dim=1)
-
-        # Predict cols token
-        mask = self.create_causal_mask(inputs.size(1), device)
-        dec_out = self.layer_norm(self.transformer_decoder(tgt=inputs, memory=memory, tgt_mask=mask))
-        last = dec_out[:, -1:]
-        col_logits = self.shape_output(last)                                         # [B, 1, 31]
-        col_pred = torch.argmax(col_logits, dim=-1)                                  # [B, 1]
-        col_emb = self.output_shape_embedding(col_pred)                              # [B, 1, H]
-        inputs = torch.cat([inputs, col_emb], dim=1)
-
-        # Collect shape logits stacked as [B, 2, 31]
-        shape_logits = torch.cat([row_logits, col_logits], dim=1)
-
-        # Determine number of grid tokens to generate based on predicted shape
-        # Clamp to [0,30] for safety
-        rows = torch.clamp(row_pred.squeeze(-1), 0, 30)
-        cols = torch.clamp(col_pred.squeeze(-1), 0, 30)
-        # active_pixels per sample
-        active_pixels = (rows * cols).tolist()
-
-        # Initialize container for grid logits (pad to 900 to keep shape-compatible)
-        grid_logits = torch.zeros(batch_size, 900, 10, device=device)
-
-        # Generate grid tokens per sample separately (since sequence lengths differ)
-        # To keep things simple and robust, iterate token-by-token for max active pixels across batch
-        max_tokens = max(active_pixels) if len(active_pixels) > 0 else 0
-        token_counts = [0 for _ in range(batch_size)]
-
-        for t in range(max_tokens):
+        # JAX-style grid shape step function
+        def grid_shape_step(output_seq_current, predict_row: bool):
+            # Convert shape tokens to [0,29] for embeddings
+            shape_for_embedding = torch.clamp(output_seq_current[:, 0:2] - 1, 0, 29).long()
+            shape_emb = self.output_shape_embedding(shape_for_embedding)
+            
+            # Grid embeddings (always zeros initially)
+            grid_tokens = torch.clamp(output_seq_current[:, 2:902], 0, 9).long()
+            grid_emb = self.output_grid_embedding(grid_tokens)
+            
+            # Position embeddings
+            pos_i = torch.arange(30, device=device).view(1, -1, 1).repeat(batch_size, 1, 30)
+            pos_j = torch.arange(30, device=device).view(1, 1, -1).repeat(batch_size, 30, 1)
+            grid_emb = grid_emb + (self.row_embedding(pos_i) + self.col_embedding(pos_j)).view(batch_size, 900, -1)
+            
+            seq_emb = torch.cat([shape_emb, grid_emb], dim=1)
+            inputs = torch.cat([self.start_token_embedding.expand(batch_size, 1, -1), seq_emb], dim=1)
+            
             mask = self.create_causal_mask(inputs.size(1), device)
-            dec_out = self.layer_norm(self.transformer_decoder(tgt=inputs, memory=memory, tgt_mask=mask))
-            last = dec_out[:, -1:]
-            logits = self.grid_output(last)                                          # [B, 1, 10]
+            output = self.layer_norm(self.transformer_decoder(tgt=inputs, memory=memory, tgt_mask=mask))[:, 1:]
+            
+            if predict_row:
+                logits = self.shape_output(output[:, 0:1])  # First shape token
+            else:
+                logits = self.shape_output(output[:, 1:2])  # Second shape token
+            
+            # +1 to shift tokens to [1, max_rows] or [1, max_cols] like JAX
+            new_token = torch.argmax(logits, dim=-1).squeeze(-1) + 1
+            new_token = torch.clamp(new_token, 1, 30)  # [1,30] range like JAX
+            
+            # Update the appropriate position
+            position = 0 if predict_row else 1
+            output_seq_updated = output_seq_current.clone()
+            output_seq_updated[:, position] = new_token.float()
+            
+            return output_seq_updated
 
-            # For samples that still need tokens, write logits and append embedding
-            pred = torch.argmax(logits, dim=-1)                                      # [B, 1]
-            emb = self.output_grid_embedding(pred)                                   # [B, 1, H]
+        # Step 1: Predict rows, then columns (JAX approach)
+        output_seq = grid_shape_step(output_seq, predict_row=True)
+        output_seq = grid_shape_step(output_seq, predict_row=False)
+        
+        # Get predicted shapes (now in [1,30] range)
+        output_shapes = output_seq[:, :2]
+        max_cols = 30  # max_cols from config
+        
+        # Step 2: Generate grid tokens with JAX-style one_step function
+        def one_step(output_seq_current, i: int):
+            # Convert shape tokens to [0,29] for embeddings
+            shape_for_embedding = torch.clamp(output_seq_current[:, 0:2] - 1, 0, 29).long()
+            shape_emb = self.output_shape_embedding(shape_for_embedding)
+            
+            # Grid embeddings
+            grid_tokens = torch.clamp(output_seq_current[:, 2:902], 0, 9).long()
+            grid_emb = self.output_grid_embedding(grid_tokens)
+            
+            # Position embeddings
+            pos_i = torch.arange(30, device=device).view(1, -1, 1).repeat(batch_size, 1, 30)
+            pos_j = torch.arange(30, device=device).view(1, 1, -1).repeat(batch_size, 30, 1)
+            grid_emb = grid_emb + (self.row_embedding(pos_i) + self.col_embedding(pos_j)).view(batch_size, 900, -1)
+            
+            seq_emb = torch.cat([shape_emb, grid_emb], dim=1)
+            inputs = torch.cat([self.start_token_embedding.expand(batch_size, 1, -1), seq_emb], dim=1)
+            
+            mask = self.create_causal_mask(inputs.size(1), device)
+            output = self.layer_norm(self.transformer_decoder(tgt=inputs, memory=memory, tgt_mask=mask))[:, 1:]
+            grid_logits = self.grid_output(output[:, 2:])  # [B, 900, 10]
+            
+            # JAX smart indexing for row transitions    
+            # Extract logits using advanced indexing
+            batch_indices = torch.arange(batch_size, device=device)
+            logits = grid_logits[batch_indices, i]  # [B, 10]
+            
+            new_token = torch.argmax(logits, dim=-1)
+            new_token = torch.clamp(new_token, 0, 9)
+            
+            # Update output sequence
+            output_seq_updated = output_seq_current.clone()
+            output_seq_updated[:, 2 + i] = new_token.float()  # +2 to skip shapes like JAX
+            
+            return output_seq_updated
 
-            # Add per-sample positional embedding using predicted cols
-            for b in range(batch_size):
-                if token_counts[b] < active_pixels[b]:
-                    r = (token_counts[b] // max(cols[b].item(), 1)) if cols[b].item() > 0 else 0
-                    c = (token_counts[b] %  max(cols[b].item(), 1)) if cols[b].item() > 0 else 0
-                    emb[b, 0] = emb[b, 0] + self.get_position_embedding(int(r), int(c), device)
-            inputs = torch.cat([inputs, emb], dim=1)
+        # Generate grid tokens sequentially (max_len = 900 like JAX)
+        max_len = 900
+        for i in range(max_len):
+            output_seq = one_step(output_seq, i)
 
-            # Store logits where applicable and increment counters
-            for b in range(batch_size):
-                if token_counts[b] < active_pixels[b]:
-                    grid_logits[b, token_counts[b]] = logits[b, 0]
-                    token_counts[b] += 1
-
+        # Final pass to get complete logits for return
+        shape_for_embedding = torch.clamp(output_seq[:, 0:2] - 1, 0, 29).long()
+        shape_emb = self.output_shape_embedding(shape_for_embedding)
+        
+        grid_tokens = torch.clamp(output_seq[:, 2:902], 0, 9).long()
+        grid_emb = self.output_grid_embedding(grid_tokens)
+        
+        # Position embeddings
+        pos_i = torch.arange(30, device=device).view(1, -1, 1).repeat(batch_size, 1, 30)
+        pos_j = torch.arange(30, device=device).view(1, 1, -1).repeat(batch_size, 30, 1)
+        grid_emb = grid_emb + (self.row_embedding(pos_i) + self.col_embedding(pos_j)).view(batch_size, 900, -1)
+        
+        seq_emb = torch.cat([shape_emb, grid_emb], dim=1)
+        inputs = torch.cat([self.start_token_embedding.expand(batch_size, 1, -1), seq_emb], dim=1)
+        
+        mask = self.create_causal_mask(inputs.size(1), device)
+        output = self.layer_norm(self.transformer_decoder(tgt=inputs, memory=memory, tgt_mask=mask))[:, 1:]
+        
+        # Return final logits (note: shape predictions are in [0,29] range for loss computation)
+        shape_logits = self.shape_output(output[:, :2])  # [B, 2, 31]
+        grid_logits = self.grid_output(output[:, 2:])    # [B, 900, 10]
+        
         return shape_logits, grid_logits
 
 
@@ -915,14 +1002,20 @@ def compute_bonnet_cross_pair_loss(
             else:
                 shape_logits, grid_logits = model.multi_encoder.shared_decoder(z_i_prime, x_i, target_seq=y_i)
             
-            # Compute loss for TARGET sample i
-            shape_targets = y_i[:, 900:902].long()
-            shape_nll = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1), reduction='sum')
+            # Compute loss for TARGET sample i with shape weighting
+            shape_targets_raw = y_i[:, 0:2].long()  # FIXED: positions 0-1
+            shape_targets = torch.clamp(shape_targets_raw, 1, 30) - 1  # Convert to [0,29]
+            # Get shape loss weight from decoder
+            if use_independent_decoder:
+                shape_loss_weight = getattr(model.multi_encoder.independent_decoders[encoder_idx], 'shape_loss_weight', 5.0)
+            else:
+                shape_loss_weight = getattr(model.multi_encoder.shared_decoder, 'shape_loss_weight', 5.0)
+            shape_nll = shape_loss_weight * F.cross_entropy(shape_logits.reshape(-1, 30), shape_targets.reshape(-1), reduction='sum')
             
-            r, c = int(y_i[0, 900].item()), int(y_i[0, 901].item())
+            r, c = int(y_i[0, 0].item()), int(y_i[0, 1].item())  # FIXED: positions 0,1
             n_pix = r * c
             if n_pix > 0:
-                grid_nll = F.cross_entropy(grid_logits[0, :n_pix], y_i[0, :n_pix].long(), reduction='sum')
+                grid_nll = F.cross_entropy(grid_logits[0, :n_pix], y_i[0, 2:2+n_pix].long(), reduction='sum')  # FIXED: grid at positions 2+
             else:
                 grid_nll = torch.tensor(0.0, device=device)
             
@@ -942,14 +1035,20 @@ def compute_bonnet_cross_pair_loss(
         else:
             shape_logits, grid_logits = model.multi_encoder.shared_decoder(z_i_prime, x_i, target_seq=y_i)
         
-        # Compute -log p_θ(y_i | x_i, z_i') as in Bonnet's formulation
-        shape_targets = y_i[:, 900:902].long()
-        shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1), reduction='mean')
+        # Compute -log p_θ(y_i | x_i, z_i') as in Bonnet's formulation with shape weighting
+        shape_targets_raw = y_i[:, 0:2].long()  # FIXED: positions 0-1
+        shape_targets = torch.clamp(shape_targets_raw, 1, 30) - 1  # Convert to [0,29]
+        # Get shape loss weight from decoder
+        if use_independent_decoder:
+            shape_loss_weight = getattr(model.multi_encoder.independent_decoders[encoder_idx], 'shape_loss_weight', 5.0)
+        else:
+            shape_loss_weight = getattr(model.multi_encoder.shared_decoder, 'shape_loss_weight', 5.0)
+        shape_loss = shape_loss_weight * F.cross_entropy(shape_logits.reshape(-1, 30), shape_targets.reshape(-1), reduction='mean')
         
-        r, c = int(y_i[0, 900].item()), int(y_i[0, 901].item())
+        r, c = int(y_i[0, 0].item()), int(y_i[0, 1].item())  # FIXED: positions 0,1
         n_pix = r * c
         if n_pix > 0:
-            grid_loss = F.cross_entropy(grid_logits[0, :n_pix], y_i[0, :n_pix].long(), reduction='mean')
+            grid_loss = F.cross_entropy(grid_logits[0, :n_pix], y_i[0, 2:2+n_pix].long(), reduction='mean')  # FIXED: grid at positions 2+
         else:
             grid_loss = torch.tensor(0.0, device=device)
         
@@ -1093,20 +1192,28 @@ def multinomial_loss(
     beta: float = BETA,
     mu: torch.Tensor,
     logvar: torch.Tensor,
+    shape_loss_weight: float = 5.0,
 ) -> torch.Tensor:
-    """Bonnet-style multinomial loss computation."""
     shape_logits, grid_logits = logits
-    shape_targets = target_seq[:, 900:902].long()
-    shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
+    
+    # FIXED: Extract shape targets from new positions 0-1 and convert [1,30] to [0,29]
+    shape_targets_raw = target_seq[:, 0:2].long()  # positions 0-1
+    shape_targets = torch.clamp(shape_targets_raw, 1, 30) - 1  # Convert to [0,29]
 
+    # Apply shape loss weighting to prioritize accurate shape prediction
+    shape_loss = shape_loss_weight * F.cross_entropy(shape_logits.reshape(-1, 30), shape_targets.reshape(-1))
+
+    # Grid loss calculation: extract grid from positions 2-901, use original shape values for indexing
     batch_size = target_seq.size(0)
     grid_loss_sum = 0.0
     active_samples = 0
     for i in range(batch_size):
-        r, c = map(int, target_seq[i, 900:902])
+        r, c = map(int, shape_targets_raw[i])  # Use original [1,30] values for grid indexing
         n_pix = r * c
         if n_pix > 0:
-            grid_loss_sum += F.cross_entropy(grid_logits[i, :n_pix], target_seq[i, :n_pix].long())
+            # FIXED: Grid targets are now at positions 2-901
+            grid_targets = target_seq[i, 2:2+n_pix].long()  # Extract first n_pix grid tokens
+            grid_loss_sum += F.cross_entropy(grid_logits[i, :n_pix], grid_targets)
             active_samples += 1
     grid_loss = grid_loss_sum / active_samples if active_samples > 0 else torch.tensor(0.0, device=target_seq.device)
     recon = shape_loss + grid_loss
@@ -1208,25 +1315,30 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
             # Decode with shared decoder
             shape_logits, grid_logits = model.multi_encoder.shared_decoder(z, input_seq, target_seq=target_seq)
             
-            # Bonnet's reconstruction loss computation
-            shape_targets = target_seq[:, 900:902].long()
-            shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
+            # Bonnet's reconstruction loss computation with shape weighting
+            shape_targets_raw = target_seq[:, 0:2].long()  # FIXED: positions 0-1
+            shape_targets = torch.clamp(shape_targets_raw, 1, 30) - 1  # Convert to [0,29]
+            # Get shape loss weight from decoder configuration
+            shape_loss_weight = getattr(model.multi_encoder.shared_decoder, 'shape_loss_weight', 5.0)
+            shape_loss = shape_loss_weight * F.cross_entropy(shape_logits.reshape(-1, 30), shape_targets.reshape(-1))
             
             batch_size = target_seq.size(0)
             grid_loss_sum = 0.0
             active_pixels_total = 0
             
             for i in range(batch_size):
-                tgt_rows = int(target_seq[i, 900].item())
-                tgt_cols = int(target_seq[i, 901].item())
+                # FIXED: Extract shape values from new positions 0-1
+                tgt_rows = int(target_seq[i, 0].item())  # FIXED: position 0
+                tgt_cols = int(target_seq[i, 1].item())  # FIXED: position 1
                 active_pixels = tgt_rows * tgt_cols
                 
                 if active_pixels > 0:
-                    # Cross-entropy loss over active region only
-                    loss_i = F.cross_entropy(grid_logits[i, :active_pixels], target_seq[i, :active_pixels].long())
+                    # FIXED: Grid targets are now at positions 2-901
+                    grid_targets = target_seq[i, 2:2+active_pixels].long()
+                    loss_i = F.cross_entropy(grid_logits[i, :active_pixels], grid_targets)
                     grid_loss_sum += loss_i
                     active_pixels_total += 1  # Count samples, not pixels for averaging
-                    
+            
             grid_loss = grid_loss_sum / active_pixels_total if active_pixels_total > 0 else torch.tensor(0.0, device=device)
             reconstruction_loss = shape_loss + grid_loss
             
@@ -1496,17 +1608,22 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
             shape_logits, grid_logits = reconstruction
 
             # Bonnet's reconstruction loss computation
-            shape_targets = target_seq[:, 900:902].long()
-            shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
+            shape_targets_raw = target_seq[:, 0:2].long()  # FIXED: positions 0-1
+            shape_targets = torch.clamp(shape_targets_raw, 1, 30) - 1  # Convert to [0,29]
+            # Get shape loss weight from decoder configuration
+            shape_loss_weight = getattr(model.decoder, 'shape_loss_weight', 5.0)
+            shape_loss = shape_loss_weight * F.cross_entropy(shape_logits.reshape(-1, 30), shape_targets.reshape(-1))
             
             grid_loss_sum = 0.0
             active_samples_count = 0
             for i in range(batch_size):
-                tgt_rows = int(target_seq[i, 900].item())
-                tgt_cols = int(target_seq[i, 901].item())
+                tgt_rows = int(target_seq[i, 0].item())  # FIXED: position 0
+                tgt_cols = int(target_seq[i, 1].item())  # FIXED: position 1
                 active_pixels = tgt_rows * tgt_cols
                 if active_pixels > 0:
-                    loss_i = F.cross_entropy(grid_logits[i, :active_pixels], target_seq[i, :active_pixels].long())
+                    # FIXED: Grid targets are now at positions 2-901
+                    grid_targets = target_seq[i, 2:2+active_pixels].long()
+                    loss_i = F.cross_entropy(grid_logits[i, :active_pixels], grid_targets)
                     grid_loss_sum += loss_i
                     active_samples_count += 1
             grid_loss = grid_loss_sum / active_samples_count if active_samples_count > 0 else torch.tensor(0.0, device=input_seq.device)

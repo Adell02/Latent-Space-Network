@@ -211,7 +211,7 @@ def analyze_gradient_norms_during_optimization(model, trajectory_info_list, devi
         
         # Compute loss
         shape_targets = target_sample[:, 900:902].long()
-        shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
+        shape_loss = F.cross_entropy(shape_logits.reshape(-1, 30), shape_targets.reshape(-1))
         
         # Grid loss
         grid_loss_list = []

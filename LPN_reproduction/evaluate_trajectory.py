@@ -50,8 +50,100 @@ from utils.model_utils import load_model, set_seed
 from utils.visualizers import load_evaluation_latent_data, get_comprehensive_latent_data_for_trajectory
 from utils.data_preparation import extract_grid_from_sequence, safe_extract_reconstruction_grid
 
-# Use safe extraction to avoid scalar conversion errors
-extract_reconstruction_grid = safe_extract_reconstruction_grid
+# Remove global alias assignment to avoid scope conflicts
+# extract_reconstruction_grid = safe_extract_reconstruction_grid
+
+def extract_reconstruction_grid_with_dims(shape_logits, grid_logits):
+    """
+    Extract reconstruction grid and return grid, rows, cols tuple for compatibility.
+    
+    Args:
+        shape_logits: Shape prediction logits [B, 2, 30] (tensor) or shape predictions [B, 2] (numpy)
+        grid_logits: Grid prediction logits [B, 900, 10] (tensor) or grid predictions [B, 900] (numpy)
+    
+    Returns:
+        tuple: (recon_grid, recon_rows, recon_cols) or (None, 0, 0) on error
+    """
+    try:
+        # Handle both tensor logits and numpy predictions
+        if isinstance(shape_logits, torch.Tensor):
+            # Convert logits to predictions
+            shape_pred = torch.argmax(shape_logits, dim=-1).cpu().numpy()  # [0,29]
+            grid_pred = torch.argmax(grid_logits, dim=-1).cpu().numpy()    # [0,9]
+        else:
+            # Already predictions (numpy arrays)
+            shape_pred = shape_logits if isinstance(shape_logits, np.ndarray) else np.array(shape_logits)
+            grid_pred = grid_logits if isinstance(grid_logits, np.ndarray) else np.array(grid_logits)
+        
+        # Ensure correct shapes and handle batch dimension
+        if shape_pred.ndim > 1:
+            shape_pred = shape_pred[0]  # Take first batch element
+        if grid_pred.ndim > 1:
+            grid_pred = grid_pred[0]    # Take first batch element
+        
+        # Extract grid using safe function (handles +1 internally)
+        recon_grid = safe_extract_reconstruction_grid(shape_pred, grid_pred)
+
+        # Display dimensions for titles
+        recon_rows = int(shape_pred[0]) + 1
+        recon_cols = int(shape_pred[1]) + 1
+
+        return recon_grid, recon_rows, recon_cols
+        
+    except Exception as e:
+        print(f"Error extracting reconstruction grid: {e}")
+        return None, 0, 0
+
+def extract_reconstruction_from_data(recon_data):
+    """
+    Extract reconstruction grid from stored reconstruction data, prioritizing predictions over logits.
+    
+    Args:
+        recon_data: Dictionary containing reconstruction data with keys like 'shape_pred', 'grid_pred', etc.
+    
+    Returns:
+        tuple: (recon_grid, recon_rows, recon_cols) or (None, 0, 0) on error
+    """
+    try:
+        # Prioritize using pre-computed predictions if available
+        if 'shape_pred' in recon_data and 'grid_pred' in recon_data:
+            shape_pred = recon_data['shape_pred']
+            grid_pred = recon_data['grid_pred']
+            
+            # Ensure they're numpy arrays and handle batch dimension
+            if not isinstance(shape_pred, np.ndarray):
+                shape_pred = np.array(shape_pred)
+            if not isinstance(grid_pred, np.ndarray):
+                grid_pred = np.array(grid_pred)
+                
+            # Handle batch dimension
+            if shape_pred.ndim > 1:
+                shape_pred = shape_pred[0]
+            if grid_pred.ndim > 1:
+                grid_pred = grid_pred[0]            
+            
+            # Extract grid using safe function
+            recon_grid = safe_extract_reconstruction_grid(shape_pred, grid_pred)
+
+            # Display dimensions for titles
+            recon_rows = int(shape_pred[0]) + 1
+            recon_cols = int(shape_pred[1]) + 1
+
+            return recon_grid, recon_rows, recon_cols
+            
+        # Fallback to logits if predictions not available
+        elif 'shape_logits' in recon_data and 'grid_logits' in recon_data:
+            return extract_reconstruction_grid_with_dims(
+                recon_data['shape_logits'], 
+                recon_data['grid_logits']
+            )
+        else:
+            print(f"Warning: reconstruction data missing required keys: {list(recon_data.keys())}")
+            return None, 0, 0
+            
+    except Exception as e:
+        print(f"Error extracting reconstruction from data: {e}")
+        return None, 0, 0
 
 def print_trajectory_info(trajectory_info):
     """
@@ -513,28 +605,86 @@ def load_task_level_latent_data(task_latent_data, task_trajectories=None):
 
 #     # Helper function to generate reconstruction from latent vector with proper input sequences
 def generate_reconstruction_from_latent(z_vector, model, device, input_seq=None, target_seq=None):
-    """Generate reconstruction from latent vector using model decoder with proper input sequences"""
+    """
+    Generate reconstruction from a latent vector using the decoder.
+    Fixed to properly handle AR generation with correct input_seq parameter.
+    
+    Args:
+        z_vector: Latent vector to decode
+        model: Trained model with decoder
+        device: Device to use
+        input_seq: Input sequence (required for AR generation)
+        target_seq: Target sequence (None for AR generation, provided for teacher forcing)
+    
+    Returns:
+        tuple: (shape_pred, grid_pred, shape_logits, grid_logits) or None on error
+    """
     try:
+        model.eval()
         with torch.no_grad():
-            if not isinstance(z_vector, torch.Tensor):
-                z_vector = torch.tensor(z_vector, dtype=torch.float32, device=device).unsqueeze(0)
+            # Ensure z_vector is on correct device and has batch dimension
+            if isinstance(z_vector, np.ndarray):
+                z_vector = torch.tensor(z_vector, dtype=torch.float32, device=device)
             else:
-                z_vector = z_vector.unsqueeze(0) if z_vector.dim() == 1 else z_vector
+                z_vector = z_vector.to(device)
             
-            # Use the actual input and target sequences if available
-            if input_seq is not None and target_seq is not None:
-                input_tensor = torch.tensor(input_seq, dtype=torch.float32).unsqueeze(0).to(device)
-                target_tensor = torch.tensor(target_seq, dtype=torch.float32).unsqueeze(0).to(device)
-                shape_logits, grid_logits = model.decoder(z_vector, input_tensor, target_seq=target_tensor)
+            if z_vector.dim() == 1:
+                z_vector = z_vector.unsqueeze(0)  # Add batch dimension
+            
+            # Ensure input_seq is provided and has correct format
+            if input_seq is None:
+                # Create dummy input sequence if not provided (fallback)
+                print("Warning: No input_seq provided, creating dummy sequence")
+                input_seq = torch.zeros(1, 902, device=device)
+                input_seq[:, 0:2] = 1.0  # Set shape tokens to 1
             else:
-                # Fallback to just latent vector (may not work for all decoders)
-                shape_logits, grid_logits = model.decoder(z_vector)
+                # Ensure input_seq is tensor and on correct device
+                if isinstance(input_seq, np.ndarray):
+                    input_seq = torch.tensor(input_seq, dtype=torch.float32, device=device)
+                else:
+                    input_seq = input_seq.to(device)
+                
+                if input_seq.dim() == 1:
+                    input_seq = input_seq.unsqueeze(0)  # Add batch dimension
+                
+                # Ensure input_seq has correct length (902)
+                if input_seq.shape[1] != 902:
+                    print(f"Warning: input_seq has length {input_seq.shape[1]}, expected 902")
+                    if input_seq.shape[1] > 902:
+                        input_seq = input_seq[:, :902]
+                    else:
+                        # Pad with zeros
+                        padding = torch.zeros(input_seq.shape[0], 902 - input_seq.shape[1], device=device)
+                        input_seq = torch.cat([input_seq, padding], dim=1)
             
-            recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
-            return recon_grid, recon_rows, recon_cols
+            # Generate reconstruction using the appropriate decoder
+            if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
+                # Multi-encoder model: use shared decoder
+                shape_logits, grid_logits = model.multi_encoder.shared_decoder(
+                    z_vector, input_seq, target_seq=target_seq
+                )
+            else:
+                # Single encoder model: use regular decoder
+                shape_logits, grid_logits = model.decoder(
+                    z_vector, input_seq, target_seq=target_seq
+                )
+            
+            # Convert to predictions
+            shape_pred = torch.argmax(shape_logits, dim=-1)  # [0,29] range
+            grid_pred = torch.argmax(grid_logits, dim=-1)
+            
+            return (
+                shape_pred.cpu().numpy(),
+                grid_pred.cpu().numpy(), 
+                shape_logits.cpu().numpy(),
+                grid_logits.cpu().numpy()
+            )
+            
     except Exception as e:
         print(f"DEBUG: Error generating reconstruction: {e}")
-        return None, None, None
+        import traceback
+        traceback.print_exc()
+        return None
 
 #     # Use stored reconstructions for different trajectory steps
 #     trajectory_reconstructions = trajectory_info.get('poe_trajectory_reconstructions', {})
@@ -561,7 +711,7 @@ def generate_reconstruction_from_latent(z_vector, model, device, input_seq=None,
 #                     grid_logits = recon_data['grid_logits']
                     
 #                     # Extract reconstruction grid from stored data
-#                     recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
+#                     recon_grid, recon_rows, recon_cols = extract_reconstruction_grid_with_dims(shape_logits, grid_logits)
                     
 #                     if recon_grid is not None:
 #                         ax_enc.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
@@ -596,7 +746,7 @@ def generate_reconstruction_from_latent(z_vector, model, device, input_seq=None,
 #                     ax_enc.text(0.5, 0.5, f'Encoder {enc_idx}\nReconstruction\n(Not Available)', 
 #                                ha='center', va='center', transform=ax_enc.transAxes, fontsize=8)
 #                     ax_enc.set_title(f'Encoder {enc_idx}')
-            
+#            
 #             ax_enc.axis('off')
     
 #     # Plot POE reconstructions (ROW 1, columns 4-6)
@@ -612,7 +762,7 @@ def generate_reconstruction_from_latent(z_vector, model, device, input_seq=None,
 #             grid_logits = recon_data['grid_logits']
             
 #             # Extract reconstruction grid from stored data
-#             recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
+#             recon_grid, recon_rows, recon_cols = extract_reconstruction_grid_with_dims(shape_logits, grid_logits)
             
 #             if recon_grid is not None:
 #                 ax_poe.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
@@ -673,7 +823,7 @@ def generate_reconstruction_from_latent(z_vector, model, device, input_seq=None,
 #                     grid_logits = recon_data['grid_logits']
                     
 #                     # Extract reconstruction grid from stored data
-#                     recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
+#                     recon_grid, recon_rows, recon_cols = extract_reconstruction_grid_with_dims(shape_logits, grid_logits)
                     
 #                     if recon_grid is not None:
 #                         ax_query_enc.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
@@ -723,7 +873,7 @@ def generate_reconstruction_from_latent(z_vector, model, device, input_seq=None,
 #         shape_logits = recon_data['shape_logits']
 #         grid_logits = recon_data['grid_logits']
         
-#         recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
+#         recon_grid, recon_rows, recon_cols = extract_reconstruction_grid_with_dims(shape_logits, grid_logits)
         
 #         if recon_grid is not None:
 #             ax_query_poe_initial.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
@@ -763,7 +913,7 @@ def generate_reconstruction_from_latent(z_vector, model, device, input_seq=None,
 #         shape_logits = recon_data['shape_logits']
 #         grid_logits = recon_data['grid_logits']
         
-#         recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
+#         recon_grid, recon_rows, recon_cols = extract_reconstruction_grid_with_dims(shape_logits, grid_logits)
         
 #         if recon_grid is not None:
 #             ax_query_poe_final.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
@@ -844,8 +994,7 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
     
     print("Trajectory used:", trajectory_info.get('trajectory_type', 'Unknown'))
     
-    # Use safe extraction to avoid scalar conversion errors
-    extract_reconstruction_grid = safe_extract_reconstruction_grid
+    # Use safe extraction to avoid scalar conversion errors (direct import)
     
     print("Loading unified latent data (training + support + query + trajectory)...")
     training_latent_data, training_tsne_2d, training_labels, training_colors, trajectory_tsne_2d, all_labels, all_tsne_2d, actual_evaluated_keys = load_unified_latent_data_with_trajectory(
@@ -1198,8 +1347,7 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
                     ha='center', va='center', transform=ax_loss.transAxes)
         ax_loss.set_title('Loss Progression')
     
-    # Use safe extraction to avoid scalar conversion errors
-    extract_reconstruction_grid = safe_extract_reconstruction_grid
+    # Use safe extraction to avoid scalar conversion errors (direct import)
     
     # Use stored reconstructions for different trajectory steps
     trajectory_reconstructions = trajectory_info.get('poe_trajectory_reconstructions', {})
@@ -1221,12 +1369,9 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
                 recon_data = encoder_reconstructions[f'encoder_{enc_idx}']
                 print(f"DEBUG: encoder_{enc_idx} recon_data keys: {list(recon_data.keys()) if recon_data else 'None'}")
                 
-                if recon_data is not None and 'shape_logits' in recon_data and 'grid_logits' in recon_data:
-                    shape_logits = recon_data['shape_logits']
-                    grid_logits = recon_data['grid_logits']
-                    
-                    # Extract reconstruction grid from stored data
-                    recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
+                if recon_data is not None:
+                    # Extract reconstruction grid from stored data using new function
+                    recon_grid, recon_rows, recon_cols = extract_reconstruction_from_data(recon_data)
                     
                     if recon_grid is not None:
                         ax_enc.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
@@ -1243,14 +1388,21 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
                     ax_enc.set_title(f'Encoder {enc_idx}')
             else:
                 print(f"DEBUG: encoder_{enc_idx} not found in individual_encoder_reconstructions")
-                # Try to generate reconstruction from latent vectors
+                # Try to generate reconstruction from latent vectors (use query input for query recon)
                 if z_vectors and len(z_vectors) > 0:
                     # Use the final z vector for encoder reconstruction
                     final_z = z_vectors[-1]
-                    recon_grid, recon_rows, recon_cols = generate_reconstruction_from_latent(
-                        final_z, model, device, input_seq, target_seq
+                    result = generate_reconstruction_from_latent(
+                        final_z, model, device, query_input, query_target
                     )
-                    if recon_grid is not None:
+                    if result is not None:
+                        shape_pred, grid_pred, shape_logits, grid_logits = result
+                        # Use the safe_extract_reconstruction_grid function with new signature
+                        from utils.data_preparation import safe_extract_reconstruction_grid
+                        recon_grid = safe_extract_reconstruction_grid(shape_pred, grid_pred)
+                        recon_rows = int(shape_pred[0]) + 1  # Convert [0,29] to [1,30]
+                        recon_cols = int(shape_pred[1]) + 1  # Convert [0,29] to [1,30]
+                        
                         ax_enc.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
                         ax_enc.set_title(f'Encoder {enc_idx}\n{recon_rows}×{recon_cols}')
                     else:
@@ -1273,11 +1425,8 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
             recon_data = trajectory_reconstructions[f'{label.lower()}']
             print(f"DEBUG: POE {label.lower()} recon_data keys: {list(recon_data.keys()) if recon_data else 'None'}")
             
-            shape_logits = recon_data['shape_logits']
-            grid_logits = recon_data['grid_logits']
-            
-            # Extract reconstruction grid from stored data
-            recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
+            # Extract reconstruction grid from stored data using new function
+            recon_grid, recon_rows, recon_cols = extract_reconstruction_from_data(recon_data)
             
             if recon_grid is not None:
                 ax_poe.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
@@ -1299,10 +1448,17 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
                 else:  # Final
                     z_vector = z_vectors[-1]
                 
-                recon_grid, recon_rows, recon_cols = generate_reconstruction_from_latent(
+                result = generate_reconstruction_from_latent(
                     z_vector, model, device, input_seq, target_seq
                 )
-                if recon_grid is not None:
+                if result is not None:
+                    shape_pred, grid_pred, shape_logits, grid_logits = result
+                    # Use the safe_extract_reconstruction_grid function with new signature
+                    from utils.data_preparation import safe_extract_reconstruction_grid
+                    recon_grid = safe_extract_reconstruction_grid(shape_pred, grid_pred)
+                    recon_rows = int(shape_pred[0]) + 1  # Convert [0,29] to [1,30]
+                    recon_cols = int(shape_pred[1]) + 1  # Convert [0,29] to [1,30]
+                    
                     ax_poe.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
                     ax_poe.set_title(f'POE {label}\n{recon_rows}×{recon_cols}')
                 else:
@@ -1333,12 +1489,9 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
                 recon_data = query_encoder_reconstructions[f'encoder_{enc_idx}']
                 print(f"DEBUG: query encoder_{enc_idx} recon_data keys: {list(recon_data.keys()) if recon_data else 'None'}")
                 
-                if recon_data is not None and 'shape_logits' in recon_data and 'grid_logits' in recon_data:
-                    shape_logits = recon_data['shape_logits']
-                    grid_logits = recon_data['grid_logits']
-                    
-                    # Extract reconstruction grid from stored data
-                    recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
+                if recon_data is not None:
+                    # Extract reconstruction grid from stored data using new function
+                    recon_grid, recon_rows, recon_cols = extract_reconstruction_from_data(recon_data)
                     
                     if recon_grid is not None:
                         ax_query_enc.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
@@ -1359,10 +1512,16 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
                 if z_vectors and len(z_vectors) > 0:
                     # Use the final z vector for query encoder reconstruction
                     final_z = z_vectors[-1]
-                    recon_grid, recon_rows, recon_cols = generate_reconstruction_from_latent(
+                    result = generate_reconstruction_from_latent(
                         final_z, model, device, input_seq, target_seq
                     )
-                    if recon_grid is not None:
+                    if result is not None:
+                        shape_pred, grid_pred, shape_logits, grid_logits = result
+                        # Use the safe_extract_reconstruction_grid function with new signature
+                        from utils.data_preparation import safe_extract_reconstruction_grid
+                        recon_grid = safe_extract_reconstruction_grid(shape_pred, grid_pred)
+                        recon_rows = int(shape_pred[0]) + 1  # Convert [0,29] to [1,30]
+                        recon_cols = int(shape_pred[1]) + 1  # Convert [0,29] to [1,30]
                         ax_query_enc.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
                         ax_query_enc.set_title(f'Query Encoder {enc_idx}\n{recon_rows}×{recon_cols}')
                     else:
@@ -1385,10 +1544,8 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
         recon_data = query_poe_reconstructions['initial']
         print(f"DEBUG: query POE initial recon_data keys: {list(recon_data.keys()) if recon_data else 'None'}")
         
-        shape_logits = recon_data['shape_logits']
-        grid_logits = recon_data['grid_logits']
-        
-        recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
+        # Extract reconstruction grid from stored data using new function
+        recon_grid, recon_rows, recon_cols = extract_reconstruction_from_data(recon_data)
         
         if recon_grid is not None:
             ax_query_poe_initial.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
@@ -1404,10 +1561,16 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
         if z_vectors and len(z_vectors) > 0:
             # Use the initial z vector for query POE initial reconstruction
             initial_z = z_vectors[0]
-            recon_grid, recon_rows, recon_cols = generate_reconstruction_from_latent(
-                initial_z, model, device, input_seq, target_seq
+            result = generate_reconstruction_from_latent(
+                initial_z, model, device, query_input, query_target
             )
-            if recon_grid is not None:
+            if result is not None:
+                shape_pred, grid_pred, shape_logits, grid_logits = result
+                # Use the safe_extract_reconstruction_grid function with new signature
+                from utils.data_preparation import safe_extract_reconstruction_grid
+                recon_grid = safe_extract_reconstruction_grid(shape_pred, grid_pred)
+                recon_rows = int(shape_pred[0]) + 1  # Convert [0,29] to [1,30]
+                recon_cols = int(shape_pred[1]) + 1  # Convert [0,29] to [1,30]
                 ax_query_poe_initial.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
                 ax_query_poe_initial.set_title(f'Query POE Initial\n{recon_rows}×{recon_cols}')
             else:
@@ -1425,10 +1588,8 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
         recon_data = query_poe_reconstructions['final']
         print(f"DEBUG: query POE final recon_data keys: {list(recon_data.keys()) if recon_data else 'None'}")
         
-        shape_logits = recon_data['shape_logits']
-        grid_logits = recon_data['grid_logits']
-        
-        recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
+        # Extract reconstruction grid from stored data using new function
+        recon_grid, recon_rows, recon_cols = extract_reconstruction_from_data(recon_data)
         
         if recon_grid is not None:
             ax_query_poe_final.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
@@ -1444,10 +1605,16 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
         if z_vectors and len(z_vectors) > 0:
             # Use the final z vector for query POE final reconstruction
             final_z = z_vectors[-1]
-            recon_grid, recon_rows, recon_cols = generate_reconstruction_from_latent(
-                final_z, model, device, input_seq, target_seq
+            result = generate_reconstruction_from_latent(
+                final_z, model, device, query_input, query_target
             )
-            if recon_grid is not None:
+            if result is not None:
+                shape_pred, grid_pred, shape_logits, grid_logits = result
+                # Use the safe_extract_reconstruction_grid function with new signature
+                from utils.data_preparation import safe_extract_reconstruction_grid
+                recon_grid = safe_extract_reconstruction_grid(shape_pred, grid_pred)
+                recon_rows = int(shape_pred[0]) + 1  # Convert [0,29] to [1,30]
+                recon_cols = int(shape_pred[1]) + 1  # Convert [0,29] to [1,30]
                 ax_query_poe_final.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
                 ax_query_poe_final.set_title(f'Query POE Final\n{recon_rows}×{recon_cols}')
             else:
@@ -1607,10 +1774,9 @@ def plot_error_maps_row(ax_error_maps, trajectory_info, model, num_encoders):
             # Try to get encoder reconstruction
             if individual_encoder_reconstructions and f'encoder_{enc_idx}' in individual_encoder_reconstructions:
                 recon_data = individual_encoder_reconstructions[f'encoder_{enc_idx}']
-                shape_logits = recon_data['shape_logits']
-                grid_logits = recon_data['grid_logits']
                 
-                recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
+                # Extract reconstruction grid from stored data using new function
+                recon_grid, recon_rows, recon_cols = extract_reconstruction_from_data(recon_data)
                 
                 if recon_grid is not None:
                     if recon_grid.shape == target_grid_for_error.shape:
@@ -1644,10 +1810,9 @@ def plot_error_maps_row(ax_error_maps, trajectory_info, model, num_encoders):
             
             if trajectory_reconstructions and label in trajectory_reconstructions:
                 recon_data = trajectory_reconstructions[label]
-                shape_logits = recon_data['shape_logits']
-                grid_logits = recon_data['grid_logits']
                 
-                recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
+                # Extract reconstruction grid from stored data using new function
+                recon_grid, recon_rows, recon_cols = extract_reconstruction_from_data(recon_data)
                 
                 if recon_grid is not None:
                     if recon_grid.shape == target_grid_for_error.shape:
@@ -1743,10 +1908,9 @@ def plot_query_error_maps_row(ax_query_error_maps, trajectory_info, model, num_e
             # Try to get query encoder reconstruction
             if query_encoder_reconstructions and f'encoder_{enc_idx}' in query_encoder_reconstructions:
                 recon_data = query_encoder_reconstructions[f'encoder_{enc_idx}']
-                shape_logits = recon_data['shape_logits']
-                grid_logits = recon_data['grid_logits']
                 
-                recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
+                # Extract reconstruction grid from stored data using new function
+                recon_grid, recon_rows, recon_cols = extract_reconstruction_from_data(recon_data)
                 
                 if recon_grid is not None:
                     if recon_grid.shape == target_grid_for_error.shape:
@@ -1780,10 +1944,9 @@ def plot_query_error_maps_row(ax_query_error_maps, trajectory_info, model, num_e
             
             if query_poe_reconstructions and label in query_poe_reconstructions:
                 recon_data = query_poe_reconstructions[label]
-                shape_logits = recon_data['shape_logits']
-                grid_logits = recon_data['grid_logits']
                 
-                recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
+                # Extract reconstruction grid from stored data using new function
+                recon_grid, recon_rows, recon_cols = extract_reconstruction_from_data(recon_data)
                 
                 
                 if recon_grid is not None:

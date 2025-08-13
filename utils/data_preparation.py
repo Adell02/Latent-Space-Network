@@ -69,14 +69,21 @@ def split_dataset_for_multi_encoder(input_sequences, output_sequences, num_encod
     return splits
 
 def extract_grid_from_sequence(sequence, max_rows=30, max_cols=30):
-    """Extract the 2D grid and its shape from an ARC sequence."""
+    """Extract the 2D grid and its shape from an ARC sequence.
+    
+    FIXED: Updated for new sequence structure [shape_tokens(2), grid_tokens(900)]
+    - Shape tokens: positions 0-1 (rows, cols)  
+    - Grid tokens: positions 2-901 (flattened 30x30 grid)
+    """
     sequence = np.array(sequence)
 
     if len(sequence) >= 902:
-        rows = int(sequence[-2])
-        cols = int(sequence[-1])
+        # FIXED: Shape tokens are now at positions 0-1 (first in sequence)
+        rows = int(sequence[0])
+        cols = int(sequence[1])
 
-        grid_flat = sequence[:900]
+        # FIXED: Grid tokens are now at positions 2-901 (after shape tokens)
+        grid_flat = sequence[2:902]  # positions 2-901 (900 elements)
         grid_full = grid_flat.reshape(30, 30)
         actual_grid = grid_full[:rows, :cols]
         return actual_grid, (rows, cols)
@@ -456,15 +463,21 @@ def _distribute_extra_samples(encoder_datasets, num_keys, num_encoders):
     print(f"  Total samples redistributed: {total_redistributed}")
 
 def safe_extract_grid_from_sequence(sequence, max_rows=30, max_cols=30):
-    """Safely extract grid from sequence, handling different input formats."""
+    """Safely extract grid from sequence, handling different input formats.
+    
+    FIXED: Updated for new sequence structure [shape_tokens(2), grid_tokens(900)]
+    """
     try:
         sequence = np.array(sequence)
         
         # Handle 902-length ARC format
         if len(sequence) >= 902:
-            rows = int(sequence[-2])
-            cols = int(sequence[-1])
-            grid_flat = sequence[:900]
+            # FIXED: Shape tokens are now at positions 0-1 (first in sequence)
+            rows = int(sequence[0])
+            cols = int(sequence[1])
+            
+            # FIXED: Grid tokens are now at positions 2-901 (after shape tokens)
+            grid_flat = sequence[2:902]  # positions 2-901 (900 elements)
             grid_full = grid_flat.reshape(30, 30)
             actual_grid = grid_full[:rows, :cols]
             return actual_grid, (rows, cols)
@@ -491,83 +504,48 @@ def safe_extract_grid_from_sequence(sequence, max_rows=30, max_cols=30):
         # Return a default grid
         return np.zeros((max_rows, max_cols)), (max_rows, max_cols)
 
-def safe_extract_reconstruction_grid(shape_logits, grid_logits):
+def safe_extract_reconstruction_grid(pred_shapes, pred_grid, max_rows=30, max_cols=30):
     """
-    Safely extract grid from reconstruction logits, handling scalar conversion errors.
+    Safely extract reconstruction grid with bounds checking.
     
     Args:
-        shape_logits: Shape predictions logits
-        grid_logits: Grid predictions logits
-        
+        pred_shapes: Predicted shape values [0,29] from model
+        pred_grid: Predicted grid values [0,9] 
+        max_rows: Maximum number of rows
+        max_cols: Maximum number of columns
+    
     Returns:
-        tuple: (recon_grid, recon_rows, recon_cols) or (None, rows, cols) if invalid
+        numpy array of extracted grid
     """
-    import numpy as np
+    # Convert predictions to actual dimensions [1,30]
+    recon_rows = int(pred_shapes[0]) + 1  # Convert [0,29] to [1,30]
+    recon_cols = int(pred_shapes[1]) + 1  # Convert [0,29] to [1,30]
+    
+    # Bounds checking
+    recon_rows = max(1, min(recon_rows, max_rows))
+    recon_cols = max(1, min(recon_cols, max_cols))
+    
+    # Extract active pixels
+    active_pixels = recon_rows * recon_cols
+    if active_pixels > len(pred_grid):
+        active_pixels = len(pred_grid)
+    
+    # Reshape to grid
+    pred_values = pred_grid[:active_pixels]
     
     try:
-        pred_shapes = np.argmax(shape_logits, axis=-1)
-        pred_grid_flat = np.argmax(grid_logits, axis=-1)
+        # Create grid with actual dimensions (not max dimensions)
+        pred_reshaped = pred_values.reshape(recon_rows, recon_cols)
         
-        # Handle both scalar and array cases for shape predictions  
-        if np.isscalar(pred_shapes):
-            recon_rows = recon_cols = int(pred_shapes)
-        elif hasattr(pred_shapes, '__len__') and len(pred_shapes) >= 2:
-            recon_rows, recon_cols = int(pred_shapes[0]), int(pred_shapes[1])
-        elif hasattr(pred_shapes, '__len__') and len(pred_shapes) == 1:
-            # Handle nested array case: pred_shapes[0] might be [rows, cols]
-            inner_shape = pred_shapes[0]
-            if hasattr(inner_shape, '__len__') and len(inner_shape) >= 2:
-                recon_rows, recon_cols = int(inner_shape[0]), int(inner_shape[1])
-            elif hasattr(inner_shape, '__len__') and len(inner_shape) == 1:
-                recon_rows = recon_cols = int(inner_shape[0])
-            else:
-                recon_rows = recon_cols = int(inner_shape)
-        else:
-            return None, 0, 0
+        return pred_reshaped
         
-        # Validate dimensions – if invalid, fall back to best effort based on available pixels
-        if recon_rows <= 0 or recon_cols <= 0 or recon_rows > 30 or recon_cols > 30:
-            # Fallback: try to infer square grid size from available predictions (≤30)
-            total_pred = len(pred_grid_flat.flatten() if hasattr(pred_grid_flat, 'flatten') else pred_grid_flat)
-            if total_pred > 0:
-                side = int(np.sqrt(total_pred))
-                side = max(1, min(30, side))
-                recon_rows = recon_cols = side
-            else:
-                return None, recon_rows, recon_cols
-        
-        # Handle grid prediction data - fix the shape issue
-        # pred_grid_flat might be (1, 900) instead of (900,), so flatten it
-        if hasattr(pred_grid_flat, 'flatten'):
-            grid_predictions = pred_grid_flat.flatten()
-        else:
-            grid_predictions = pred_grid_flat
-        
-        if hasattr(grid_predictions, '__len__') and len(grid_predictions) >= 900:
-            # Full 900 predictions - reshape and crop
-            full_grid = grid_predictions[:900].reshape(30, 30)
-            recon_grid = full_grid[:recon_rows, :recon_cols]
-            return recon_grid, recon_rows, recon_cols
-        elif hasattr(grid_predictions, '__len__'):
-            # Limited predictions - use what we have
-            available_pixels = len(grid_predictions)
-            needed_pixels = recon_rows * recon_cols
-            
-            if available_pixels >= needed_pixels:
-                recon_grid = grid_predictions[:needed_pixels].reshape(recon_rows, recon_cols)
-                return recon_grid, recon_rows, recon_cols
-            else:
-                # Fallback: reshape using whatever pixels are available into square grid
-                side = int(np.sqrt(available_pixels))
-                if side > 0:
-                    recon_grid = grid_predictions[:side*side].reshape(side, side)
-                    return recon_grid, side, side
-                return None, recon_rows, recon_cols
-        else:
-            return None, recon_rows, recon_cols
-            
-    except Exception as e:
-        return None, 0, 0
+    except ValueError as e:
+        print(f"Warning: Could not reshape grid with rows={recon_rows}, cols={recon_cols}, pixels={len(pred_values)}: {e}")
+        # Fallback: return a minimal 1x1 grid
+        grid = np.zeros((1, 1), dtype=int)
+        if len(pred_values) > 0:
+            grid[0, 0] = pred_values[0]
+        return grid
 
 def generate_per_key_ood_samples(evaluation_keys, n_samples_per_key, n_queries_per_key, seed=42):
     """

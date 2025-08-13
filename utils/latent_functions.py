@@ -118,8 +118,8 @@ def optimize_latent_z(lpn, input_seq, target_seq, num_steps=None, lr=None, retur
         for i in range(batch_size):
             # Shape loss for this sample
             shape_pred_i = shape_logits_init[i:i+1]
-            shape_tgt_i = target_seq[i:i+1, 900:902].long()
-            shape_pred_reshaped = shape_pred_i.reshape(-1, 31)
+            shape_tgt_i = torch.clamp(target_seq[i:i+1, 0:2].long(), 1, 30) - 1
+            shape_pred_reshaped = shape_pred_i.reshape(-1, 30)
             shape_tgt_reshaped = shape_tgt_i.reshape(-1)
             
             try:
@@ -129,13 +129,13 @@ def optimize_latent_z(lpn, input_seq, target_seq, num_steps=None, lr=None, retur
                 continue
             
             # Grid loss for this sample
-            tgt_rows = int(target_seq[i, 900].item())
-            tgt_cols = int(target_seq[i, 901].item())
+            tgt_rows = int(target_seq[i, 0].item())
+            tgt_cols = int(target_seq[i, 1].item())
             active_pixels = tgt_rows * tgt_cols
             
             if active_pixels > 0:
                 grid_pred_i = grid_logits_init[i, :active_pixels]
-                grid_tgt_i = target_seq[i, :active_pixels].long()
+                grid_tgt_i = target_seq[i, 2:2+active_pixels].long()
                 
                 try:
                     grid_loss_i = F.cross_entropy(grid_pred_i, grid_tgt_i)
@@ -210,17 +210,18 @@ def optimize_latent_z(lpn, input_seq, target_seq, num_steps=None, lr=None, retur
             logger.error(f"    ERROR: grid_logits range: [{grid_logits.min().item():.4f}, {grid_logits.max().item():.4f}]")
 
         # Compute batch loss for backpropagation (keep existing approach)
-        shape_targets = target_seq[:, 900:902].long()
-        shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
+        shape_targets_raw = target_seq[:, 0:2].long()
+        shape_targets = torch.clamp(shape_targets_raw, 1, 30) - 1  # Convert to [0,29]
+        shape_loss = F.cross_entropy(shape_logits.reshape(-1, 30), shape_targets.reshape(-1))
 
         grid_loss_list = []
         for i in range(batch_size):
-            tgt_rows = int(target_seq[i, 900].item())
-            tgt_cols = int(target_seq[i, 901].item())
+            tgt_rows = int(target_seq[i, 0].item())  # Use original [1,30] values for grid indexing
+            tgt_cols = int(target_seq[i, 1].item())
             active_pixels = tgt_rows * tgt_cols
             if active_pixels > 0:
                 loss_i = F.cross_entropy(grid_logits[i, :active_pixels],
-                                       target_seq[i, :active_pixels].long())
+                                       target_seq[i, 2:2+active_pixels].long())
                 grid_loss_list.append(loss_i)
 
         grid_loss = sum(grid_loss_list) / len(grid_loss_list) if grid_loss_list else \
@@ -238,16 +239,16 @@ def optimize_latent_z(lpn, input_seq, target_seq, num_steps=None, lr=None, retur
             for i in range(batch_size):
                 # Shape loss for this sample
                 shape_pred_i = shape_logits[i:i+1]
-                shape_tgt_i = target_seq[i:i+1, 900:902].long()
-                shape_loss_i = F.cross_entropy(shape_pred_i.reshape(-1, 31), shape_tgt_i.reshape(-1))
+                shape_tgt_i = torch.clamp(target_seq[i:i+1, 0:2].long(), 1, 30) - 1
+                shape_loss_i = F.cross_entropy(shape_pred_i.reshape(-1, 30), shape_tgt_i.reshape(-1))
                 
                 # Grid loss for this sample
-                tgt_rows = int(target_seq[i, 900].item())
-                tgt_cols = int(target_seq[i, 901].item())
+                tgt_rows = int(target_seq[i, 0].item())
+                tgt_cols = int(target_seq[i, 1].item())
                 active_pixels = tgt_rows * tgt_cols
                 if active_pixels > 0:
                     grid_loss_i = F.cross_entropy(grid_logits[i, :active_pixels],
-                                                target_seq[i, :active_pixels].long())
+                                                target_seq[i, 2:2+active_pixels].long())
                 else:
                     grid_loss_i = torch.tensor(0.0, device=device)
                 
@@ -317,8 +318,8 @@ def optimize_latent_z_from_initial(lpn, input_seq, target_seq, initial_z, num_st
         for i in range(batch_size):
             # Shape loss for this sample
             shape_pred_i = shape_logits_init[i:i+1]
-            shape_tgt_i = target_seq[i:i+1, 900:902].long()
-            shape_pred_reshaped = shape_pred_i.reshape(-1, 31)
+            shape_tgt_i = torch.clamp(target_seq[i:i+1, 0:2].long(), 1, 30) - 1
+            shape_pred_reshaped = shape_pred_i.reshape(-1, 30)
             shape_tgt_reshaped = shape_tgt_i.reshape(-1)
             
             try:
@@ -328,13 +329,13 @@ def optimize_latent_z_from_initial(lpn, input_seq, target_seq, initial_z, num_st
                 continue
             
             # Grid loss for this sample
-            tgt_rows = int(target_seq[i, 900].item())
-            tgt_cols = int(target_seq[i, 901].item())
+            tgt_rows = int(target_seq[i, 0].item())
+            tgt_cols = int(target_seq[i, 1].item())
             active_pixels = tgt_rows * tgt_cols
             
             if active_pixels > 0:
                 grid_pred_i = grid_logits_init[i, :active_pixels]
-                grid_tgt_i = target_seq[i, :active_pixels].long()
+                grid_tgt_i = target_seq[i, 2:2+active_pixels].long()
                 
                 try:
                     grid_loss_i = F.cross_entropy(grid_pred_i, grid_tgt_i)
@@ -395,16 +396,16 @@ def optimize_latent_z_from_initial(lpn, input_seq, target_seq, initial_z, num_st
         for i in range(batch_size):
             # Shape loss for this sample
             shape_pred_i = shape_logits[i:i+1]
-            shape_tgt_i = target_seq[i:i+1, 900:902].long()
-            shape_loss_i = F.cross_entropy(shape_pred_i.reshape(-1, 31), shape_tgt_i.reshape(-1))
+            shape_tgt_i = torch.clamp(target_seq[i:i+1, 0:2].long(), 1, 30) - 1
+            shape_loss_i = F.cross_entropy(shape_pred_i.reshape(-1, 30), shape_tgt_i.reshape(-1))
             
             # Grid loss for this sample
-            tgt_rows = int(target_seq[i, 900].item())
-            tgt_cols = int(target_seq[i, 901].item())
+            tgt_rows = int(target_seq[i, 0].item())
+            tgt_cols = int(target_seq[i, 1].item())
             active_pixels = tgt_rows * tgt_cols
             if active_pixels > 0:
                 grid_loss_i = F.cross_entropy(grid_logits[i, :active_pixels],
-                                            target_seq[i, :active_pixels].long())
+                                            target_seq[i, 2:2+active_pixels].long())
             else:
                 grid_loss_i = torch.tensor(0.0, device=device)
             
@@ -473,17 +474,17 @@ def evolutionary_optimize_latent_z(lpn, input_seq, target_seq, population_size=N
         else:
             shape_logits_init, grid_logits_init = lpn.decoder(initial_z, input_seq, target_seq=target_seq)
         
-        shape_targets = target_seq[:, 900:902].long()
-        shape_loss_init = F.cross_entropy(shape_logits_init.reshape(-1, 31), shape_targets.reshape(-1))
+        shape_targets = target_seq[:, 0:2].long()
+        shape_loss_init = F.cross_entropy(shape_logits_init.reshape(-1, 30), shape_targets.reshape(-1))
         
         grid_loss_list_init = []
         for i in range(batch_size):
-            tgt_rows = int(target_seq[i, 900].item())
-            tgt_cols = int(target_seq[i, 901].item())
+            tgt_rows = int(target_seq[i, 0].item())
+            tgt_cols = int(target_seq[i, 1].item())
             active_pixels = tgt_rows * tgt_cols
             if active_pixels > 0:
                 loss_i = F.cross_entropy(grid_logits_init[i, :active_pixels],
-                                       target_seq[i, :active_pixels].long())
+                                       target_seq[i, 2:2+active_pixels].long())
                 grid_loss_list_init.append(loss_i)
 
         grid_loss_init = sum(grid_loss_list_init) / len(grid_loss_list_init) if grid_loss_list_init else \
@@ -521,15 +522,15 @@ def evolutionary_optimize_latent_z(lpn, input_seq, target_seq, population_size=N
             else:
                 shape_logits, grid_logits = lpn.decoder(candidate_z, input_seq, target_seq=target_seq)
                 
-            shape_targets = target_seq[:, 900:902].long()
-            shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1), reduction='mean')
+            shape_targets = target_seq[:, 0:2].long()
+            shape_loss = F.cross_entropy(shape_logits.reshape(-1, 30), shape_targets.reshape(-1), reduction='mean')
             grid_loss_list = []
             for j in range(batch_size):
-                tgt_rows = int(target_seq[j, 900].item())
-                tgt_cols = int(target_seq[j, 901].item())
+                tgt_rows = int(target_seq[j, 0].item())
+                tgt_cols = int(target_seq[j, 1].item())
                 active_pixels = tgt_rows * tgt_cols
                 if active_pixels > 0:
-                    loss_j = F.cross_entropy(grid_logits[j, :active_pixels], target_seq[j, :active_pixels].long(), reduction='mean')
+                    loss_j = F.cross_entropy(grid_logits[j, :active_pixels], target_seq[j, 2:2+active_pixels].long(), reduction='mean')
                     grid_loss_list.append(loss_j)
             grid_loss = sum(grid_loss_list) / len(grid_loss_list) if grid_loss_list else torch.tensor(0.0, device=device)
             reconstruction_loss = shape_loss + grid_loss
@@ -625,17 +626,18 @@ def voronoi_optimize_latent_z(lpn, input_seq, target_seq, population_size=None,
         else:
             shape_logits_init, grid_logits_init = lpn.decoder(initial_z, input_seq, target_seq=target_seq)
         
-        shape_targets = target_seq[:, 900:902].long()
-        shape_loss_init = F.cross_entropy(shape_logits_init.reshape(-1, 31), shape_targets.reshape(-1))
+        shape_targets_raw = target_seq[:, 0:2].long()
+        shape_targets = torch.clamp(shape_targets_raw, 1, 30) - 1  # Convert to [0,29]
+        shape_loss_init = F.cross_entropy(shape_logits_init.reshape(-1, 30), shape_targets.reshape(-1))
         
         grid_loss_list_init = []
         for i in range(batch_size):
-            tgt_rows = int(target_seq[i, 900].item())
-            tgt_cols = int(target_seq[i, 901].item())
+            tgt_rows = int(target_seq[i, 0].item())
+            tgt_cols = int(target_seq[i, 1].item())
             active_pixels = tgt_rows * tgt_cols
             if active_pixels > 0:
                 loss_i = F.cross_entropy(grid_logits_init[i, :active_pixels],
-                                       target_seq[i, :active_pixels].long())
+                                       target_seq[i, 2:2+active_pixels].long())
                 grid_loss_list_init.append(loss_i)
 
         grid_loss_init = sum(grid_loss_list_init) / len(grid_loss_list_init) if grid_loss_list_init else \
@@ -691,15 +693,15 @@ def voronoi_optimize_latent_z(lpn, input_seq, target_seq, population_size=None,
             else:
                 shape_logits, grid_logits = lpn.decoder(candidate_z, input_seq, target_seq=target_seq)
                 
-            shape_targets = target_seq[:, 900:902].long()
-            shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1), reduction='mean')
+            shape_targets = target_seq[:, 0:2].long()
+            shape_loss = F.cross_entropy(shape_logits.reshape(-1, 30), shape_targets.reshape(-1), reduction='mean')
             grid_loss_list = []
             for j in range(batch_size):
-                tgt_rows = int(target_seq[j, 900].item())
-                tgt_cols = int(target_seq[j, 901].item())
+                tgt_rows = int(target_seq[j, 0].item())
+                tgt_cols = int(target_seq[j, 1].item())
                 active_pixels = tgt_rows * tgt_cols
                 if active_pixels > 0:
-                    loss_j = F.cross_entropy(grid_logits[j, :active_pixels], target_seq[j, :active_pixels].long(), reduction='mean')
+                    loss_j = F.cross_entropy(grid_logits[j, :active_pixels], target_seq[j, 2:2+active_pixels].long(), reduction='mean')
                     grid_loss_list.append(loss_j)
             grid_loss = sum(grid_loss_list) / len(grid_loss_list) if grid_loss_list else torch.tensor(0.0, device=device)
             reconstruction_loss = shape_loss + grid_loss
@@ -1058,17 +1060,17 @@ def optimize_task_latent(lpn, support_samples, task_key, num_steps=None, lr=None
             # But we're manually optimizing the latent outside the model
 
             # Manual loss computation (like in the original optimize_latent_z function):
-            shape_targets = target_seq[:, 900:902].long()
-            shape_loss = F.cross_entropy(shape_logits.reshape(-1, 31), shape_targets.reshape(-1))
+            shape_targets = target_seq[:, 0:2].long()
+            shape_loss = F.cross_entropy(shape_logits.reshape(-1, 30), shape_targets.reshape(-1))
 
             batch_size = target_seq.size(0)
             grid_loss_sum = 0.0
             active_samples = 0
             for i in range(batch_size):
-                r, c = int(target_seq[i, 900].item()), int(target_seq[i, 901].item())
+                r, c = int(target_seq[i, 0].item()), int(target_seq[i, 1].item())
                 n_pix = r * c
                 if n_pix > 0:
-                    grid_loss_sum += F.cross_entropy(grid_logits[i, :n_pix], target_seq[i, :n_pix].long())
+                    grid_loss_sum += F.cross_entropy(grid_logits[i, :n_pix], target_seq[i, 2:2+n_pix].long())
                     active_samples += 1
             grid_loss = grid_loss_sum / active_samples if active_samples > 0 else torch.tensor(0.0, device=device)
             loss = shape_loss + grid_loss

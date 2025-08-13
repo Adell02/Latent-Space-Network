@@ -1193,413 +1193,82 @@ def generate_experiment_summary_json(results, model_params, save_dir=None, eval_
 # POE RECONSTRUCTION ANALYSIS
 ##############################
 
-def plot_reconstruction_analysis(data_results, save_dir=None, max_examples=2, data_type="evaluation", dataset_name="Test Dataset"):
+def plot_reconstruction_analysis(shape_pred, grid_pred, shape_target, grid_target, 
+                                input_grid=None, title="Reconstruction Analysis"):
     """
-    Create comprehensive reconstruction analysis showing:
-    1. Bar graph of pixel accuracy distribution (% correct pixels)
-    2. Bar graph of grid size accuracy distribution (% correct grid sizes)  
-    3. Representative sample reconstructions with clear visual comparison
+    Plot reconstruction analysis with input, target, and prediction grids.
     
     Args:
-        data_results: Results dictionary containing reconstruction data
-        save_dir: Directory to save plots
-        max_examples: Number of example reconstructions to show
-        data_type: Type of data ("training" or "evaluation")
-        dataset_name: Display name for the dataset
+        shape_pred: Predicted shape values [0,29] from model 
+        grid_pred: Predicted grid values
+        shape_target: Target shape values [1,30] from data
+        grid_target: Target grid values
+        input_grid: Optional input grid to display
+        title: Plot title
     """
-    if not data_results:
-        print(f"No {data_type} results provided")
-        return
+    import matplotlib.pyplot as plt
+    import numpy as np
     
-    # Handle different result structures based on data type
-    key_results_dict = {}
+    # Convert predictions to actual dimensions [1,30] for visualization
+    pred_rows = int(shape_pred[0]) + 1  # Convert [0,29] to [1,30]
+    pred_cols = int(shape_pred[1]) + 1  # Convert [0,29] to [1,30]
     
-    if data_type == "evaluation":
-        if 'key_results' in data_results and isinstance(data_results['key_results'], dict):
-            key_results_dict = data_results['key_results']
-            print(f"Using key_results structure with keys: {list(key_results_dict.keys())}")
-        else:
-            metadata_keys = {'evaluation_metadata', 'aggregated_metrics', 'training_latent_data'}
-            key_results_dict = {k: v for k, v in data_results.items() if k not in metadata_keys}
-            print(f"Using direct structure with keys: {list(key_results_dict.keys())}")
+    # Target shape values are already in [1,30] range
+    target_rows = int(shape_target[0])
+    target_cols = int(shape_target[1])
     
-    elif data_type == "training":
-        # For training data, look for reconstruction results in training results
-        if 'reconstruction_results' in data_results:
-            # Training results have reconstruction_results directly
-            key_results_dict = {'training_key': data_results}
-            print(f"Using training reconstruction results")
-        else:
-            print(f"No reconstruction results found in training data")
-            return
+    # Calculate accuracies using converted values for fair comparison
+    shape_accuracy = ((shape_pred[0] + 1) == target_rows) and ((shape_pred[1] + 1) == target_cols)
     
-    if not key_results_dict:
-        print(f"No problem keys found in {data_type} results")
-        return
+    # Setup plot
+    num_plots = 3 if input_grid is not None else 2
+    fig, axes = plt.subplots(1, num_plots, figsize=(4*num_plots, 4))
+    if num_plots == 1:
+        axes = [axes]
     
-    # Aggregate data from all available keys for comprehensive analysis
-    all_pixel_accuracies = []
-    all_grid_size_correct = []
-    all_reconstructions = []
-    total_samples = 0
+    plot_idx = 0
     
-    for key, key_data in key_results_dict.items():
-        # Try multiple possible locations for reconstruction results
-        reconstruction_results = None
-        if 'reconstruction_results' in key_data:
-            reconstruction_results = key_data['reconstruction_results']
-        elif 'metrics' in key_data and 'reconstruction_results' in key_data['metrics']:
-            reconstruction_results = key_data['metrics']['reconstruction_results']
-        elif isinstance(key_data, dict):
-            # Look for direct reconstruction data in specialist training results
-            potential_keys = ['poe_query_reconstructions', 'query_reconstructions', 'reconstructions']
-            for pot_key in potential_keys:
-                if pot_key in key_data:
-                    reconstruction_results = {pot_key: key_data[pot_key]}
-                    break
-        
-        if not reconstruction_results:
-            print(f"No reconstruction results found for key {key}")
-            continue
-        
-        # Get reconstructions based on data type
-        reconstructions = None
-        reconstruction_type = "Model"
-        
-        if data_type == "evaluation":
-            # For evaluation data: prefer PoE, fallback to general
-            if 'poe_query_reconstructions' in reconstruction_results:
-                reconstructions = reconstruction_results['poe_query_reconstructions']
-                reconstruction_type = "PoE"
-            elif 'query_reconstructions' in reconstruction_results:
-                reconstructions = reconstruction_results['query_reconstructions']
-                reconstruction_type = "Model"
-        
-        elif data_type == "training":
-            # For training data: look for training reconstructions
-            if 'training_reconstructions' in reconstruction_results:
-                reconstructions = reconstruction_results['training_reconstructions']
-                reconstruction_type = "Training Model"
-            elif 'reconstructions' in reconstruction_results:
-                reconstructions = reconstruction_results['reconstructions']
-                reconstruction_type = "Training Model"
-        
-        if reconstructions is None or len(reconstructions) == 0:
-            print(f"No {data_type} reconstructions found for key {key}")
-            continue
-        
-        print(f"Processing {len(reconstructions)} {reconstruction_type} reconstructions from key {key}")
-        
-        # Process reconstructions for this key
-        for recon_data in reconstructions:
-            try:
-                target_seq = np.array(recon_data['target'])
-                shape_logits, grid_logits = recon_data['reconstruction']
-                
-                # Convert to numpy arrays if they aren't already
-                shape_logits = np.array(shape_logits)
-                grid_logits = np.array(grid_logits)
-                
-                # Extract target information
-                target_grid, target_shape = extract_grid_from_sequence(target_seq)
-                target_rows, target_cols = target_shape[0], target_shape[1]
-                
-                # Get predictions
-                shape_pred = np.argmax(shape_logits, axis=-1)
-                grid_pred = np.argmax(grid_logits, axis=-1)
-                
-                # Handle shape prediction format (could be scalar or array)
-                if np.isscalar(shape_pred):
-                    pred_rows = pred_cols = int(shape_pred)
-                elif len(shape_pred) >= 2:
-                    pred_rows, pred_cols = int(shape_pred[0]), int(shape_pred[1])
-                else:
-                    pred_rows = pred_cols = int(shape_pred[0]) if len(shape_pred) > 0 else 0
-                
-                # Grid size accuracy
-                grid_size_match = 1.0 if (target_rows == pred_rows and target_cols == pred_cols) else 0.0
-                all_grid_size_correct.append(grid_size_match)
-                
-                # Pixel accuracy calculation
-                pixel_accuracy = 0.0
-                if target_rows > 0 and target_cols > 0 and pred_rows > 0 and pred_cols > 0:
-                    if target_rows == pred_rows and target_cols == pred_cols:
-                        # Same dimensions - direct comparison
-                        active_pixels = target_rows * target_cols
-                        if active_pixels <= len(grid_pred):
-                            pred_grid = grid_pred[:active_pixels].reshape(target_rows, target_cols)
-                            if pred_grid.shape == target_grid.shape:
-                                correct_pixels = np.sum(target_grid == pred_grid)
-                                pixel_accuracy = (correct_pixels / active_pixels) * 100 if active_pixels > 0 else 0
-                    # If dimensions don't match, accuracy is 0 (already set above)
-                
-                all_pixel_accuracies.append(pixel_accuracy)
-                
-                # Store reconstruction data for visualization
-                all_reconstructions.append({
-                    'target_seq': target_seq,
-                    'target_grid': target_grid,
-                    'target_shape': (target_rows, target_cols),
-                    'shape_logits': shape_logits,
-                    'grid_logits': grid_logits,
-                    'pred_shape': (pred_rows, pred_cols),
-                    'pixel_accuracy': pixel_accuracy,
-                    'grid_size_match': grid_size_match,
-                    'key': key
-                })
-                total_samples += 1
-                
-            except Exception as e:
-                print(f"Error processing reconstruction from key {key}: {e}")
-                all_pixel_accuracies.append(0)
-                all_grid_size_correct.append(0)
+    # Plot input grid if provided
+    if input_grid is not None:
+        axes[plot_idx].imshow(input_grid, cmap='viridis', vmin=0, vmax=9)
+        axes[plot_idx].set_title("Input Grid")
+        axes[plot_idx].grid(True, alpha=0.3)
+        plot_idx += 1
     
-    if not all_reconstructions:
-        print("No valid reconstructions found for analysis")
-        
-        # Create a fallback informational plot
-        try:
-                       
-            fig, ax = plt.subplots(1, 1, figsize=(10, 6))
-            ax.text(0.5, 0.5, f'{dataset_name} Reconstruction Analysis\n\nNo valid reconstructions found.\n\nThis can happen if:\n• Evaluation reconstruction data is missing\n• Reconstruction format is incompatible\n• No evaluation keys have reconstruction results\n\nCheck evaluation logs for details.', 
-                   ha='center', va='center', transform=ax.transAxes, fontsize=12,
-                   bbox=dict(boxstyle='round,pad=1', facecolor='lightyellow', alpha=0.8))
-            ax.set_title(f'{dataset_name} Reconstruction Analysis - No Data', fontsize=14)
-            ax.axis('off')
-            plt.tight_layout()
-            if save_dir:
-                filename = f'{data_type}_reconstruction_analysis.png'
-                plt.savefig(os.path.join(save_dir, filename), dpi=150, bbox_inches='tight')
-                print(f"Saved fallback {data_type} reconstruction analysis plot")
-            plt.close()
-        except Exception as fallback_error:
-            print(f"Could not create fallback reconstruction analysis plot: {fallback_error}")
-        return
+    # Plot target grid
+    target_active = target_rows * target_cols
+    target_grid_reshaped = np.zeros((30, 30))
+    if target_active > 0:
+        target_values = grid_target[:target_active].reshape(target_rows, target_cols)
+        target_grid_reshaped[:target_rows, :target_cols] = target_values
     
-    print(f"Analyzed {total_samples} total test samples from {len(key_results_dict)} problem keys")
+    axes[plot_idx].imshow(target_grid_reshaped, cmap='viridis', vmin=0, vmax=9)
+    axes[plot_idx].set_title(f"Target ({target_rows}x{target_cols})")
+    axes[plot_idx].grid(True, alpha=0.3)
+    plot_idx += 1
     
-    # Create figure with improved layout: histograms as bar charts at top, sample reconstructions below
-    num_examples = min(max_examples, len(all_reconstructions))
-    fig = plt.figure(figsize=(16, 8 + 4 * num_examples))
+    # Plot predicted grid
+    pred_active = pred_rows * pred_cols
+    pred_grid_reshaped = np.zeros((30, 30))
+    if pred_active > 0 and pred_active <= len(grid_pred):
+        pred_values = grid_pred[:pred_active].reshape(pred_rows, pred_cols)
+        pred_grid_reshaped[:pred_rows, :pred_cols] = pred_values
     
-    # Use gridspec for better control over layout
-    gs = fig.add_gridspec(2 + num_examples, 4, 
-                         height_ratios=[2, 2] + [3] * num_examples,
-                         width_ratios=[1, 1, 1, 1])
+    axes[plot_idx].imshow(pred_grid_reshaped, cmap='viridis', vmin=0, vmax=9)
     
-    # === TOP ROW: PERFORMANCE ANALYSIS CHARTS ===
+    # Calculate grid accuracy for active pixels
+    grid_accuracy = 0.0
+    if target_active > 0 and pred_active == target_active:
+        grid_correct = (grid_pred[:target_active] == grid_target[:target_active]).sum()
+        grid_accuracy = grid_correct / target_active
     
-    # Left: Pixel Accuracy Distribution (as bar chart)
-    ax_pixel = fig.add_subplot(gs[0, :2])  # Span first two columns
+    axes[plot_idx].set_title(f"Prediction ({pred_rows}x{pred_cols})\nShape: {'✓' if shape_accuracy else '✗'}, Grid: {grid_accuracy:.2f}")
+    axes[plot_idx].grid(True, alpha=0.3)
     
-    # Create bins for pixel accuracy
-    pixel_bins = [0, 20, 40, 60, 80, 100]
-    pixel_bin_labels = ['0-20%', '20-40%', '40-60%', '60-80%', '80-100%']
-    pixel_counts = []
-    
-    for i in range(len(pixel_bins)-1):
-        count = sum(1 for acc in all_pixel_accuracies if pixel_bins[i] <= acc < pixel_bins[i+1])
-        pixel_counts.append(count)
-    
-    # Handle edge case for 100% accuracy
-    pixel_counts[-1] += sum(1 for acc in all_pixel_accuracies if acc == 100.0)
-    
-    bars1 = ax_pixel.bar(pixel_bin_labels, pixel_counts, alpha=0.8, color='skyblue', 
-                        edgecolor='navy', linewidth=1.5)
-    ax_pixel.set_title(f'{dataset_name}: Pixel Accuracy Distribution', fontsize=14, fontweight='bold')
-    ax_pixel.set_xlabel('Pixel Accuracy Range')
-    ax_pixel.set_ylabel('Number of Samples')
-    ax_pixel.grid(True, alpha=0.3, axis='y')
-    
-    # Add value labels on bars
-    for bar, count in zip(bars1, pixel_counts):
-        if count > 0:
-            ax_pixel.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5, 
-                         str(count), ha='center', va='bottom', fontweight='bold')
-    
-    # Add statistics
-    mean_pixel_acc = np.mean(all_pixel_accuracies)
-    ax_pixel.axhline(y=len(all_pixel_accuracies) * 0.1, color='red', linestyle='--', alpha=0)  # Hidden line for legend
-    ax_pixel.text(0.02, 0.98, f'Mean: {mean_pixel_acc:.1f}%\nSamples: {len(all_pixel_accuracies)}', 
-                 transform=ax_pixel.transAxes, verticalalignment='top', 
-                 bbox=dict(boxstyle='round,pad=0.5', facecolor='white', alpha=0.8))
-    
-    # Right: Grid Size Accuracy (as bar chart)
-    ax_grid = fig.add_subplot(gs[0, 2:])  # Span last two columns
-    
-    correct_grid_sizes = sum(all_grid_size_correct)
-    incorrect_grid_sizes = len(all_grid_size_correct) - correct_grid_sizes
-    
-    grid_labels = ['Correct Size', 'Incorrect Size']
-    grid_counts = [correct_grid_sizes, incorrect_grid_sizes]
-    grid_colors = ['lightgreen', 'lightcoral']
-    
-    bars2 = ax_grid.bar(grid_labels, grid_counts, alpha=0.8, color=grid_colors, 
-                       edgecolor='darkgreen', linewidth=1.5)
-    ax_grid.set_title(f'{dataset_name}: Grid Size Accuracy', fontsize=14, fontweight='bold')
-    ax_grid.set_ylabel('Number of Samples')
-    ax_grid.grid(True, alpha=0.3, axis='y')
-    
-    # Add value labels and percentages on bars
-    for bar, count, label in zip(bars2, grid_counts, grid_labels):
-        percentage = (count / len(all_grid_size_correct)) * 100
-        ax_grid.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5, 
-                    f'{count}\n({percentage:.1f}%)', ha='center', va='bottom', 
-                    fontweight='bold')
-    
-    # Add overall statistics
-    grid_accuracy_pct = (correct_grid_sizes / len(all_grid_size_correct)) * 100
-    ax_grid.text(0.02, 0.98, f'Accuracy: {grid_accuracy_pct:.1f}%\nSamples: {len(all_grid_size_correct)}', 
-                transform=ax_grid.transAxes, verticalalignment='top',
-                bbox=dict(boxstyle='round,pad=0.5', facecolor='white', alpha=0.8))
-    
-    # === SECOND ROW: SUMMARY STATISTICS ===
-    ax_summary = fig.add_subplot(gs[1, :])
-    ax_summary.axis('off')
-    
-    # Calculate comprehensive statistics
-    perfect_reconstructions = sum(1 for acc in all_pixel_accuracies if acc == 100.0)
-    good_reconstructions = sum(1 for acc in all_pixel_accuracies if acc >= 80.0)
-    poor_reconstructions = sum(1 for acc in all_pixel_accuracies if acc < 20.0)
-    
-    summary_text = f"""
-    📊 {dataset_name.upper()} PERFORMANCE SUMMARY ({reconstruction_type} Model)
-    
-    🎯 Overall Performance:  •  Total Samples: {total_samples}  •  Problem Keys: {len(key_results_dict)}
-    
-    🔍 Pixel Accuracy:  •  Mean: {mean_pixel_acc:.1f}%  •  Perfect (100%): {perfect_reconstructions} samples  •  Good (≥80%): {good_reconstructions} samples  •  Poor (<20%): {poor_reconstructions} samples
-    
-    📐 Grid Size Accuracy:  •  Correct Dimensions: {correct_grid_sizes}/{len(all_grid_size_correct)} ({grid_accuracy_pct:.1f}%)  •  Dimension Errors: {incorrect_grid_sizes} samples
-    """
-    
-    ax_summary.text(0.5, 0.5, summary_text, transform=ax_summary.transAxes, 
-                   fontsize=11, ha='center', va='center',
-                   bbox=dict(boxstyle='round,pad=0.5', facecolor='lightblue', alpha=0.3))
-    
-    # === BOTTOM ROWS: SAMPLE RECONSTRUCTIONS ===
-    
-    # Select diverse examples for visualization
-    examples_to_show = []
-    
-    # Try to get one perfect example and one imperfect example
-    perfect_examples = [r for r in all_reconstructions if r['pixel_accuracy'] == 100.0]
-    imperfect_examples = [r for r in all_reconstructions if r['pixel_accuracy'] < 100.0]
-    
-    if perfect_examples:
-        examples_to_show.append(perfect_examples[0])
-    if imperfect_examples and len(examples_to_show) < num_examples:
-        examples_to_show.append(imperfect_examples[0])
-    
-    # Fill remaining slots with random samples
-    remaining_examples = [r for r in all_reconstructions if r not in examples_to_show]
-    while len(examples_to_show) < num_examples and remaining_examples:
-        examples_to_show.append(remaining_examples.pop(0))
-    
-    for i, recon_data in enumerate(examples_to_show):
-        row_idx = 2 + i
-        
-        try:
-            target_grid = recon_data['target_grid']
-            target_rows, target_cols = recon_data['target_shape']
-            shape_logits = recon_data['shape_logits']
-            grid_logits = recon_data['grid_logits']
-            pred_rows, pred_cols = recon_data['pred_shape']
-            pixel_accuracy = recon_data['pixel_accuracy']
-            grid_size_match = recon_data['grid_size_match']
-            key = recon_data['key']
-            
-            # Create reconstruction grid
-            if pred_rows > 0 and pred_cols > 0 and pred_rows <= 30 and pred_cols <= 30:
-                grid_pred = np.argmax(grid_logits, axis=-1)
-                active_pixels = pred_rows * pred_cols
-                if active_pixels <= len(grid_pred):
-                    recon_grid = grid_pred[:active_pixels].reshape(pred_rows, pred_cols)
-                else:
-                    recon_grid = np.zeros((pred_rows, pred_cols))
-            else:
-                recon_grid = np.zeros((1, 1))
-            
-            # Plot ground truth
-            ax_gt = fig.add_subplot(gs[row_idx, 0])
-            ax_gt.imshow(target_grid, cmap='viridis', interpolation='nearest')
-            ax_gt.set_title(f'Ground Truth\n{target_rows}×{target_cols}', fontsize=11, fontweight='bold')
-            ax_gt.axis('off')
-            
-            # Plot reconstruction  
-            ax_recon = fig.add_subplot(gs[row_idx, 1])
-            ax_recon.imshow(recon_grid, cmap='viridis', interpolation='nearest')
-            size_status = "[ OK ]" if grid_size_match else "✗"
-            ax_recon.set_title(f'{reconstruction_type} Reconstruction\n{pred_rows}×{pred_cols} {size_status}', 
-                              fontsize=11, fontweight='bold')
-            ax_recon.axis('off')
-            
-            # Plot difference/error map
-            ax_diff = fig.add_subplot(gs[row_idx, 2])
-            if target_grid.shape == recon_grid.shape and target_rows > 0 and target_cols > 0:
-                diff_map = (target_grid != recon_grid).astype(float)
-                ax_diff.imshow(diff_map, cmap='Reds', interpolation='nearest', vmin=0, vmax=1)
-                correct_pixels = np.sum(target_grid == recon_grid)
-                total_pixels = target_rows * target_cols
-                error_pixels = total_pixels - correct_pixels
-                ax_diff.set_title(f'Error Map\n{error_pixels}/{total_pixels} errors', 
-                                 fontsize=11, fontweight='bold')
-            else:
-                # Different shapes - show size mismatch
-                ax_diff.text(0.5, 0.5, 'SIZE\nMISMATCH', ha='center', va='center', 
-                            fontsize=12, fontweight='bold', color='red',
-                            transform=ax_diff.transAxes)
-                ax_diff.set_title('Dimension Error', fontsize=11, fontweight='bold', color='red')
-            ax_diff.axis('off')
-            
-            # Performance summary for this sample
-            ax_perf = fig.add_subplot(gs[row_idx, 3])
-            ax_perf.axis('off')
-            
-            perf_color = 'green' if pixel_accuracy >= 80 else 'orange' if pixel_accuracy >= 50 else 'red'
-            size_color = 'green' if grid_size_match else 'red'
-            
-            perf_text = f"""Sample {i+1}
-            
-Key: {key}
-
-🎯 Pixel Accuracy:
-{pixel_accuracy:.1f}%
-
-📐 Grid Size:
-{"Correct" if grid_size_match else "Wrong"}
-
-Overall Quality:
-{"Excellent" if pixel_accuracy >= 90 else "Good" if pixel_accuracy >= 70 else "Fair" if pixel_accuracy >= 50 else "Poor"}"""
-            
-            ax_perf.text(0.1, 0.5, perf_text, transform=ax_perf.transAxes, 
-                        fontsize=10, va='center', ha='left',
-                        bbox=dict(boxstyle='round,pad=0.3', facecolor=perf_color, alpha=0.2))
-            
-        except Exception as e:
-            print(f"Error visualizing reconstruction {i}: {e}")
-            # Show error placeholder
-            ax_error = fig.add_subplot(gs[row_idx, :])
-            ax_error.text(0.5, 0.5, f'Visualization Error\n{str(e)[:50]}...', 
-                         ha='center', va='center', transform=ax_error.transAxes,
-                         fontsize=12, color='red')
-            ax_error.set_title(f'Sample {i+1} - Error', fontsize=11, fontweight='bold', color='red')
-            ax_error.axis('off')
-    
-    plt.suptitle(f'{reconstruction_type} Model: {dataset_name} Reconstruction Analysis', 
-                 fontsize=16, fontweight='bold', y=0.98)
+    plt.suptitle(title)
     plt.tight_layout()
     
-    if save_dir:
-        filename = f'{data_type}_reconstruction_analysis.png'
-        save_path = os.path.join(save_dir, filename)
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        plt.close()
-        print(f"[ OK ] {dataset_name} reconstruction analysis saved to: {save_path}")
-        print(f"  - Analyzed {total_samples} {data_type} samples from {len(key_results_dict)} problem keys")
-        print(f"  - Mean pixel accuracy: {mean_pixel_acc:.1f}%")
-        print(f"  - Grid size accuracy: {grid_accuracy_pct:.1f}%")
-    else:
-        plt.show()
+    return fig
 
 def plot_poe_reconstruction_analysis(eval_results, save_dir=None, max_examples=2):
     """
