@@ -24,7 +24,7 @@ class WandbLogger:
         self.run = None
         self.is_initialized = False
         
-    def init(self, run_name: str = None, tags: List[str] = None):
+    def init(self, run_name: str = None, tags: List[str] = None, notes: str = None):
         """Initialize wandb run."""
         if self.is_initialized:
             return
@@ -44,6 +44,7 @@ class WandbLogger:
                 entity=self.entity,
                 name=run_name,
                 tags=tags or ['latent-space-network'],
+                notes=notes,                
                 config=self.config,
                 reinit=True
             )
@@ -254,7 +255,10 @@ class WandbLogger:
             plot_path = os.path.join(run_dir, filename)
             if os.path.exists(plot_path):
                 try:
-                    self._safe_log({wandb_key: wandb.Image(plot_path)}, step_hint=step_hint)
+                    self._safe_log({
+                        wandb_key: wandb.Image(plot_path),
+                        'epoch': epoch if epoch is not None else None  # ✅ ADD: Explicit epoch field
+                    }, step_hint=step_hint)
                     print(f"  [OK] Uploaded {filename}")
                     uploaded_count += 1
                 except Exception as e:
@@ -271,7 +275,10 @@ class WandbLogger:
                 try:
                     # Use consistent key for single panel visualization
                     wandb_key = 'trajectory_reconstruction'
-                    self._safe_log({wandb_key: wandb.Image(traj_plot)}, step_hint=step_hint)
+                    self._safe_log({
+                        wandb_key: wandb.Image(traj_plot),
+                        'epoch': epoch if epoch is not None else None  # ✅ ADD: Explicit epoch field
+                    }, step_hint=step_hint)
                     print(f"  [OK] Uploaded {os.path.basename(traj_plot)}")
                     uploaded_count += 1
                 except Exception as e:
@@ -305,7 +312,10 @@ class WandbLogger:
                     # Fallback for other plot types
                     wandb_key = f'trajectory_plots_{plot_key}'
                 
-                self._safe_log({wandb_key: wandb.Image(latest_path)}, step_hint=step_hint)
+                self._safe_log({
+                    wandb_key: wandb.Image(latest_path),
+                    'epoch': epoch if epoch is not None else None  # ✅ ADD: Explicit epoch field
+                }, step_hint=step_hint)
                 print(f"  [OK] Uploaded {os.path.basename(latest_path)} (latest epoch {latest_epoch})")
                 uploaded_count += 1
             except Exception as e:
@@ -320,7 +330,10 @@ class WandbLogger:
                     try:
                         plot_name = os.path.basename(plot_path)
                         wandb_key = 'latent_space_evaluation'
-                        self._safe_log({wandb_key: wandb.Image(plot_path)}, step_hint=step_hint)
+                        self._safe_log({
+                            wandb_key: wandb.Image(plot_path),
+                            'epoch': epoch if epoch is not None else None  # ✅ ADD: Explicit epoch field
+                        }, step_hint=step_hint)
                         print(f"  [OK] Uploaded evaluation latent space plot: {plot_name}")
                         uploaded_count += 1
                     except Exception as e:
@@ -430,12 +443,12 @@ _global_logger = None
 
 def init_wandb_logger(project_name: str, entity: str = None, api_key: str = None,
                      run_name: str = None, tags: List[str] = None,
-                     log_interval: int = 1, config: Dict[str, Any] = None) -> Optional[WandbLogger]:
+                     log_interval: int = 1, config: Dict[str, Any] = None, notes: str = None) -> Optional[WandbLogger]:
     """Initialize global wandb logger."""
     global _global_logger
     
     _global_logger = WandbLogger(project_name, entity, api_key, log_interval, config)
-    if _global_logger.init(run_name, tags):
+    if _global_logger.init(run_name, tags, notes):
         return _global_logger
     return None
 
@@ -443,13 +456,14 @@ def get_wandb_logger() -> Optional[WandbLogger]:
     """Get global wandb logger."""
     return _global_logger
 
-def init_wandb_for_mode(mode: str, run_dir: str = None) -> Optional[WandbLogger]:
+def init_wandb_for_mode(mode: str, run_dir: str = None, notes: str = None) -> Optional[WandbLogger]:
     """
     Initialize wandb for different modes (train, eval, visualize) using persistent settings.
     
     Args:
         mode: One of 'train', 'eval', 'visualize'
         run_dir: Run directory to extract project name and settings from
+        notes: Notes to add to the WandB run
         
     Returns:
         WandbLogger instance or None if initialization fails
@@ -502,7 +516,8 @@ def init_wandb_for_mode(mode: str, run_dir: str = None) -> Optional[WandbLogger]
             run_name=run_name,
             tags=[mode, 'latent-space-network'],
             log_interval=wandb_settings.get('log_interval', 1),
-            config=settings.get_settings()
+            config=settings.get_settings(),
+            notes=notes
         )
         
         if wandb_logger:

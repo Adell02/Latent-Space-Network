@@ -150,16 +150,34 @@ class InfiniteARCDataset(IterableDataset):
         
         # FIXED: Return individual samples, let DataLoader handle batching
         for i in range(len(self)):
-            key = rng.choice(self.task_keys)
-            example = self._sample_example(key, rng)
-            input_seq = transform_grid_to_sequence(np.array(example['input']))
-            output_seq = transform_grid_to_sequence(np.array(example['output']))
-            
-            if self.return_keys:
-                yield torch.tensor(input_seq, dtype=torch.float32), torch.tensor(output_seq, dtype=torch.float32), key
-            else:
-                yield torch.tensor(input_seq, dtype=torch.float32), torch.tensor(output_seq, dtype=torch.float32)
-
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    key = rng.choice(self.task_keys)
+                    example = self._sample_example(key, rng)
+                    input_seq = transform_grid_to_sequence(np.array(example['input']))
+                    output_seq = transform_grid_to_sequence(np.array(example['output']))
+                    
+                    if self.return_keys:
+                        yield torch.tensor(input_seq, dtype=torch.float32), torch.tensor(output_seq, dtype=torch.float32), key
+                    else:
+                        yield torch.tensor(input_seq, dtype=torch.float32), torch.tensor(output_seq, dtype=torch.float32)
+                    
+                    # Success - break out of retry loop
+                    break
+                    
+                except ValueError as e:
+                    if "exceed maximum of 30x30" in str(e):
+                        if attempt < max_retries - 1:
+                            # Try again with a different key
+                            continue
+                        else:
+                            # All retries exhausted - skip this sample
+                            print(f"[WARNING] Skipping sample after {max_retries} failed attempts due to oversized grid")
+                            continue
+                    else:
+                        # Re-raise other ValueError exceptions
+                        raise 
 
 def create_infinite_dataloader(task_keys: List[str], batch_size: int, batches_per_epoch: int,
                                seed: int = 42, data_dir: str = None, return_keys: bool = True) -> DataLoader:

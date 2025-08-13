@@ -188,7 +188,6 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler,
     
     # ENABLE LEAVE-ONE-OUT TRAINING FOR ALL TRAINING TYPES
     cross_pair_enabled = training_settings.get('cross_pair_loss', {}).get('enabled', True)
-    cross_pair_num_pairs = training_settings.get('cross_pair_loss', {}).get('num_pairs', 4)
     
     # Repulsion parameters (for joint training)
     use_repulsion_loss = repulsion_loss_settings.get('enabled', False) and joint_training
@@ -235,7 +234,7 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler,
     training_settings = settings.get_training_settings()
     batch_size = training_settings.get('batch_size', 4)
     batches_per_epoch = training_settings.get('batches_per_epoch', 10)
-    max_latents_to_store = batch_size * batches_per_epoch
+    max_latents_to_store = max(batch_size * batches_per_epoch, 1000)
     print(f"  [DEBUG] Will store max {max_latents_to_store} latents per encoder (batch_size={batch_size} * batches_per_epoch={batches_per_epoch})")
 
     # Zero gradients before epoch
@@ -264,7 +263,6 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler,
                 use_independent_decoder=(encoder_idx is not None and not joint_training),
                 # ENABLE LEAVE-ONE-OUT TRAINING FOR ALL
                 cross_pair_enabled=cross_pair_enabled,
-                cross_pair_num_pairs=cross_pair_num_pairs,
                 # Enhanced mechanisms
                 current_epoch=current_epoch_num,
                 **enhanced_training,
@@ -387,7 +385,7 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler,
     return avg_loss, epoch_shape/total_batches, epoch_grid/total_batches,epoch_kl/total_batches, epoch_repulsion/total_batches, repulsion_lambda
 
 
-def main_training(file_store_name, run_dir=None):  # ← ADD run_dir parameter
+def main_training(file_store_name, run_dir=None, notes=None):  # ← ADD notes parameter
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
@@ -404,7 +402,7 @@ def main_training(file_store_name, run_dir=None):  # ← ADD run_dir parameter
     model_architecture = settings.get_model_architecture()
     training_settings = settings.get_training_settings()
     latent_optimization = settings.get_latent_optimization()
-    repulsion_loss_settings = settings.get_repulsion_loss_settings()
+    # Get wandb settings
     wandb_settings = settings.get_wandb_settings()
 
     # Initialize wandb for training mode (will be done after run_dir is created)
@@ -452,15 +450,18 @@ def main_training(file_store_name, run_dir=None):  # ← ADD run_dir parameter
     NUM_ENCODERS = model_architecture.get('num_encoders', 1)
     is_multi_encoder = NUM_ENCODERS > 1
 
-    # Use the run_dir passed from main.py
+    # Use the run_dir passed from main files (main.py, main_sweep.py, etc.)
     if run_dir is None:
         # Fallback: create run directory only if not provided
         run_dir = create_run_directory(file_store_name)
-    
+    else:
+        # Ensure the directory exists
+        os.makedirs(run_dir, exist_ok=True)
+
     logger = setup_logging(run_dir)
     logger.info(f"Starting training for ARC problems {len(TRAINING_KEYS)} keys.")
     logger.info(f"Full settings dump: {json.dumps(settings.get_settings(), indent=2)}")
-    print("Run directory created:", run_dir)
+    print("Using run directory:", run_dir)
 
     # Initialize results dictionary early
     results = {
@@ -476,13 +477,11 @@ def main_training(file_store_name, run_dir=None):  # ← ADD run_dir parameter
     }
 
     # Initialize wandb for training mode (now that run_dir is available)
-    if wandb_settings.get('enabled', False):
-        # Don't override WANDB_PROJECT_NAME - let it be set by the sweep or environment
-        wandb_logger = init_wandb_for_mode('train', run_dir)
-        if wandb_logger:
-            logger.info(f"[OK] Wandb logging enabled: {wandb_logger.run.name}")
-        else:
-            logger.info("[WARNING] Wandb initialization failed, continuing without wandb")
+    wandb_logger = init_wandb_for_mode('train', run_dir, notes=notes)
+    if wandb_logger and wandb_logger.is_initialized:
+        logger.info(f"[OK] Wandb logging enabled: {wandb_logger.run.name}")
+    else:
+        logger.info("[WARNING] Wandb initialization failed, continuing without wandb")
 
     logger.info("Generating and preparing data...")
     print("Generating and preparing data...")
@@ -495,6 +494,7 @@ def main_training(file_store_name, run_dir=None):  # ← ADD run_dir parameter
         print("INFINITE_DATALOADER = False")
 
     dataloader = None
+    eval_dataloader = None
 
     if is_multi_encoder:
         logger.info(f"Multi-encoder training enabled with {NUM_ENCODERS} encoders")
@@ -593,6 +593,11 @@ def main_training(file_store_name, run_dir=None):  # ← ADD run_dir parameter
                     'infinite_dataloader': True
                 }
             else:
+                # Multi-encoder training should always use generated samples from re-arc
+                logger.info("Multi-encoder training uses generated samples from re-arc (no OOD sampling during training)")
+                print("Multi-encoder training uses generated samples from re-arc (no OOD sampling during training)")
+                
+                # Generate data using the original method
                 all_input_sequences = []
                 all_output_sequences = []
                 for task_key in TRAINING_KEYS:
@@ -640,6 +645,11 @@ def main_training(file_store_name, run_dir=None):  # ← ADD run_dir parameter
             results['output_sequences'] = None
             results['key_list'] = None
         else:
+            logger.info("Training uses generated samples from re-arc (no OOD sampling during training)")
+            print("Training uses generated samples from re-arc (no OOD sampling during training)")
+            
+            # Generate data using the original method
+
             all_input_sequences = []
             all_output_sequences = []
             logger.info(f"Generating data for tasks: {TRAINING_KEYS}")
@@ -657,6 +667,7 @@ def main_training(file_store_name, run_dir=None):  # ← ADD run_dir parameter
                     logger.error(f"Error generating data for task {task_key}: {e}")
                     print(f"Error generating data for task {task_key}: {e}")
                     continue
+
             if not all_input_sequences:
                 logger.error("No data generated from any task. Exiting training.")
                 print("No data generated from any task. Exiting training.")
@@ -675,6 +686,43 @@ def main_training(file_store_name, run_dir=None):  # ← ADD run_dir parameter
                 'single_encoder_training': True
             }
             encoder_dataloaders = [dataloader]
+
+    # ---------------------- PREPARE EVALUATION DATALOADER(S) ----------------------
+    logger.info("Preparing evaluation dataset for accuracy/evaluation (separate from training)...")
+    print("Preparing evaluation dataset for accuracy/evaluation (separate from training)...")
+
+    try:
+        evaluation_settings = settings.get_evaluation_settings()
+        eval_keys = evaluation_settings.get('eval_keys', TRAINING_KEYS)
+        # Handle "all" and other string inputs robustly
+        from utils.evaluation_utils import get_evaluation_keys_with_all_support
+        eval_keys = get_evaluation_keys_with_all_support(eval_keys, evaluation_settings.get('n_max_eval_keys', 10))
+        # Default to same per-key count as training if not specified
+        eval_n_per_key = evaluation_settings.get('eval_n_per_key', N_EXAMPLES_PER_TASK)
+
+        all_eval_inputs = []
+        all_eval_outputs = []
+
+        for task_key in eval_keys:
+            try:
+                _, _, _, task_input_sequences, task_output_sequences = generate_and_process_tasks(task_key, eval_n_per_key)
+                all_eval_inputs.extend(task_input_sequences)
+                all_eval_outputs.extend(task_output_sequences)
+                logger.info(f"[EVAL] Generated {len(task_input_sequences)} pairs for eval key {task_key}")
+            except Exception as e:
+                logger.error(f"[EVAL] Error generating data for eval key {task_key}: {e}")
+                print(f"[EVAL] Error generating data for eval key {task_key}: {e}")
+
+        if all_eval_inputs:
+            eval_dataloader = prepare_dataloader(all_eval_inputs, all_eval_outputs, BATCH_SIZE)
+            logger.info(f"[EVAL] Prepared evaluation dataloader with {len(all_eval_inputs)} samples from {len(eval_keys)} keys")
+            print(f"[EVAL] Prepared evaluation dataloader with {len(all_eval_inputs)} samples from {len(eval_keys)} keys")
+        else:
+            logger.warning("[EVAL] No evaluation data generated; eval_dataloader will remain None")
+            print("[EVAL] No evaluation data generated; eval_dataloader will remain None")
+    except Exception as e:
+        logger.error(f"[EVAL] Failed to prepare evaluation dataloader: {e}")
+        print(f"[EVAL] Failed to prepare evaluation dataloader: {e}")
 
     logger.info("Initializing model...")
     print("Initializing model...")
@@ -1000,39 +1048,35 @@ def main_training(file_store_name, run_dir=None):  # ← ADD run_dir parameter
 
         # Only run comprehensive evaluation based on interval
         if (epoch + 1) % eval_log_interval == 0 or epoch == 0 or epoch == NUM_EPOCHS - 1:  # Also evaluate on first and last epoch
-            if dataloader is not None:
-                input_seqs = results.get('input_sequences', None)
-                output_seqs = results.get('output_sequences', None)
-                key_list = results.get('key_list', None)
-                
-                # Run comprehensive evaluation
-                try:
-                    comprehensive_evaluation_after_epoch(
-                        model=model,
-                        dataloader=dataloader,
-                        device=device,
-                        epoch=epoch,
-                        run_dir=run_dir,
-                        wandb_logger=wandb_logger,
-                        training_keys=TRAINING_KEYS,
-                        input_sequences=input_seqs,
-                        output_sequences=output_seqs,
-                        key_list=key_list,
-                        is_multi_encoder=is_multi_encoder,  # Now properly defined
-                        num_encoders=NUM_ENCODERS,
-                        infinite_dataloader=INFINITE_DATALOADER,
-                        encoder_dataloaders=encoder_dataloaders
-                    )
-                    print(f"[OK] Comprehensive evaluation completed for epoch {epoch+1}")
-                    
-                except Exception as e:
-                    logger.error(f"Error during comprehensive evaluation at epoch {epoch+1}: {e}")
-                    print(f"[WARNING] Error during comprehensive evaluation at epoch {epoch+1}: {e}")
-                    
-                    # Remove the fallback call since the function doesn't exist
-                    # The comprehensive_evaluation_after_epoch should handle all visualization
+            input_seqs = results.get('input_sequences', None)
+            output_seqs = results.get('output_sequences', None)
+            key_list = results.get('key_list', None)
+
+            # Run comprehensive evaluation on evaluation dataset (not training)
+            try:
+                comprehensive_evaluation_after_epoch(
+                    model=model,
+                    dataloader=eval_dataloader,
+                    device=device,
+                    epoch=epoch,
+                    run_dir=run_dir,
+                    wandb_logger=wandb_logger,
+                    training_keys=TRAINING_KEYS,
+                    input_sequences=input_seqs,
+                    output_sequences=output_seqs,
+                    key_list=key_list,
+                    is_multi_encoder=is_multi_encoder,
+                    num_encoders=NUM_ENCODERS,
+                    infinite_dataloader=INFINITE_DATALOADER,
+                    encoder_dataloaders=encoder_dataloaders
+                )
+                print(f"[OK] Comprehensive evaluation completed for epoch {epoch+1}")
+
+            except Exception as e:
+                logger.error(f"Error during comprehensive evaluation at epoch {epoch+1}: {e}")
+                print(f"[WARNING] Error during comprehensive evaluation at epoch {epoch+1}: {e}")
         else:
-            print(f"[INFO] Skipping comprehensive evaluation for epoch {epoch+1} (no dataloader available)")
+            print(f"[INFO] Skipping comprehensive evaluation for epoch {epoch+1} (interval)")
 
         if scheduler:
             scheduler.step() # Step the scheduler each epoch
@@ -1055,39 +1099,37 @@ def main_training(file_store_name, run_dir=None):  # ← ADD run_dir parameter
         logger.info("=" * 40)
         
         if is_multi_encoder:
-            # Multi-encoder: evaluate each encoder individually + PoE
+            # Multi-encoder: evaluate each encoder individually on the evaluation dataset
             epoch_accuracy_data = {
                 'epoch': epoch + 1,
                 'individual_encoders': {},
                 'poe_accuracy': {}
             }
-            
-            # Evaluate each encoder individually on its own data
-            for eval_encoder_idx in range(NUM_ENCODERS):
-                dataloader = encoder_dataloaders[eval_encoder_idx]
-                if dataloader is None:
-                    continue # Skip encoders with no data
-                logger.info(f"\n--- Evaluating Encoder {eval_encoder_idx} ---")
-                print(f"Evaluating Encoder {eval_encoder_idx}...")
-                
-                # Use the specific encoder's dataloader for individual evaluation
-                encoder_accuracy = evaluate_accuracy(
-                    model, dataloader, device, 
-                    is_multi_encoder=True, encoder_idx=eval_encoder_idx, 
-                    optimize_z=OPTIMIZE_Z, logger=logger
-                )
-                
-                epoch_accuracy_data['individual_encoders'][eval_encoder_idx] = encoder_accuracy
-                print(f"Encoder {eval_encoder_idx} - Shape: {encoder_accuracy['shape_accuracy']:.4f}, "
-                      f"Grid: {encoder_accuracy['grid_accuracy']:.4f}, "
-                      f"Overall: {encoder_accuracy['overall_accuracy']:.4f}, "
-                      f"Sample Exact: {encoder_accuracy['sample_exact_accuracy']:.4f}")
-            
-            logger.info("\n--- Multi-encoder Training: Individual Encoder Evaluation Only ---")
-            print("Note: PoE evaluation removed from training. PoE will be evaluated during inference/evaluation phase.")
-            
-            # Store both detailed and summary accuracy data
-            results['epoch_accuracies'].append(epoch_accuracy_data)
+
+            if eval_dataloader is None:
+                print("[INFO] Skipping accuracy evaluation (no evaluation dataloader prepared)")
+            else:
+                for eval_encoder_idx in range(NUM_ENCODERS):
+                    logger.info(f"\n--- Evaluating Encoder {eval_encoder_idx} on EVALUATION dataset ---")
+                    print(f"Evaluating Encoder {eval_encoder_idx} on evaluation dataset...")
+
+                    encoder_accuracy = evaluate_accuracy(
+                        model, eval_dataloader, device,
+                        is_multi_encoder=True, encoder_idx=eval_encoder_idx,
+                        optimize_z=OPTIMIZE_Z, logger=logger
+                    )
+
+                    epoch_accuracy_data['individual_encoders'][eval_encoder_idx] = encoder_accuracy
+                    print(f"Encoder {eval_encoder_idx} - Shape: {encoder_accuracy['shape_accuracy']:.4f}, "
+                          f"Grid: {encoder_accuracy['grid_accuracy']:.4f}, "
+                          f"Overall: {encoder_accuracy['overall_accuracy']:.4f}, "
+                          f"Sample Exact: {encoder_accuracy['sample_exact_accuracy']:.4f}")
+
+                logger.info("\n--- Multi-encoder Training: Individual Encoder Evaluation Only (Evaluation dataset) ---")
+                print("Note: PoE evaluation removed from training. PoE will be evaluated during inference/evaluation phase.")
+
+                # Store both detailed and summary accuracy data
+                results['epoch_accuracies'].append(epoch_accuracy_data)
             
             # Remove duplicate legacy format - visualizers will extract what they need from detailed data
             # results['epoch_accuracies'].append({
@@ -1098,24 +1140,27 @@ def main_training(file_store_name, run_dir=None):  # ← ADD run_dir parameter
             #     'sample_exact_accuracy': poe_accuracy['sample_exact_accuracy']
             # })
         else:
-            # Single encoder: standard evaluation
-            logger.info("\n--- Evaluating Single Encoder ---")
-            print("Evaluating model...")
-            
-            single_accuracy = evaluate_accuracy(
-                model, dataloader, device,
-                is_multi_encoder=False, encoder_idx=None,
-                optimize_z=OPTIMIZE_Z, logger=logger
-            )
-            
-            # Store accuracy data (add epoch info)
-            single_accuracy['epoch'] = epoch + 1
-            results['epoch_accuracies'].append(single_accuracy)
-            
-            print(f"Model - Shape: {single_accuracy['shape_accuracy']:.4f}, "
-                  f"Grid: {single_accuracy['grid_accuracy']:.4f}, "
-                  f"Overall: {single_accuracy['overall_accuracy']:.4f}, "
-                  f"Sample Exact: {single_accuracy['sample_exact_accuracy']:.4f}")
+            # Single encoder: evaluate on the evaluation dataset
+            logger.info("\n--- Evaluating Single Encoder on EVALUATION dataset ---")
+            print("Evaluating model on evaluation dataset...")
+
+            if eval_dataloader is None:
+                print("[INFO] Skipping accuracy evaluation (no evaluation dataloader prepared)")
+            else:
+                single_accuracy = evaluate_accuracy(
+                    model, eval_dataloader, device,
+                    is_multi_encoder=False, encoder_idx=None,
+                    optimize_z=OPTIMIZE_Z, logger=logger
+                )
+
+                # Store accuracy data (add epoch info)
+                single_accuracy['epoch'] = epoch + 1
+                results['epoch_accuracies'].append(single_accuracy)
+
+                print(f"Model - Shape: {single_accuracy['shape_accuracy']:.4f}, "
+                      f"Grid: {single_accuracy['grid_accuracy']:.4f}, "
+                      f"Overall: {single_accuracy['overall_accuracy']:.4f}, "
+                      f"Sample Exact: {single_accuracy['sample_exact_accuracy']:.4f}")
 
         model.train() # Already called at the start of train_model function for the next epoch
 
@@ -1169,7 +1214,9 @@ def main_training(file_store_name, run_dir=None):  # ← ADD run_dir parameter
                             log_dict['vq_codebook_usage_min'] = torch.min(codebook_usage).item()
                 
                 wandb_logger.log_training_metrics(epoch + 1, log_dict)
-                wandb_logger.log_accuracy_metrics(epoch + 1, single_accuracy)
+                # Guard against missing evaluation (e.g., when eval_dataloader is None)
+                if 'single_accuracy' in locals() and single_accuracy is not None:
+                    wandb_logger.log_accuracy_metrics(epoch + 1, single_accuracy)
 
         # Note: Comprehensive evaluation is now done after each epoch above
         # The old interval-based evaluation has been replaced with the comprehensive evaluation
@@ -1240,7 +1287,11 @@ def comprehensive_evaluation_after_epoch(
     2. Evaluate with sample-level optimization, generating trajectory figures
     3. Plot latent space with support and query samples colored by keys
     """
+    import matplotlib
+    matplotlib.use('Agg')
     import matplotlib.pyplot as plt
+    plt.rcParams['figure.max_open_warning'] = 0
+
     import numpy as np
     from sklearn.manifold import TSNE
     from evaluation import main_test
@@ -1282,14 +1333,28 @@ def comprehensive_evaluation_after_epoch(
         all_training_latents = np.array(all_training_latents)
         print(f"REAL OPTIMIZED training latents shape: {all_training_latents.shape}")
 
-        # Apply t-SNE
+        # Apply t-SNE with safe fallback
         print("  Applying t-SNE to REAL OPTIMIZED training latents...")
-        tsne = TSNE(n_components=2, random_state=data_settings.get('training_seed', 42), perplexity=min(30, max(1, len(all_training_latents)//4)))
-        tsne_coords = tsne.fit_transform(all_training_latents)
+        try:
+            tsne = TSNE(n_components=2, random_state=data_settings.get('training_seed', 42), perplexity=min(30, max(1, len(all_training_latents)//4)))
+            tsne_coords = tsne.fit_transform(all_training_latents)
+        except Exception as e:
+            print(f"  [WARNING] t-SNE failed ({e}); falling back to PCA")
+            try:
+                from sklearn.decomposition import PCA
+                pca = PCA(n_components=2, random_state=data_settings.get('training_seed', 42))
+                tsne_coords = pca.fit_transform(all_training_latents)
+                print("  [OK] PCA fallback succeeded")
+            except Exception as e2:
+                print(f"  [ERROR] PCA fallback also failed: {e2}; skipping latent plot generation")
+                tsne_coords = None
 
-        # Create visualization
-        unique_keys = sorted(list(set(all_training_keys)))
-        unique_encoders = sorted(list(set(all_encoder_indices)))
+        if tsne_coords is None:
+            print("  [WARNING] Skipping latent visualization due to embedding failure")
+        else:
+            # Create visualization
+            unique_keys = sorted(list(set(all_training_keys)))
+            unique_encoders = sorted(list(set(all_encoder_indices)))
         
         # Debug: Show encoder distribution
         encoder_counts = {}
@@ -1317,9 +1382,9 @@ def comprehensive_evaluation_after_epoch(
             print(f"  [WARNING] Too many keys ({len(unique_keys)}), using continuous color map")
             key_colors = {k: plt.cm.viridis(i / len(unique_keys)) for i, k in enumerate(unique_keys)}
 
-        encoder_markers = ['o', 's', '^', 'v', 'D', 'p', '*', 'h', 'H', '+']
+            encoder_markers = ['o', 's', '^', 'v', 'D', 'p', '*', 'h', 'H', '+']
 
-        plt.figure(figsize=(16, 12))
+            plt.figure(figsize=(16, 12))
         
         # Plot by key (colored) and encoder (markers) WITH LABELS
         for coord, key, encoder_idx in zip(tsne_coords, all_training_keys, all_encoder_indices):
@@ -1362,25 +1427,26 @@ def comprehensive_evaluation_after_epoch(
             legend_elements.append(plt.Line2D([0], [0], marker=marker, color='k', linestyle='',
                                                markersize=8, label=f'Encoder {encoder_idx}'))
 
-        plt.legend(handles=legend_elements, loc='upper right', fontsize=8, ncol=2)
-        plt.title(f'REAL Training Latent Space - Epoch {epoch+1}\n(Actual samples used in training - Colored by Key, Markers by Encoder)', fontsize=12)
-        plt.xlabel('t-SNE Dimension 1')
-        plt.ylabel('t-SNE Dimension 2')
+            plt.legend(handles=legend_elements, loc='upper right', fontsize=8, ncol=2)
+            plt.title(f'REAL Training Latent Space - Epoch {epoch+1}\n(Actual samples used in training - Colored by Key, Markers by Encoder)', fontsize=12)
+            plt.xlabel('Dim 1')
+            plt.ylabel('Dim 2')
 
-        plot_path = os.path.join(run_dir, 'latent_space_plots', f'training_latent_space_epoch_{epoch+1}.png')
-        os.makedirs(os.path.dirname(plot_path), exist_ok=True)
-        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-        plt.close()
+            plot_path = os.path.join(run_dir, 'latent_space_plots', f'training_latent_space_epoch_{epoch+1}.png')
+            os.makedirs(os.path.dirname(plot_path), exist_ok=True)
+            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
 
-        print(f"  [OK] REAL training latent space plot saved: {plot_path}")
-        print(f"  [INFO] Visualization shows {len(all_training_latents)} REAL samples from {len(unique_keys)} unique keys used in training")
+            print(f"  [OK] REAL training latent space plot saved: {plot_path}")
+            print(f"  [INFO] Visualization shows {len(all_training_latents)} REAL samples from {len(unique_keys)} unique keys used in training")
 
         if wandb_logger:
             try:
                 import wandb
                 # Use consistent key for single panel with epoch as step
                 wandb_logger._safe_log({
-                    'training_latent_space': wandb.Image(plot_path)
+                    'training_latent_space': wandb.Image(plot_path),
+                    'epoch': epoch+1 if epoch is not None else None  # ✅ ADD: Explicit epoch field
                 }, step_hint=epoch+1)
                 print(f"  [OK] REAL training latent space plot uploaded to wandb")
             except Exception as e:
@@ -1412,7 +1478,7 @@ def comprehensive_evaluation_after_epoch(
                     encoder_task_mapping[encoder_idx].append(key)
             print(f"    DEBUG: Using actual sampled keys (fallback): {encoder_task_mapping}")
 
-        plt.figure(figsize=(16, 12))
+            plt.figure(figsize=(16, 12))
         # Fix: Handle None encoder_idx in color mapping
         encoder_colors = {enc: plt.cm.tab10(enc % 10) for enc in unique_encoders if enc is not None}
         # Add a default color for None encoder_idx
@@ -1457,24 +1523,25 @@ def comprehensive_evaluation_after_epoch(
                     actual_unique = list(set(actual_keys))
                     print(f"      Encoder {enc_idx}: {len(actual_unique)} unique keys sampled")
 
-        plt.legend(handles=legend_elements, loc='upper right')
-        plt.title(f'REAL Encoder-Specific Training Latent Space - Epoch {epoch+1}\n(Actual samples used in training - Colored by Encoder, Tasks Listed in Legend)')
-        plt.xlabel('t-SNE Dimension 1')
-        plt.ylabel('t-SNE Dimension 2')
+            plt.legend(handles=legend_elements, loc='upper right')
+            plt.title(f'REAL Encoder-Specific Training Latent Space - Epoch {epoch+1}\n(Actual samples used in training - Colored by Encoder, Tasks Listed in Legend)')
+            plt.xlabel('Dim 1')
+            plt.ylabel('Dim 2')
 
-        encoder_plot_path = os.path.join(run_dir, 'latent_space_plots', f'encoder_training_latent_space_epoch_{epoch+1}.png')
-        os.makedirs(os.path.dirname(encoder_plot_path), exist_ok=True)
-        plt.savefig(encoder_plot_path, dpi=300, bbox_inches='tight')
-        plt.close()
+            encoder_plot_path = os.path.join(run_dir, 'latent_space_plots', f'encoder_training_latent_space_epoch_{epoch+1}.png')
+            os.makedirs(os.path.dirname(encoder_plot_path), exist_ok=True)
+            plt.savefig(encoder_plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
 
-        print(f"  [OK] REAL encoder-specific training latent space plot saved: {encoder_plot_path}")
+            print(f"  [OK] REAL encoder-specific training latent space plot saved: {encoder_plot_path}")
 
         if wandb_logger:
             try:
                 import wandb
                 # Use consistent key for single panel with epoch as step
                 wandb_logger._safe_log({
-                    'encoder_training_latent_space': wandb.Image(encoder_plot_path)
+                    'encoder_training_latent_space': wandb.Image(encoder_plot_path),
+                    'epoch': epoch+1 if epoch is not None else None  # ✅ ADD: Explicit epoch field
                 }, step_hint=epoch+1)
                 print(f"  [OK] REAL encoder-specific training latent space plot uploaded to wandb")
             except Exception as e:
@@ -1488,6 +1555,11 @@ def comprehensive_evaluation_after_epoch(
     eval_results = None
     # Use evaluation keys from settings instead of hardcoded selection
     eval_keys = evaluation_settings.get('eval_keys', training_keys[:2] if len(training_keys) >= 2 else training_keys)
+
+    # Handle "all" evaluation keys similar to training keys
+    from utils.evaluation_utils import get_evaluation_keys_with_all_support
+    eval_keys = get_evaluation_keys_with_all_support(eval_keys, evaluation_settings.get('n_max_eval_keys', 10))
+
     n_samples = evaluation_settings.get('eval_n_samples', 2)
     n_queries = evaluation_settings.get('eval_n_queries', 10)
     eval_seed = data_settings.get('eval_seed', 42)
@@ -1497,6 +1569,26 @@ def comprehensive_evaluation_after_epoch(
     print(f"  Evaluation seed: {eval_seed}")
 
     try:
+        # Check if we already have per-key OOD samples cached
+        if not hasattr(model, '_cached_per_key_ood_samples'):
+            model._cached_per_key_ood_samples = {}
+        
+        # Check if OOD evaluation is enabled
+        eval_data_settings = settings.get_evaluation_data_settings()
+        use_ood_for_evaluation = eval_data_settings.get('use_ood_for_evaluation', True)
+        
+        if use_ood_for_evaluation:
+            print(f"  Using OOD evaluation data from original ARC tasks...")
+            # Generate OOD evaluation dataset using original ARC tasks
+            from utils.data_preparation import generate_ood_evaluation_dataset
+            if not hasattr(model, '_cached_ood_evaluation_data'):
+                model._cached_ood_evaluation_data = generate_ood_evaluation_dataset(
+                    eval_keys, n_samples, n_queries, seed=eval_seed
+                )
+                print(f"  [OK] Generated and cached OOD evaluation data for {len(eval_keys)} keys")
+            else:
+                print(f"  [OK] Using cached OOD evaluation data for {len(eval_keys)} keys")
+        
         eval_results = main_test(
             model=model,
             keys=eval_keys,
@@ -1519,9 +1611,19 @@ def comprehensive_evaluation_after_epoch(
 
         if eval_results and 'key_results' in eval_results:
             print("  [OK] Evaluation completed successfully")
+            
+            # ✅ FIX: Limit trajectory plots to n_max_trajectory_plots
+            n_max_trajectory_plots = evaluation_settings.get('n_max_trajectory_plots', 4)
+            trajectory_plot_count = 0
+            
             for key, key_results in eval_results['key_results'].items():
+                # ✅ ADD: Check if we've reached the maximum number of trajectory plots
+                if trajectory_plot_count >= n_max_trajectory_plots:
+                    print(f"  [INFO] Reached maximum trajectory plots ({n_max_trajectory_plots}), skipping remaining keys")
+                    break
+                    
                 if 'trajectory_info' in key_results and key_results['trajectory_info']:
-                    print(f"  Generating trajectory plot for key '{key}'...")
+                    print(f"  Generating trajectory plot for key '{key}' ({trajectory_plot_count + 1}/{n_max_trajectory_plots})...")
                     trajectory_info = key_results['trajectory_info']
 
                     # Handle trajectory_info structure - could be list or dict
@@ -1552,17 +1654,28 @@ def comprehensive_evaluation_after_epoch(
                     if 'losses' in actual_trajectory:
                         print(f"    DEBUG: losses length: {len(actual_trajectory['losses'])}")
 
+                    # Get OOD settings and task keys for proper labeling (moved outside try blocks)
+                    ood_enabled = eval_data_settings.get('use_ood_for_evaluation', True)
+                    ood_task_keys = []
+                    if 'raw_data' in key_results and 'ood_task_keys' in key_results['raw_data']:
+                        ood_task_keys = key_results['raw_data']['ood_task_keys']
+                        print(f"    DEBUG: Using OOD task keys for trajectory plot: {ood_task_keys}")
+                    
                     try:
+                        # Use first OOD task key for trajectory plot if available
+                        trajectory_key = ood_task_keys[0] if ood_task_keys and len(ood_task_keys) > 0 else key
                         trajectory_plot_path = create_standalone_latent_space_plot(
                             trajectory_info=actual_trajectory,
                             model=model,
                             save_dir=run_dir,
                             epoch=epoch,
                             sample_idx=0,
-                            evaluated_key=key,
+                            evaluated_key=trajectory_key,  # Use OOD task key instead of evaluation key
                             device=device,
                             wandb_logger=wandb_logger,
-                            eval_results=eval_results
+                            eval_results=eval_results,
+                            ood_enabled=ood_enabled,
+                            ood_task_keys=ood_task_keys
                         )
                         if trajectory_plot_path and os.path.exists(trajectory_plot_path):
                             print(f"[OK] Trajectory plot saved: {trajectory_plot_path}")
@@ -1574,11 +1687,14 @@ def comprehensive_evaluation_after_epoch(
                     # ✅ ADD: Generate and upload main trajectory plot with reconstructions
                     try:
                         from LPN_reproduction.evaluate_trajectory import visualize_comprehensive_trajectory
+                        # ✅ FIX: Use OOD task key in filename if available
+                        reconstruction_key = ood_task_keys[0] if ood_task_keys and len(ood_task_keys) > 0 else key
                         main_reconstruction_path = os.path.join(
-                            run_dir, "trajectory_plots", f"main_reconstruction_{key}_epoch_{epoch+1}.png"
+                            run_dir, "trajectory_plots", f"main_reconstruction_{reconstruction_key}_epoch_{epoch+1}.png"
                         )
                         visualize_comprehensive_trajectory(
-                            actual_trajectory, model, main_reconstruction_path, run_dir, device=device
+                            actual_trajectory, model, main_reconstruction_path, run_dir, device=device,
+                            ood_enabled=ood_enabled, ood_task_keys=ood_task_keys
                         )
                         print(f"[OK] Main trajectory plot with reconstructions saved: {main_reconstruction_path}")
                         
@@ -1595,6 +1711,9 @@ def comprehensive_evaluation_after_epoch(
                                 print(f"[WARNING] Could not upload main trajectory plot to wandb: {e}")
                     except Exception as e:
                         print(f"[WARNING] Main trajectory plot generation failed for key {key}: {e}")
+
+                    trajectory_plot_count += 1
+
                 else:
                     print(f"    [WARNING] Key '{key}' not found in trajectory_info")
         else:
@@ -1704,7 +1823,8 @@ def comprehensive_evaluation_after_epoch(
                             import wandb
                             # Use consistent key for single panel with epoch as step
                             wandb_logger._safe_log({
-                                'evaluation_latent_space': wandb.Image(plot_path)
+                                'evaluation_latent_space': wandb.Image(plot_path),
+                                'epoch': epoch+1 if epoch is not None else None  # ✅ ADD: Explicit epoch field
                             }, step_hint=epoch+1)
                             print(f"  [ OK ] Basic evaluation latent space plot uploaded to wandb")
                         except Exception as e:

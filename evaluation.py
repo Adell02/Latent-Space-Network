@@ -679,14 +679,48 @@ def main_test(model, keys, run_dir, n_samples, n_queries, seed, device='cuda',
         print("-" * 50)
         
         try:
-            # Generate key-specific support samples
-            print(f"  Generating {n_samples} support samples and {n_queries} query samples for key '{key}'...")
-            all_needed = n_samples + n_queries
-            _, _, _, all_input_sequences, all_output_sequences = generate_and_process_tasks(key, all_needed)
-            input_samples_sequences = all_input_sequences[:n_samples]
-            output_samples_sequences = all_output_sequences[:n_samples]
-            input_queries_sequences = all_input_sequences[n_samples:]
-            output_queries_sequences = all_output_sequences[n_samples:]
+            # Initialize OOD variables
+            ood_task_keys = []  # ✅ FIX: Initialize ood_task_keys before conditional blocks
+            
+            # Check if OOD evaluation is enabled
+            eval_data_settings = settings.get_evaluation_data_settings()
+            use_ood_for_evaluation = eval_data_settings.get('use_ood_for_evaluation', True)
+            
+            if use_ood_for_evaluation:
+                print(f"  Using OOD evaluation data from original ARC tasks...")
+                
+                # Generate OOD evaluation dataset using original ARC tasks
+                from utils.data_preparation import generate_ood_evaluation_dataset
+                ood_evaluation_data = generate_ood_evaluation_dataset(
+                    keys, n_samples, n_queries, seed=seed
+                )
+                
+                if not ood_evaluation_data or key not in ood_evaluation_data:
+                    print(f"  [WARNING] No OOD evaluation data available for key '{key}', falling back to synthetic samples")
+                    use_ood_for_evaluation = False
+                else:
+                    # Use OOD evaluation data
+                    key_ood_data = ood_evaluation_data[key]
+                    input_samples_sequences = key_ood_data['support']['input_sequences']
+                    output_samples_sequences = key_ood_data['support']['output_sequences']
+                    input_queries_sequences = key_ood_data['query']['input_sequences']
+                    output_queries_sequences = key_ood_data['query']['output_sequences']
+                    
+                    # Store the actual OOD task keys used
+                    ood_task_keys = key_ood_data.get('ood_task_keys', [])
+                    
+                    print(f"  Using {len(input_samples_sequences)} support and {len(input_queries_sequences)} query OOD samples for key '{key}'")
+                    print(f"  OOD samples from tasks: {ood_task_keys}")
+            else:
+                # Use synthetic samples for evaluation
+                print(f"  Generating {n_samples} support samples and {n_queries} query samples for key '{key}'...")
+                all_needed = n_samples + n_queries
+                _, _, _, all_input_sequences, all_output_sequences = generate_and_process_tasks(key, all_needed)
+                
+                input_samples_sequences = all_input_sequences[:n_samples]
+                output_samples_sequences = all_output_sequences[:n_samples]
+                input_queries_sequences = all_input_sequences[n_samples:]
+                output_queries_sequences = all_output_sequences[n_samples:]
             
             if not input_samples_sequences or not input_queries_sequences:
                 print(f"  [ERROR] Failed to generate data for key '{key}' - skipping")
@@ -738,7 +772,8 @@ def main_test(model, keys, run_dir, n_samples, n_queries, seed, device='cuda',
                     'input_samples_sequences': input_samples_sequences,
                     'output_samples_sequences': output_samples_sequences,
                     'input_queries_sequences': input_queries_sequences,
-                    'output_queries_sequences': output_queries_sequences
+                    'output_queries_sequences': output_queries_sequences,
+                    'ood_task_keys': ood_task_keys
                 }
             }
             
@@ -884,6 +919,11 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
     task_averaged_latents = {}   # Store averaged latents for query inference
     task_trajectories = {}       # Store trajectory information for each task
     
+    # Collect evaluation latent data on-the-fly to avoid redundant passes
+    support_poe_latent_zs = []
+    support_poe_log_vars = []
+    support_keys_list = []
+    
     for task_key, support_samples in task_samples.items():
         print(f"\nProcessing task '{task_key}' with {len(support_samples)} support samples...")
         
@@ -905,6 +945,23 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
             )
             
             optimized_latents.append(optimized_z)
+            # Collect optimized support latent and an associated logvar (encoder logvar if available, else zeros)
+            try:
+                latent_dim = getattr(model, 'latent_dim', optimized_z.shape[-1])
+            except Exception:
+                latent_dim = optimized_z.shape[-1]
+
+            support_poe_latent_zs.append(optimized_z[0].detach().cpu().numpy())
+            enc_logvar = None
+            try:
+                if trajectory and isinstance(trajectory.get('encoder_log_var', None), torch.Tensor):
+                    enc_logvar = trajectory['encoder_log_var'][0].detach().cpu().numpy()
+            except Exception:
+                enc_logvar = None
+            if enc_logvar is None:
+                enc_logvar = np.zeros((latent_dim,), dtype=np.float32)
+            support_poe_log_vars.append(enc_logvar)
+            support_keys_list.append(task_key)
             
             # Add input/target sample data to trajectory for reconstruction visualization
             if trajectory:
@@ -1110,6 +1167,26 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                     'exact_match': exact_match,
                     'task_key': task_key
                 })
+
+                # Collect query latent representations for evaluation visualization (PoE or single encoder)
+                try:
+                    if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
+                        # We will compute encoder latents and PoE below for richer viz
+                        pass
+                    else:
+                        # Single encoder: capture encoder latent (non-optimized)
+                        mu_q, logvar_q, _ = model.encoder(query_input, query_target)
+                        z_q = model.reparameterize(mu_q, logvar_q)
+                        # Initialize containers if not yet
+                        if 'query_poe_latent_zs' not in locals():
+                            query_poe_latent_zs = []
+                            query_poe_log_vars = []
+                            query_keys_list = []
+                        query_poe_latent_zs.append(z_q[0].detach().cpu().numpy())
+                        query_poe_log_vars.append(logvar_q[0].detach().cpu().numpy())
+                        query_keys_list.append(task_key)
+                except Exception:
+                    pass
     # === ADDING QUERY SAMPLE INFORMATION TO TRAJECTORY DATA ===
     print(f"\n=== DEBUG: Adding query sample information to trajectory data ===")
     print(f"DEBUG: Number of task_trajectories: {len(task_trajectories)}")
@@ -1144,12 +1221,12 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                 input_tensor = torch.tensor(first_query['input'], dtype=torch.float32).unsqueeze(0).to(device)
                 target_tensor = torch.tensor(trajectory['query_target'], dtype=torch.float32).unsqueeze(0).to(device)
                 
-                # Ensure input has correct shape (should be 900 for grid input)
-                if input_tensor.shape[-1] != 900:
-                    if input_tensor.shape[-1] > 900:
-                        input_tensor = input_tensor[..., :900]
+                # Ensure input has correct shape (should be 902 for complete sequence including shape tokens)
+                if input_tensor.shape[-1] != 902:
+                    if input_tensor.shape[-1] > 902:
+                        input_tensor = input_tensor[..., :902]
                     else:
-                        padding = torch.zeros(1, 900 - input_tensor.shape[-1], device=device)
+                        padding = torch.zeros(1, 902 - input_tensor.shape[-1], device=device)
                         input_tensor = torch.cat([input_tensor, padding], dim=-1)
                 
                 # Ensure input is 2D: [batch, seq_len]
@@ -1164,28 +1241,10 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                         padding = torch.zeros(1, 902 - target_tensor.shape[-1], device=device)
                         target_tensor = torch.cat([target_tensor, padding], dim=-1)
                 
-                # FIXED: Handle sequence length mismatch properly
-                if input_tensor.shape[1] != target_tensor.shape[1]:
-                    print(f"DEBUG: Shape mismatch detected: input={input_tensor.shape}, target={target_tensor.shape}")
-                    
-                    # Handle the case where input is 900 and target is 902 (missing shape info)
-                    if input_tensor.shape[1] == 900 and target_tensor.shape[1] == 902:
-                        # Extract shape info from target and add to input
-                        target_shape = target_tensor[:, 900:902]
-                        input_grid = input_tensor[:, :900]
-                        input_tensor = torch.cat([input_grid, target_shape], dim=1)
-                        print(f"DEBUG: Fixed input sequence length: {input_tensor.shape}")
-                    else:
-                        # Use the minimum length to avoid index errors
-                        min_seq_len = min(input_tensor.shape[1], target_tensor.shape[1])
-                        if min_seq_len == 0:
-                            raise ValueError(f"Both tensors have zero sequence length after truncation")
-                        
-                        # Truncate both tensors to the same length
-                        input_tensor = input_tensor[:, :min_seq_len]
-                        target_tensor = target_tensor[:, :min_seq_len]
-                        print(f"DEBUG: Truncated to shape: input={input_tensor.shape}, target={target_tensor.shape}")
-                
+                # Verify both sequences have the correct length (902)
+                if input_tensor.shape[1] != target_tensor.shape[1] or input_tensor.shape[1] != 902:
+                    raise ValueError(f"Sequence length mismatch: input={input_tensor.shape}, target={target_tensor.shape}. Both should be [batch, 902]")
+                                
                 if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
                     print(f"DEBUG: Model is multi-encoder, num_encoders: {num_encoders}")
                     
@@ -1298,6 +1357,14 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                                 'shape_logits': shape_logits.detach().cpu().numpy(),
                                 'grid_logits': grid_logits.detach().cpu().numpy()
                             }
+                            # Collect query PoE latent for evaluation viz
+                            if 'query_poe_latent_zs' not in locals():
+                                query_poe_latent_zs = []
+                                query_poe_log_vars = []
+                                query_keys_list = []
+                            query_poe_latent_zs.append(poe_z_initial[0].detach().cpu().numpy())
+                            query_poe_log_vars.append(poe_logvar[0].detach().cpu().numpy())
+                            query_keys_list.append(task_key)
                             print(f"DEBUG: Successfully generated POE initial reconstruction")
                         except Exception as e:
                             print(f"      Warning: Could not generate POE initial reconstruction: {e}")
@@ -1364,8 +1431,8 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
     print(f"Grid accuracy: {grid_accuracy:.4f}")
     print(f"Exact match accuracy: {exact_accuracy:.4f}")
     
-    # Prepare latent data for visualization (per-sample latents directly from encoder)
-    print(f"\n=== COLLECTING LATENT DATA FOR VISUALIZATION ===")
+    # Prepare latent data for visualization using collected latents (avoid redundant re-encoding)
+    print(f"\n=== COLLECTING LATENT DATA FOR VISUALIZATION (from collected latents) ===")
     
     # Initialize trajectory_info and transfer trajectory data from task_trajectories
     trajectory_info = []
@@ -1373,89 +1440,29 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
         for trajectory in trajectories:
             trajectory_info.append(trajectory)
     print(f"  [OK] Collected {len(trajectory_info)} trajectory samples for visualization")
-    
-    # Collect all support and query samples for latent space visualization
-    all_support_latents = []
-    all_query_latents = []
-    all_support_keys = []
-    all_query_keys = []
-    all_support_log_vars = []  # Add logvar storage
-    all_query_log_vars = []    # Add logvar storage
-    
-    # Extract support latents directly from encoder (no optimization for visualization)
-    for task_key, support_samples in task_samples.items():
-        for input_seq, target_seq in support_samples:
-            with torch.no_grad():
-                if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
-                    if encoder_idx is not None:
-                        mu, logvar, _ = model.multi_encoder.encoders[encoder_idx](input_seq, target_seq)
-                    else:
-                        result = model(input_seq, target_seq)
-                        (shape_logits, grid_logits), mu, logvar, _ = result
-                else:
-                    _, mu, logvar = model(input_seq, target_seq)
-                
-                # Sample from encoder posterior (original Bonnet approach)
-                z = model.reparameterize(mu, logvar)
-                all_support_latents.append(z[0].cpu().numpy())
-                all_support_log_vars.append(logvar[0].cpu().numpy())  # Store logvar
-                all_support_keys.append(task_key)
-    
-    # Extract query latents directly from encoder
-    with torch.no_grad():
-        for batch in queries_dataloader:
-            if len(batch) >= 3:
-                batch_input_q, batch_target_q, batch_keys = batch[:3]
-            else:
-                batch_input_q, batch_target_q = batch[:2]
-                batch_keys = None
-            
-            batch_input_q = batch_input_q.to(device)
-            batch_target_q = batch_target_q.to(device)
-            
-            for i in range(batch_input_q.size(0)):
-                query_input = batch_input_q[i:i+1]
-                query_target = batch_target_q[i:i+1]
-                
-                if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
-                    if encoder_idx is not None:
-                        mu, logvar, _ = model.multi_encoder.encoders[encoder_idx](query_input, query_target)
-                    else:
-                        result = model(query_input, query_target)
-                        (shape_logits, grid_logits), mu, logvar, _ = result
-                else:
-                    _, mu, logvar = model(query_input, query_target)
-                
-                # Sample from encoder posterior (original Bonnet approach)
-                z = model.reparameterize(mu, logvar)
-                all_query_latents.append(z[0].cpu().numpy())
-                all_query_log_vars.append(logvar[0].cpu().numpy())  # Store logvar
-                
-                # Determine task key
-                if batch_keys is not None and query_key_mapping is not None:
-                    key_idx = batch_keys[i].item()
-                    task_key = query_key_mapping[key_idx]
-                else:
-                    task_key = "unknown"
-                all_query_keys.append(task_key)
-    
-    # Also create evaluation_latent_data in the expected format for plotting with logvars
+    # Build evaluation_latent_data directly from collected lists
+    # Ensure query containers exist even if multi-encoder single path was not hit
+    if 'query_poe_latent_zs' not in locals():
+        query_poe_latent_zs = []
+        query_poe_log_vars = []
+        query_keys_list = []
+
     evaluation_latent_data = {
         'support': {
             'poe': {
-                'latent_zs': all_support_latents,
-                'latent_log_vars': all_support_log_vars,  # Add logvars
-                'keys': all_support_keys
+                'latent_zs': support_poe_latent_zs,
+                'latent_log_vars': support_poe_log_vars,
+                'keys': support_keys_list
             },
-            'task_keys': list(set(all_support_keys))
+            'task_keys': list(set(support_keys_list))
         },
         'query': {
             'poe': {
-                'latent_zs': all_query_latents,
-                'latent_log_vars': all_query_log_vars,    # Add logvars
-                'keys': all_query_keys
+                'latent_zs': query_poe_latent_zs,
+                'latent_log_vars': query_poe_log_vars,
+                'keys': query_keys_list
             },
-            'task_keys': list(set(all_query_keys))
+            'task_keys': list(set(query_keys_list))
         }
     }
     

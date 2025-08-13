@@ -1,44 +1,11 @@
 import numpy as np
-import os 
+import os
+import json
+import random
+from utils.settings_manager import settings 
 
 
-def transform_grid_to_sequence(grid:np.ndarray):
-    """
-    Transform a 2D grid into a sequence as described in the paper:
-    - Pad grid to 30x30
-    - Add shape information (2 values for rows and columns)
-    - Flatten in raster-scan fashion
-
-    Args:
-        grid: 2D numpy array of pixel values
-    Returns:
-        sequence: 1D numpy array of length 902 (2 shape values + 900 pixel values)
-    """
-    # Get original shape
-    rows, cols = grid.shape
-
-    # Validate dimensions (should be <= 30 for ARC)
-    if rows > 30 or cols > 30:
-        raise ValueError(f"Grid dimensions ({rows}, {cols}) exceed maximum of 30x30")
-    
-    # Validate pixel values (should be 0-9 for ARC)
-    if grid.min() < 0 or grid.max() > 9:
-        raise ValueError(f"Grid contains invalid pixel values. Range: [{grid.min()}, {grid.max()}], expected: [0, 9]")
-
-    # Create the shape prefix (2 values)
-    shape_info = np.array([rows, cols])
-
-    # Pad the grid to 30x30
-    padded_grid = np.zeros((30, 30), dtype=int)
-    padded_grid[:rows, :cols] = grid
-
-    # Flatten the padded grid in raster-scan fashion
-    flattened_grid = padded_grid.flatten()
-
-    # Concatenate shape info with flattened grid
-    sequence = np.concatenate([flattened_grid,shape_info])
-
-    return sequence
+from utils.grid_utils import transform_grid_to_sequence
 
 
 def prepare_input_output_pair(input_grid, output_grid):
@@ -176,17 +143,19 @@ def split_dataset_by_keys_for_multi_encoder(task_keys, num_encoders, n_examples_
                 data_statistics['task_distribution_details'][key] = {
                     'encoder_idx': encoder_idx,
                     'generated_samples': len(all_input_sequences),
-                    'generation_successful': True
+                    'generation_successful': True,
+                    'data_type': 'synthetic'  # ✅ Track data type
                 }
                 
-                print(f"    [ OK ] Task '{key}' → Encoder {encoder_idx} ({len(all_input_sequences)} samples generated)")
+                print(f"    [ OK ] Task '{key}' → Encoder {encoder_idx} ({len(all_input_sequences)} synthetic samples)")
             else:
-                print(f"    ❌ Task '{key}' → Failed to generate data")
+                print(f"    ❌ Task '{key}' → Failed to generate synthetic data")
                 data_statistics['task_distribution_details'][key] = {
                     'encoder_idx': None,
                     'generated_samples': 0,
                     'generation_successful': False,
-                    'error': 'Data generation failed'
+                    'data_type': 'synthetic',
+                    'error': 'Synthetic data generation failed'
                 }
         
         if num_keys < num_encoders:
@@ -230,17 +199,19 @@ def split_dataset_by_keys_for_multi_encoder(task_keys, num_encoders, n_examples_
                     data_statistics['task_distribution_details'][key] = {
                         'encoder_idx': encoder_idx,
                         'generated_samples': len(all_input_sequences),
-                        'generation_successful': True
+                        'generation_successful': True,
+                        'data_type': 'synthetic'  # ✅ Track data type
                     }
                     
-                    print(f"      [ OK ] Task '{key}' → Encoder {encoder_idx} ({len(all_input_sequences)} samples)")
+                    print(f"      [ OK ] Task '{key}' → Encoder {encoder_idx} ({len(all_input_sequences)} synthetic samples)")
                 else:
-                    print(f"      ❌ Task '{key}' → Failed to generate data")
+                    print(f"      ❌ Task '{key}' → Failed to generate synthetic data")
                     data_statistics['task_distribution_details'][key] = {
                         'encoder_idx': encoder_idx,
                         'generated_samples': 0,
                         'generation_successful': False,
-                        'error': 'Data generation failed'
+                        'data_type': 'synthetic',
+                        'error': 'Synthetic data generation failed'
                     }
             
             print(f"    Encoder {encoder_idx} total: {encoder_total_samples} samples from {len(encoder_keys)} tasks")
@@ -302,16 +273,155 @@ def split_dataset_by_keys_for_multi_encoder(task_keys, num_encoders, n_examples_
     return encoder_splits, key_to_encoder_mapping, data_statistics
 
 def _generate_key_data(key, n_examples, generate_func):
-    """Generate data for a single key efficiently with detailed logging."""
+    """Generate TRAINING data for a single key using synthetic generators."""
+    # ✅ ALWAYS use synthetic generation for training
     try:
         _, _, _, input_sequences, output_sequences = generate_func(key, n_examples)
         if not input_sequences or not output_sequences:
             print(f"      Warning: Empty sequences generated for key '{key}'")
             return [], []
+        print(f"      [OK] Generated {len(input_sequences)} synthetic training samples for key '{key}'")
         return input_sequences, output_sequences
     except Exception as e:
-        print(f"      Error generating data for key '{key}': {e}")
+        print(f"      Error generating synthetic data for key '{key}': {e}")
         return [], []
+
+def _generate_ood_evaluation_data(key, n_examples):
+    """Generate EVALUATION data for a single key using original ARC tasks."""
+    # ✅ Use original ARC tasks ONLY for evaluation
+    try:
+        # Get available original ARC evaluation tasks
+        available_tasks = get_available_evaluation_tasks()
+        if not available_tasks:
+            print(f"      Warning: No original ARC evaluation tasks found for key '{key}'")
+            return [], []
+        
+        # Use original ARC evaluation tasks for OOD evaluation
+        _, _, _, input_sequences, output_sequences = load_and_process_original_arc_evaluation_tasks(
+            available_tasks, n_examples_per_task=n_examples
+        )
+        
+        if not input_sequences or not output_sequences:
+            print(f"      Warning: No out-of-distribution samples loaded for key '{key}'")
+            return [], []
+        
+        # Randomly sample the required number of examples
+        if len(input_sequences) >= n_examples:
+            indices = np.random.choice(len(input_sequences), n_examples, replace=False)
+            input_sequences = [input_sequences[i] for i in indices]
+            output_sequences = [output_sequences[i] for i in indices]
+            print(f"      [OK] Generated {len(input_sequences)} OOD evaluation samples for key '{key}'")
+            return input_sequences, output_sequences
+        else:
+            print(f"      Warning: Only {len(input_sequences)} OOD samples available for key '{key}'")
+            return input_sequences, output_sequences
+            
+    except Exception as e:
+        print(f"      Error generating OOD data for key '{key}': {e}")
+        return [], []
+
+def get_available_evaluation_tasks():
+    """
+    Get list of available evaluation task keys.
+    
+    Returns:
+        List[str]: List of task keys available for out-of-distribution evaluation
+    """
+    eval_dir = 're_arc/arc_original/evaluation'
+    if not os.path.exists(eval_dir):
+        return []
+    
+    task_files = [f for f in os.listdir(eval_dir) if f.endswith('.json')]
+    task_keys = [f.replace('.json', '') for f in task_files]
+    return sorted(task_keys)
+
+def load_original_arc_evaluation_task(task_key):
+    """
+    Load an original ARC evaluation task from the evaluation directory.
+    
+    Args:
+        task_key (str): The task key (filename without .json extension)
+        
+    Returns:
+        dict: The task data with 'train' and 'test' examples
+    """
+    file_path = f're_arc/arc_original/evaluation/{task_key}.json'
+    
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Evaluation task file not found: {file_path}")
+    
+    with open(file_path, 'r') as fp:
+        task_data = json.load(fp)
+    
+    return task_data
+
+def load_and_process_original_arc_evaluation_tasks(task_keys, n_examples_per_task=10):
+    """
+    Load and process original ARC evaluation tasks for out-of-distribution sampling.
+    
+    Args:
+        task_keys: List of task keys to load from original ARC evaluation
+        n_examples_per_task: Number of examples to use per task
+        
+    Returns:
+        Tuple of (generated_examples, input_grids, output_grids, input_sequences, output_sequences)
+    """
+    generated_examples = []
+    input_grids = []
+    output_grids = []
+    input_sequences = []
+    output_sequences = []
+    
+    for task_key in task_keys:
+        try:
+            # Load the original ARC evaluation task
+            task_data = load_original_arc_evaluation_task(task_key)
+            
+            # Combine train and test examples
+            all_examples = task_data.get('train', []) + task_data.get('test', [])
+            
+            # Sample n_examples_per_task examples (or all if fewer available)
+            n_available = len(all_examples)
+            n_to_use = min(n_examples_per_task, n_available)
+            
+            if n_to_use == 0:
+                print(f"Warning: No examples found for task {task_key}")
+                continue
+                
+            # Randomly sample examples
+            selected_examples = random.sample(all_examples, n_to_use)
+            
+            for example in selected_examples:
+                # Original ARC format has 'input' and 'output' as 2D arrays
+                input_grid = np.array(example['input'])
+                output_grid = np.array(example['output'])
+                
+                # Convert to the format expected by the rest of the pipeline
+                processed_example = {
+                    'input': input_grid.tolist(),
+                    'output': output_grid.tolist()
+                }
+                
+                generated_examples.append(processed_example)
+                input_grids.append(input_grid)
+                output_grids.append(output_grid)
+                
+                # Transform to sequences
+                input_seq = transform_grid_to_sequence(input_grid)
+                output_seq = transform_grid_to_sequence(output_grid)
+                
+                input_sequences.append(input_seq)
+                output_sequences.append(output_seq)
+                
+            print(f"Loaded {n_to_use} examples from original ARC task {task_key}")
+            
+        except Exception as e:
+            print(f"Error loading original ARC task {task_key}: {e}")
+            continue
+    
+    print(f"Total loaded {len(generated_examples)} out-of-distribution examples from {len(task_keys)} tasks")
+    
+    return generated_examples, input_grids, output_grids, input_sequences, output_sequences
 
 def _distribute_extra_samples(encoder_datasets, num_keys, num_encoders):
     """Distribute samples from populated encoders to empty ones with detailed logging."""
@@ -458,3 +568,250 @@ def safe_extract_reconstruction_grid(shape_logits, grid_logits):
             
     except Exception as e:
         return None, 0, 0
+
+def generate_per_key_ood_samples(evaluation_keys, n_samples_per_key, n_queries_per_key, seed=42):
+    """
+    Generate per-key out-of-distribution sample sets with fixed support/query samples for each evaluation key.
+    ✅ CORRECT: Train examples → Support samples, Test examples → Query samples
+    """
+    # Set random seed for reproducible sampling
+    random.seed(seed)
+    
+    # Get all available original ARC evaluation tasks
+    available_tasks = get_available_evaluation_tasks()
+    if not available_tasks:
+        print("Warning: No original ARC evaluation tasks found")
+        return {}
+    
+    print(f"Generating per-key OOD samples for {len(evaluation_keys)} evaluation keys")
+    print(f"Using {len(available_tasks)} available original ARC evaluation tasks")
+    
+    # Create a mapping from evaluation keys to OOD tasks
+    key_to_ood_tasks = {}
+    for i, eval_key in enumerate(evaluation_keys):
+        # Assign 2-3 OOD tasks per evaluation key for variety
+        num_ood_tasks = min(3, len(available_tasks) // len(evaluation_keys))
+        start_idx = (hash(eval_key) % len(available_tasks))
+        assigned_tasks = []
+        for j in range(num_ood_tasks):
+            task_idx = (start_idx + j) % len(available_tasks)
+            assigned_tasks.append(available_tasks[task_idx])
+        key_to_ood_tasks[eval_key] = assigned_tasks
+        print(f"  Key '{eval_key}' assigned to OOD tasks: {assigned_tasks}")
+    
+    # Generate per-key sample sets
+    per_key_samples = {}
+    
+    for eval_key in evaluation_keys:
+        try:
+            # Collect train examples (support) and test examples (query) separately
+            support_examples = []
+            query_examples = []
+            
+            for ood_task in key_to_ood_tasks[eval_key]:
+                try:
+                    task_data = load_original_arc_evaluation_task(ood_task)
+                    
+                    # ✅ CORRECT: Train examples → Support samples
+                    train_examples = task_data.get('train', [])
+                    support_examples.extend(train_examples)
+                    
+                    # ✅ CORRECT: Test examples → Query samples
+                    test_examples = task_data.get('test', [])
+                    query_examples.extend(test_examples)
+                    
+                except Exception as e:
+                    print(f"Error loading OOD task {ood_task} for key {eval_key}: {e}")
+                    continue
+            
+            if not support_examples or not query_examples:
+                print(f"Warning: No examples available for key '{eval_key}'")
+                continue
+            
+            # Use key-specific seed for reproducible sampling
+            key_seed = seed + hash(eval_key)
+            random.seed(key_seed)
+            
+            # Sample support examples (from train data)
+            n_support_available = len(support_examples)
+            n_support_to_sample = min(n_samples_per_key, n_support_available)
+            
+            if n_support_to_sample < n_samples_per_key:
+                print(f"Warning: Only {n_support_to_sample} support examples available for key '{eval_key}', requested {n_samples_per_key}")
+            
+            selected_support = random.sample(support_examples, n_support_to_sample)
+            
+            # Sample query examples (from test data)
+            n_query_available = len(query_examples)
+            n_query_to_sample = min(n_queries_per_key, n_query_available)
+            
+            if n_query_to_sample < n_queries_per_key:
+                print(f"Warning: Only {n_query_to_sample} query examples available for key '{eval_key}', requested {n_queries_per_key}")
+            
+            selected_query = random.sample(query_examples, n_query_to_sample)
+            
+            # Process support samples (from train data)
+            support_input_sequences = []
+            support_output_sequences = []
+            for example in selected_support:
+                input_grid = np.array(example['input'])
+                output_grid = np.array(example['output'])
+                input_seq = transform_grid_to_sequence(input_grid)
+                output_seq = transform_grid_to_sequence(output_grid)
+                support_input_sequences.append(input_seq)
+                support_output_sequences.append(output_seq)
+            
+            # Process query samples (from test data)
+            query_input_sequences = []
+            query_output_sequences = []
+            for example in selected_query:
+                input_grid = np.array(example['input'])
+                output_grid = np.array(example['output'])
+                input_seq = transform_grid_to_sequence(input_grid)
+                output_seq = transform_grid_to_sequence(output_grid)
+                query_input_sequences.append(input_seq)
+                query_output_sequences.append(output_seq)
+            
+            per_key_samples[eval_key] = {
+                'support': {
+                    'input_sequences': support_input_sequences,
+                    'output_sequences': support_output_sequences,
+                    'samples': selected_support,
+                    'data_source': 'train_examples'  # ✅ Track data source
+                },
+                'query': {
+                    'input_sequences': query_input_sequences,
+                    'output_sequences': query_output_sequences,
+                    'samples': selected_query,
+                    'data_source': 'test_examples'   # ✅ Track data source
+                },
+                'ood_task_keys': key_to_ood_tasks[eval_key]
+            }
+            
+            print(f"  Key '{eval_key}': {len(support_input_sequences)} support (train), {len(query_input_sequences)} query (test) samples")
+            
+        except Exception as e:
+            print(f"Error generating OOD samples for key '{eval_key}': {e}")
+            continue
+    
+    print(f"Generated per-key OOD samples for {len(per_key_samples)} keys")
+    return per_key_samples
+
+def generate_ood_evaluation_dataset(evaluation_keys, n_samples_per_key, n_queries_per_key, seed=42):
+    """
+    Generate OOD evaluation dataset using original ARC tasks.
+    ✅ CORRECT: Each evaluation key maps to ONE OOD task
+    Support = train examples from that OOD task
+    Query = test examples from that same OOD task
+    """
+    print(f"\n=== GENERATING OOD EVALUATION DATASET ===")
+    print(f"Evaluation keys: {evaluation_keys}")
+    print(f"Samples per key: {n_samples_per_key}")
+    print(f"Queries per key: {n_queries_per_key}")
+    
+    # Set random seed for reproducible sampling
+    random.seed(seed)
+    
+    # Get available OOD tasks
+    available_tasks = get_available_evaluation_tasks()
+    if not available_tasks:
+        print("Warning: No original ARC evaluation tasks found")
+        return {}
+    
+    print(f"Using {len(available_tasks)} available original ARC evaluation tasks")
+    
+    # ✅ FIX: One-to-one mapping (each evaluation key gets ONE OOD task)
+    key_to_ood_task = {}
+    for i, eval_key in enumerate(evaluation_keys):
+        # Assign ONE OOD task per evaluation key
+        task_idx = i % len(available_tasks)  # Simple round-robin assignment
+        key_to_ood_task[eval_key] = available_tasks[task_idx]
+        print(f"  Key '{eval_key}' assigned to OOD task: {available_tasks[task_idx]}")
+    
+    ood_evaluation_data = {}
+    
+    for eval_key in evaluation_keys:
+        ood_task = key_to_ood_task[eval_key]  # ✅ ONE task per key
+        
+        try:
+            task_data = load_original_arc_evaluation_task(ood_task)
+            
+            # ✅ CORRECT: Support and query from SAME OOD task
+            support_examples = task_data.get('train', [])  # From this OOD task
+            query_examples = task_data.get('test', [])     # From this SAME OOD task
+            
+            if not support_examples or not query_examples:
+                print(f"Warning: Insufficient examples for key '{eval_key}' from task '{ood_task}'")
+                print(f"  Support examples: {len(support_examples)}")
+                print(f"  Query examples: {len(query_examples)}")
+                continue
+            
+            # Use key-specific seed for reproducible sampling
+            key_seed = seed + hash(eval_key)
+            random.seed(key_seed)
+            
+            # Sample support examples (from train data)
+            n_support_available = len(support_examples)
+            n_support_to_sample = min(n_samples_per_key, n_support_available)
+            
+            if n_support_to_sample < n_samples_per_key:
+                print(f"Warning: Only {n_support_to_sample} support examples available for key '{eval_key}', requested {n_samples_per_key}")
+            
+            selected_support = random.sample(support_examples, n_support_to_sample)
+            
+            # Sample query examples (from test data)
+            n_query_available = len(query_examples)
+            n_query_to_sample = min(n_queries_per_key, n_query_available)
+            
+            if n_query_to_sample < n_queries_per_key:
+                print(f"Warning: Only {n_query_to_sample} query examples available for key '{eval_key}', requested {n_queries_per_key}")
+            
+            selected_query = random.sample(query_examples, n_query_to_sample)
+            
+            # Process support samples (from train data)
+            support_input_sequences = []
+            support_output_sequences = []
+            for example in selected_support:
+                input_grid = np.array(example['input'])
+                output_grid = np.array(example['output'])
+                input_seq = transform_grid_to_sequence(input_grid)
+                output_seq = transform_grid_to_sequence(output_grid)
+                support_input_sequences.append(input_seq)
+                support_output_sequences.append(output_seq)
+            
+            # Process query samples (from test data)
+            query_input_sequences = []
+            query_output_sequences = []
+            for example in selected_query:
+                input_grid = np.array(example['input'])
+                output_grid = np.array(example['output'])
+                input_seq = transform_grid_to_sequence(input_grid)
+                output_seq = transform_grid_to_sequence(output_grid)
+                query_input_sequences.append(input_seq)
+                query_output_sequences.append(output_seq)
+            
+            ood_evaluation_data[eval_key] = {
+                'support': {
+                    'input_sequences': support_input_sequences,
+                    'output_sequences': support_output_sequences,
+                    'samples': selected_support,
+                    'data_source': 'train_examples'  # ✅ Track data source
+                },
+                'query': {
+                    'input_sequences': query_input_sequences,
+                    'output_sequences': query_output_sequences,
+                    'samples': selected_query,
+                    'data_source': 'test_examples'   # ✅ Track data source
+                },
+                'ood_task_keys': [ood_task],  # ✅ Single task per key
+                'data_type': 'ood_original_arc'
+            }
+            
+            print(f"  Key '{eval_key}': {len(support_input_sequences)} support (train), {len(query_input_sequences)} query (test) OOD samples from task '{ood_task}'")
+            
+        except Exception as e:
+            print(f"Error generating OOD samples for key '{eval_key}' from task '{ood_task}': {e}")
+            continue
+    
+    print(f"Generated OOD evaluation data for {len(ood_evaluation_data)} keys")
+    return ood_evaluation_data

@@ -1071,7 +1071,6 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
                 # New parameters for specialist training
                 current_epoch: int = None, anti_mask: torch.Tensor = None, 
                 anti_batch_lambda: float = None, cross_pair_enabled: bool = False,
-                cross_pair_num_pairs: int = None,
                 # New parameters for enhanced training mechanisms
                 use_cyclical_beta: bool = False, beta_cycle_length: int = 4,
                 use_free_bits: bool = True, free_bits_delta: float = 0.07,
@@ -1108,7 +1107,6 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
         anti_mask: Boolean mask indicating anti-samples [B] (True = anti-sample, False = in-slice)
         anti_batch_lambda: Base lambda weight for anti-batch KL regularization
         cross_pair_enabled: Whether to use cross-pair reconstruction loss
-        cross_pair_num_pairs: Number of cross-pairs to sample (None = all pairs)
         use_cyclical_beta: Whether to use cyclical β-annealing
         beta_cycle_length: Number of epochs per β cycle
         use_free_bits: Whether to apply free-bits mechanism

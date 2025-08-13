@@ -12,6 +12,40 @@ from typing import Dict, Any, Optional, Tuple, List
 from utils.settings_manager import settings
 import re
 
+def get_evaluation_keys_with_all_support(eval_keys=None, n_max_eval_keys=None):
+    """
+    Get evaluation keys with support for "all" similar to training keys.
+    """
+    if eval_keys is None:
+        eval_settings = settings.get_evaluation_settings()
+        eval_keys = eval_settings.get('eval_keys', ['00d62c1b'])
+        n_max_eval_keys = eval_settings.get('n_max_eval_keys', 10)
+    
+    # Handle "all" case similar to training keys
+    if eval_keys == "all":
+        print(f"  [INFO] Evaluation keys set to 'all', generating up to {n_max_eval_keys} keys...")
+        
+        # ✅ CORRECT: Use actual tasks directory like training keys
+        tasks_dir = os.path.join(os.path.dirname(__file__), '..', 're_arc', 're_arc', 'tasks')
+        all_keys = [fname[:-5] for fname in os.listdir(tasks_dir) if fname.endswith('.json')]
+        all_keys.sort()
+        
+        if n_max_eval_keys is not None:
+            try:
+                n_max_eval_keys = int(n_max_eval_keys)
+                all_keys = all_keys[:n_max_eval_keys]
+            except Exception:
+                pass
+        
+        eval_keys = all_keys
+        print(f"  [INFO] Selected {len(eval_keys)} evaluation keys from tasks directory: {eval_keys}")
+        
+    elif isinstance(eval_keys, str):
+        # Single key provided as string
+        eval_keys = [eval_keys]
+    
+    return eval_keys
+
 def generate_trajectory_plots(eval_results: Dict[str, Any], run_dir: str, epoch: int, max_samples: int = 3, current_model=None, wandb_logger=None) -> Dict[str, str]:
     """
     Generate trajectory plots from evaluation results efficiently.
@@ -102,8 +136,16 @@ def generate_trajectory_plots(eval_results: Dict[str, Any], run_dir: str, epoch:
                     
                     # Use the general visualization function with error handling
                     try:
+                        # Get OOD settings and pass them to the function
+                        eval_data_settings = settings.get_evaluation_data_settings()
+                        ood_enabled = eval_data_settings.get('use_ood_for_evaluation', True)
+                        ood_task_keys = []
+                        if ood_enabled and 'raw_data' in eval_results.get('key_results', {}).get(key, {}):
+                            ood_task_keys = eval_results['key_results'][key]['raw_data'].get('ood_task_keys', [])
+                        
                         plot_data = visualize_comprehensive_trajectory(
-                            trajectory_info, model, plot_path, run_dir, device='cuda'
+                            trajectory_info, model, plot_path, run_dir, device='cuda',
+                            ood_enabled=ood_enabled, ood_task_keys=ood_task_keys
                         )
                     except KeyboardInterrupt:
                         print(f"  [ WARNING ] Trajectory visualization interrupted for {key} sample {sample_idx}")
@@ -115,7 +157,19 @@ def generate_trajectory_plots(eval_results: Dict[str, Any], run_dir: str, epoch:
                     
                     # Create standalone latent space plot for this trajectory
                     from utils.visualizers import create_standalone_latent_space_plot
-                    latent_space_path = create_standalone_latent_space_plot(trajectory_info, model, run_dir, epoch, sample_idx, key, device='cuda', wandb_logger=wandb_logger)
+                    
+                    # Get OOD settings and pass them to the function
+                    eval_data_settings = settings.get_evaluation_data_settings()
+                    ood_enabled = eval_data_settings.get('use_ood_for_evaluation', True)
+                    ood_task_keys = []
+                    if ood_enabled and 'raw_data' in eval_results.get('key_results', {}).get(key, {}):
+                        ood_task_keys = eval_results['key_results'][key]['raw_data'].get('ood_task_keys', [])
+                    
+                    latent_space_path = create_standalone_latent_space_plot(
+                        trajectory_info, model, run_dir, epoch, sample_idx, key, 
+                        device='cuda', wandb_logger=wandb_logger, 
+                        eval_results=eval_results, ood_enabled=ood_enabled, ood_task_keys=ood_task_keys
+                    )
                     
                     # Store plot path with consistent key for slider visualization
                     # Use key_sample format without epoch in the key for consistent naming across epochs
@@ -171,6 +225,10 @@ def run_quick_evaluation(model, run_dir: str, epoch: int, eval_keys: List[str] =
         eval_settings = settings.get_evaluation_settings()
         if eval_keys is None:
             eval_keys = eval_settings.get('eval_keys', ['00d62c1b'])
+        
+        # Handle "all" evaluation keys similar to training keys
+        eval_keys = get_evaluation_keys_with_all_support(eval_keys, eval_settings.get('n_max_eval_keys', 10))
+        
         n_samples = eval_settings.get('eval_n_samples', 2)
         n_queries = eval_settings.get('eval_n_queries', 10)  # Reduced for quick eval
         eval_seed = settings.get_data_settings().get('eval_seed', 42)
@@ -206,7 +264,7 @@ def run_quick_evaluation(model, run_dir: str, epoch: int, eval_keys: List[str] =
         print(f"[ WARNING ] Quick evaluation error: {e}")
         import traceback
         traceback.print_exc()
-        return None
+        return 
 
 def should_run_evaluation(epoch: int, log_interval: int, total_epochs: int) -> bool:
     """

@@ -828,9 +828,10 @@ def plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir=None, e
         print("Warning: No evaluation results provided for trajectory reconstruction")
         return
     
-    # Get the visualization limit from settings
+    # Get the visualization limits from settings
     evaluation_settings = settings.get_evaluation_settings()
     visualize_n_values = evaluation_settings.get('visualize_n_values', 3)  # Default to 3 if not found
+    n_max_trajectory_plots = evaluation_settings.get('n_max_trajectory_plots', 4)  # ✅ ADD: Get max trajectory plots limit
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
@@ -845,7 +846,16 @@ def plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir=None, e
     else:
         print(f"Using direct keys: {list(problem_keys.keys())}")
     
+    # ✅ ADD: Track total trajectory plots generated
+    total_plots_generated = 0
+    print(f"[INFO] Trajectory plot limit: {n_max_trajectory_plots} total plots")
+    
     for key, key_results in problem_keys.items():
+        # ✅ ADD: Check if we've reached the limit
+        if total_plots_generated >= n_max_trajectory_plots:
+            print(f"[INFO] Reached trajectory plot limit ({n_max_trajectory_plots}), stopping generation")
+            break
+            
         print(f"\n=== Processing trajectory reconstructions for key: {key} ===")
     
         # Ensure key_results is a dict with proper structure
@@ -904,11 +914,19 @@ def plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir=None, e
             print(f"  [ WARNING ] No save directory provided for model loading")
             continue
                 
-        # Create visualizations for each sample (limit to visualize_n_values)
-        max_samples = min(visualize_n_values, len(valid_trajectories))
-        print(f"  Creating visualizations for {max_samples} samples (limited by visualize_n_values={visualize_n_values})...")
+        # ✅ MODIFY: Calculate samples to generate for this key, respecting total limit
+        remaining_plots = n_max_trajectory_plots - total_plots_generated
+        max_samples_per_key = min(visualize_n_values, len(valid_trajectories))
+        max_samples = min(max_samples_per_key, remaining_plots)
+        
+        print(f"  Creating visualizations for {max_samples} samples (limited by visualize_n_values={visualize_n_values}, remaining plots={remaining_plots})...")
         
         for sample_idx, trajectory_info in enumerate(valid_trajectories[:max_samples]):
+            # ✅ ADD: Check if we've reached the limit
+            if total_plots_generated >= n_max_trajectory_plots:
+                print(f"    [INFO] Reached trajectory plot limit ({n_max_trajectory_plots}), stopping generation")
+                break
+                
             try:
                 # Create trajectory plots folder
                 trajectory_plots_dir = os.path.join(save_dir, "trajectory_plots") if save_dir else "trajectory_plots"
@@ -920,12 +938,16 @@ def plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir=None, e
                 
                 print(f"    Sample {sample_idx + 1}: Creating comprehensive visualization...")
                 
-                # Use the enhanced evaluate_trajectory function
+                # ✅ FIX: Pass OOD parameters (default to False/None for regular evaluation)
                 visualize_comprehensive_trajectory(
-                    trajectory_info, model, save_path, save_dir, device=device
+                    trajectory_info, model, save_path, save_dir, device=device,
+                    ood_enabled=False, ood_task_keys=None
                 )
                 
                 print(f"    [ OK ] Saved: {save_path}")
+                
+                # ✅ ADD: Increment total plots counter
+                total_plots_generated += 1
                                 
             except Exception as e:
                 print(f"    [ WARNING ] Error creating visualization for sample {sample_idx}: {e}")
@@ -934,6 +956,8 @@ def plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir=None, e
         print(f"  [ OK ] Completed trajectory reconstructions for key {key}")
     
     print(f"\n[ OK ] Multi-encoder trajectory reconstruction visualization complete!")
+    print(f"[INFO] Total trajectory plots generated: {total_plots_generated}/{n_max_trajectory_plots}")
+
 
 def generate_experiment_summary_json(results, model_params, save_dir=None, eval_results=None, epoch=None):
     """Generate comprehensive experiment summary as JSON with accurate statistics and parameters."""
@@ -2098,7 +2122,8 @@ def generate_per_dimension_kl_plot(model, dataloader, device, epoch, encoder_idx
                 f'{metrics_key}_collapse_fraction': dims_collapsed / latent_dim,
                 f'{metrics_key}_free_bits_delta': delta_per_dim,
                 f'{metrics_key}_latent_dimension': latent_dim,
-                f'{metrics_key}_samples_analyzed': all_mus.shape[0]
+                f'{metrics_key}_samples_analyzed': all_mus.shape[0],
+                'epoch': epoch+1 if epoch is not None else None  # ✅ ADD: Explicit epoch field
             }
             
             wandb_logger._safe_log(log_dict, step_hint=global_step)
@@ -2493,14 +2518,23 @@ def plot_evaluation_latent_space_by_key_and_encoder(eval_results, save_dir, epoc
                     else:
                         print(f"    [WARNING] Unexpected encoder_data type: {type(encoder_data)}")
                         latents = []
+                    ood_task_keys = []
+                    if 'raw_data' in key_data and 'ood_task_keys' in key_data['raw_data']:
+                        ood_task_keys = key_data['raw_data']['ood_task_keys']
                     
                     # Fix: Ensure latents are properly shaped arrays
-                    for latent in latents:
+                    for i, latent in enumerate(latents):
                         if isinstance(latent, (list, np.ndarray)):
                             # Convert to numpy array and ensure it's 1D
                             latent_array = np.array(latent).flatten()
                             all_latents.append(latent_array)
-                            all_keys.append(key)
+                            
+                            # ✅ FIX: Use OOD task key if available, otherwise use evaluation key
+                            if ood_task_keys and i < len(ood_task_keys):
+                                actual_key = ood_task_keys[i]
+                            else:
+                                actual_key = key
+                            all_keys.append(actual_key)
                             all_encoders.append(encoder_idx)
                             all_sample_types.append('support')
                         else:
@@ -2541,6 +2575,11 @@ def plot_evaluation_latent_space_by_key_and_encoder(eval_results, save_dir, epoc
                         print(f"    [WARNING] Unexpected encoder_data type: {type(encoder_data)}")
                         latents = []
                     
+                    # ✅ FIX: Use OOD task keys for query latents as well
+                    ood_task_keys = []
+                    if 'raw_data' in key_data and 'ood_task_keys' in key_data['raw_data']:
+                        ood_task_keys = key_data['raw_data']['ood_task_keys']
+                    
                     # For query, we show one latent per task (not per sample)
                     if latents:
                         # Use the first query latent as representative for the task
@@ -2549,7 +2588,13 @@ def plot_evaluation_latent_space_by_key_and_encoder(eval_results, save_dir, epoc
                             # Convert to numpy array and ensure it's 1D
                             latent_array = np.array(first_latent).flatten()
                             all_latents.append(latent_array)
-                            all_keys.append(key)
+                            
+                            # ✅ FIX: Use OOD task key if available, otherwise use evaluation key
+                            if ood_task_keys and len(ood_task_keys) > 0:
+                                actual_key = ood_task_keys[0]  # Use first OOD task key for query
+                            else:
+                                actual_key = key
+                            all_keys.append(actual_key)
                             all_encoders.append(encoder_idx)
                             all_sample_types.append('query')
                         else:
@@ -2634,7 +2679,18 @@ def plot_evaluation_latent_space_by_key_and_encoder(eval_results, save_dir, epoc
                                         markersize=8, label='Unknown Encoder'))
     
     plt.legend(handles=legend_elements, loc='upper right', fontsize=8, ncol=2)
-    plt.title(f'Evaluation Latent Space - Epoch {epoch+1 if epoch is not None else "N/A"}\n(Support: per-sample, Query: per-task)', fontsize=12)
+    
+    # ✅ FIX: Add OOD indicator to evaluation latent space title
+    ood_indicator = ""
+    # Check if any evaluation results contain OOD task keys
+    for key, key_data in eval_results['key_results'].items():
+        if 'raw_data' in key_data and 'ood_task_keys' in key_data['raw_data']:
+            ood_task_keys = key_data['raw_data']['ood_task_keys']
+            if ood_task_keys and len(ood_task_keys) > 0:
+                ood_indicator = " (OOD SAMPLES)"
+                break
+    
+    plt.title(f'Evaluation Latent Space - Epoch {epoch+1 if epoch is not None else "N/A"}{ood_indicator}\n(Support: per-sample, Query: per-task)', fontsize=12)
     plt.xlabel('t-SNE Dimension 1')
     plt.ylabel('t-SNE Dimension 2')
     
@@ -2648,18 +2704,24 @@ def plot_evaluation_latent_space_by_key_and_encoder(eval_results, save_dir, epoc
     if wandb_logger:
         try:
             import wandb
+            # ✅ FIX: Add OOD indicator to WandB panel name
+            ood_suffix = "_ood" if ood_indicator else ""
+            panel_name = f"evaluation_latent_space{ood_suffix}"
+            
+            # ✅ FIX: Add OOD indicator to caption
+            ood_caption = " (OOD)" if ood_indicator else ""
             wandb_logger._safe_log({
-                'evaluation_latent_space': wandb.Image(plot_path),
+                panel_name: wandb.Image(plot_path, caption=f"Evaluation Latent Space - Epoch {epoch+1 if epoch is not None else 'N/A'}{ood_caption}"),
                 'epoch': epoch+1 if epoch is not None else None  # ✅ ADD: Explicit epoch field
             }, step_hint=epoch+1 if epoch is not None else None)
-            print(f"  [OK] Evaluation latent space plot uploaded to wandb")
+            print(f"  [OK] Evaluation latent space plot uploaded to wandb panel '{panel_name}'")
         except Exception as e:
             print(f"  [WARNING] Could not upload evaluation latent space plot to wandb: {e}")
 
 
 
 
-def create_standalone_latent_space_plot(trajectory_info, model, save_dir, epoch, sample_idx, evaluated_key=None, device='cuda', wandb_logger=None, eval_results=None):
+def create_standalone_latent_space_plot(trajectory_info, model, save_dir, epoch, sample_idx, evaluated_key=None, device='cuda', wandb_logger=None, eval_results=None, ood_enabled=False, ood_task_keys=None):
     """
     Create a standalone latent space plot for a specific trajectory.
     This replicates exactly the latent space visualization from the trajectory figure.
@@ -2687,31 +2749,37 @@ def create_standalone_latent_space_plot(trajectory_info, model, save_dir, epoch,
     os.makedirs(trajectory_plots_dir, exist_ok=True)
     
     # Generate filename with the specified naming convention
-    # Extract key hash from evaluated_key if available
-    key_hash = ""
-    if evaluated_key:
-        # Create a hash from the key (first 8 characters of hash)
-        import hashlib
-        key_hash = hashlib.md5(evaluated_key.encode()).hexdigest()[:8]
+    # Use the actual key name (not hash) to match main reconstruction filename
+    key_name = evaluated_key if evaluated_key else "unknown"
     
-    filename = f"trajectory_epoch{epoch if epoch is not None else 'N_A'}_{key_hash}_sample{sample_idx}_latent_space_wandb.png"
+    filename = f"trajectory_epoch{epoch if epoch is not None else 'N_A'}_{key_name}_sample{sample_idx}_latent_space_wandb.png"
     save_path = os.path.join(trajectory_plots_dir, filename)
     
     print(f"Creating standalone latent space plot: {filename}")
     
     # Load unified latent data (training + support + query + trajectory) - same as trajectory figure
     from LPN_reproduction.evaluate_trajectory import load_unified_latent_data_with_trajectory
-    training_latent_data, training_tsne_2d, training_labels, training_colors, trajectory_tsne_2d, all_labels, all_tsne_2d = load_unified_latent_data_with_trajectory(
-        save_dir, model, device, trajectory_info, eval_results=eval_results, evaluated_key=evaluated_key  # ✅ Add evaluated_key parameter
+    training_latent_data, training_tsne_2d, training_labels, training_colors, trajectory_tsne_2d, all_labels, all_tsne_2d, actual_evaluated_keys = load_unified_latent_data_with_trajectory(
+        save_dir, model, device, trajectory_info, eval_results=eval_results, evaluated_key=evaluated_key, ood_enabled=ood_enabled, ood_task_keys=ood_task_keys  # ✅ Add OOD parameters
     )
     
-    # Get trajectory data
+    # Get trajectory data (limit to 3 points: initial, mid, final)
     z_vectors = trajectory_info.get('z_vectors', [])
     losses = trajectory_info.get('losses', [])
     
     if not z_vectors or len(z_vectors) < 2:
         print(f"Warning: No trajectory data found for sample {sample_idx}")
         return None
+    
+    # Limit trajectory to 3 points: initial, mid, final
+    if len(z_vectors) >= 3:
+        # Take first, middle, and last points
+        indices = [0, len(z_vectors) // 2, len(z_vectors) - 1]
+        z_vectors = [z_vectors[i] for i in indices]
+        losses = [losses[i] for i in indices] if len(losses) >= len(z_vectors) else losses[:len(z_vectors)]
+        print(f"DEBUG: Limited trajectory to 3 points: initial, mid, final")
+    else:
+        print(f"DEBUG: Using all {len(z_vectors)} trajectory points (less than 3)")
     
     # Create the plot - replicate exactly the trajectory figure latent space
     fig, ax = plt.subplots(figsize=(12, 10))
@@ -2779,26 +2847,41 @@ def create_standalone_latent_space_plot(trajectory_info, model, save_dir, epoch,
             
             # Plot support and query samples for the evaluated key only
             if all_labels is not None and all_tsne_2d is not None:
-                # Filter support samples for the evaluated key
+                # ✅ FIX: Use OOD task keys when OOD is enabled for filtering support/query samples
+                actual_evaluated_keys = []
+                if ood_enabled and ood_task_keys:
+                    actual_evaluated_keys = ood_task_keys
+                    print(f"DEBUG: Using OOD task keys for filtering: {actual_evaluated_keys}")
+                else:
+                    actual_evaluated_keys = [evaluated_key] if evaluated_key else []
+                    print(f"DEBUG: Using evaluation key for filtering: {evaluated_key}")
+                
+                # Filter support samples for the actual evaluated keys
                 support_indices = []
                 for i, label in enumerate(all_labels):
-                    if 'support' in label and evaluated_key in label:
-                        support_indices.append(i)
+                    if 'support' in label:
+                        for key in actual_evaluated_keys:
+                            if key in label:
+                                support_indices.append(i)
+                                break
                 
-                print(f"DEBUG: Found {len(support_indices)} support samples for key '{evaluated_key}'")
+                print(f"DEBUG: Found {len(support_indices)} support samples for keys {actual_evaluated_keys}")
                 if support_indices:
                     x_coords = all_tsne_2d[support_indices, 0]
                     y_coords = all_tsne_2d[support_indices, 1]
                     ax.scatter(x_coords, y_coords, color='blue', alpha=0.8, s=35, 
                             marker='s', edgecolors='black', linewidth=1.0, label='Support Samples')
                 
-                # Filter query samples for the evaluated key
+                # Filter query samples for the actual evaluated keys
                 query_indices = []
                 for i, label in enumerate(all_labels):
-                    if 'query' in label and evaluated_key in label:
-                        query_indices.append(i)
+                    if 'query' in label:
+                        for key in actual_evaluated_keys:
+                            if key in label:
+                                query_indices.append(i)
+                                break
                 
-                print(f"DEBUG: Found {len(query_indices)} query samples for key '{evaluated_key}'")
+                print(f"DEBUG: Found {len(query_indices)} query samples for keys {actual_evaluated_keys}")
                 if query_indices:
                     x_coords = all_tsne_2d[query_indices, 0]
                     y_coords = all_tsne_2d[query_indices, 1]
@@ -2837,11 +2920,19 @@ def create_standalone_latent_space_plot(trajectory_info, model, save_dir, epoch,
         cbar = plt.colorbar(trajectory_scatter, ax=ax, shrink=0.6)
         cbar.set_label('Loss', rotation=270, labelpad=20)
     
-    # Add title
+    # ✅ FIX: Add title with OOD detection
     title = f"Trajectory Latent Space - Sample {sample_idx}"
     if evaluated_key:
         title += f" (Key: {evaluated_key[:20]}{'...' if len(evaluated_key) > 20 else ''})"
     title += f" (Epoch {epoch})"
+    
+    # ✅ FIX: Detect if OOD samples are being used and add indicator
+    ood_indicator = ""
+    if ood_enabled or (all_labels is not None and any('ood_' in label for label in all_labels)):
+        ood_indicator = " (OOD SAMPLES)"
+        print(f"DEBUG: OOD sampling enabled in trajectory plot, adding OOD indicator to title: {ood_indicator}")
+    
+    title += ood_indicator
     ax.set_title(title, fontsize=14)
     
     # Add legend
@@ -2862,11 +2953,266 @@ def create_standalone_latent_space_plot(trajectory_info, model, save_dir, epoch,
         try:
             import wandb
             
-            # Use key-specific panel name for trajectory latent space
-            panel_name = f"trajectory_latent_space_{evaluated_key}" if evaluated_key else "trajectory_latent_space"
+            # ✅ FIX: Use key-specific panel name for trajectory latent space with OOD indicator
+            ood_suffix = "_ood" if ood_enabled or any('ood_' in label for label in all_labels if label) else ""
+            panel_name = f"trajectory_latent_space_{evaluated_key}{ood_suffix}" if evaluated_key else f"trajectory_latent_space{ood_suffix}"
             
+            # ✅ FIX: Add OOD indicator to caption
+            ood_caption = " (OOD)" if ood_enabled or any('ood_' in label for label in all_labels if label) else ""
             wandb_logger._safe_log({
-                panel_name: wandb.Image(save_path, caption=f"Trajectory Latent Space - Sample {sample_idx} - Epoch {epoch}"),
+                panel_name: wandb.Image(save_path, caption=f"Trajectory Latent Space - Sample {sample_idx} - Epoch {epoch}{ood_caption}"),
+                'epoch': epoch+1 if epoch is not None else None  # ✅ ADD: Explicit epoch field
+            }, step_hint=epoch+1 if epoch is not None else None)
+            
+            print(f"[ OK ] Uploaded trajectory latent space plot to wandb panel '{panel_name}' (step={epoch})")
+            
+        except Exception as e:
+            print(f"[ WARNING ] Could not upload trajectory latent space plot to wandb: {e}")
+    
+    return save_path
+
+
+
+def create_standalone_latent_space_plot(trajectory_info, model, save_dir, epoch, sample_idx, evaluated_key=None, device='cuda', wandb_logger=None, eval_results=None, ood_enabled=False, ood_task_keys=None):
+    """
+    Create a standalone latent space plot for a specific trajectory.
+    This replicates exactly the latent space visualization from the trajectory figure.
+    
+    Args:
+        trajectory_info: Dictionary containing trajectory data
+        model: The trained model
+        save_dir: Directory to save the plot
+        epoch: Current epoch number
+        sample_idx: Index of the sample (0, 1, 2, etc.)
+        evaluated_key: The key being evaluated (optional)
+        device: Device to run on
+        wandb_logger: WandB logger for uploading plots
+        eval_results: Evaluation results containing support/query latents
+        
+    Returns:
+        str: Path to the saved plot file
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import os
+    
+    # Create trajectory plots directory
+    trajectory_plots_dir = os.path.join(save_dir, "trajectory_plots")
+    os.makedirs(trajectory_plots_dir, exist_ok=True)
+    
+    # Generate filename with the specified naming convention
+    # Use the actual key name (not hash) to match main reconstruction filename
+    key_name = evaluated_key if evaluated_key else "unknown"
+    
+    filename = f"trajectory_epoch{epoch if epoch is not None else 'N_A'}_{key_name}_sample{sample_idx}_latent_space_wandb.png"
+    save_path = os.path.join(trajectory_plots_dir, filename)
+    
+    print(f"Creating standalone latent space plot: {filename}")
+    
+    # Load unified latent data (training + support + query + trajectory) - same as trajectory figure
+    from LPN_reproduction.evaluate_trajectory import load_unified_latent_data_with_trajectory
+    training_latent_data, training_tsne_2d, training_labels, training_colors, trajectory_tsne_2d, all_labels, all_tsne_2d, actual_evaluated_keys = load_unified_latent_data_with_trajectory(
+        save_dir, model, device, trajectory_info, eval_results=eval_results, evaluated_key=evaluated_key, ood_enabled=ood_enabled, ood_task_keys=ood_task_keys  # ✅ Add OOD parameters
+    )
+    
+    # Get trajectory data (limit to 3 points: initial, mid, final)
+    z_vectors = trajectory_info.get('z_vectors', [])
+    losses = trajectory_info.get('losses', [])
+    
+    if not z_vectors or len(z_vectors) < 2:
+        print(f"Warning: No trajectory data found for sample {sample_idx}")
+        return None
+    
+    # Limit trajectory to 3 points: initial, mid, final
+    if len(z_vectors) >= 3:
+        # Take first, middle, and last points
+        indices = [0, len(z_vectors) // 2, len(z_vectors) - 1]
+        z_vectors = [z_vectors[i] for i in indices]
+        losses = [losses[i] for i in indices] if len(losses) >= len(z_vectors) else losses[:len(z_vectors)]
+        print(f"DEBUG: Limited trajectory to 3 points: initial, mid, final")
+    else:
+        print(f"DEBUG: Using all {len(z_vectors)} trajectory points (less than 3)")
+    
+    # Create the plot - replicate exactly the trajectory figure latent space
+    fig, ax = plt.subplots(figsize=(12, 10))
+    
+    # Plot trajectory in latent space using precomputed t-SNE coordinates (same as trajectory figure)
+    if training_latent_data is not None and training_tsne_2d is not None:
+        # Plot training background using precomputed coordinates - COLOR BY ENCODER + HIGHLIGHT SAME KEY
+        if training_colors is not None and training_labels is not None:
+            # Extract keys and encoders from training labels (assuming format like "training_enc_0_key_1234")
+            training_keys = []
+            training_encoders = []
+            for label in training_labels:
+                if '_key_' in label and 'training_enc_' in label:
+                    # Extract encoder and key
+                    encoder_part = label.split('_key_')[0]
+                    encoder = encoder_part.split('training_enc_')[-1]
+                    key = label.split('_key_')[-1]
+                    training_keys.append(key)
+                    try:
+                        training_encoders.append(int(encoder))
+                    except (ValueError, TypeError):
+                        training_encoders.append(0)  # Default to 0 if not an int
+                else:
+                    training_keys.append(label)
+                    training_encoders.append(0)  # Default encoder
+            
+            # Get the key of the sample being evaluated
+            # Use the passed evaluated_key parameter, fallback to trajectory_info if not provided
+            if evaluated_key is None:
+                evaluated_key = trajectory_info.get('evaluated_key', 'unknown')
+            print(f"DEBUG: Using evaluated_key: '{evaluated_key}'")
+            
+            # Create light colors for encoders (different light colors for each encoder)
+            unique_encoders = sorted(list(set(training_encoders)))
+            encoder_colors = {
+                enc: plt.cm.tab10(enc % 10) for enc in unique_encoders  # More visible colors from tab10
+            }
+            
+            # Create bright colors for the evaluated key (replaced yellow with more visible colors)
+            bright_colors = ['red', 'orange', 'darkorange', 'lime', 'cyan', 'magenta', 'pink', 'brown']
+            evaluated_color = bright_colors[hash(evaluated_key) % len(bright_colors)]
+            
+            # Plot background points colored by encoder (light colors)
+            for encoder in unique_encoders:
+                indices = [i for i, enc in enumerate(training_encoders) if enc == encoder]
+                if indices:
+                    x_coords = training_tsne_2d[indices, 0]
+                    y_coords = training_tsne_2d[indices, 1]
+                    color = encoder_colors[encoder]
+                    
+                    # Use alpha for background effect
+                    ax.scatter(x_coords, y_coords, color=color, alpha=0.6, s=35, 
+                           edgecolors='none', label=f'Encoder {encoder} (Light)')
+            
+            # Highlight samples with the same key as evaluated sample (bright colors)
+            same_key_indices = [i for i, key in enumerate(training_keys) if key == evaluated_key]
+            if same_key_indices:
+                x_coords = training_tsne_2d[same_key_indices, 0]
+                y_coords = training_tsne_2d[same_key_indices, 1]
+                
+                # Use bright color for same key samples
+                ax.scatter(x_coords, y_coords, color=evaluated_color, alpha=0.9, s=50, 
+                       edgecolors='black', linewidth=1.5, 
+                       label=f'Same Key: {evaluated_key[:8]} (Bright)')
+            
+            # Plot support and query samples for the evaluated key only
+            if all_labels is not None and all_tsne_2d is not None:
+                # ✅ FIX: Use OOD task keys when OOD is enabled for filtering support/query samples
+                actual_evaluated_keys = []
+                if ood_enabled and ood_task_keys:
+                    actual_evaluated_keys = ood_task_keys
+                    print(f"DEBUG: Using OOD task keys for filtering: {actual_evaluated_keys}")
+                else:
+                    actual_evaluated_keys = [evaluated_key] if evaluated_key else []
+                    print(f"DEBUG: Using evaluation key for filtering: {evaluated_key}")
+                
+                # Filter support samples for the actual evaluated keys
+                support_indices = []
+                for i, label in enumerate(all_labels):
+                    if 'support' in label:
+                        for key in actual_evaluated_keys:
+                            if key in label:
+                                support_indices.append(i)
+                                break
+                
+                print(f"DEBUG: Found {len(support_indices)} support samples for keys {actual_evaluated_keys}")
+                if support_indices:
+                    x_coords = all_tsne_2d[support_indices, 0]
+                    y_coords = all_tsne_2d[support_indices, 1]
+                    ax.scatter(x_coords, y_coords, color='blue', alpha=0.8, s=35, 
+                            marker='s', edgecolors='black', linewidth=1.0, label='Support Samples')
+                
+                # Filter query samples for the actual evaluated keys
+                query_indices = []
+                for i, label in enumerate(all_labels):
+                    if 'query' in label:
+                        for key in actual_evaluated_keys:
+                            if key in label:
+                                query_indices.append(i)
+                                break
+                
+                print(f"DEBUG: Found {len(query_indices)} query samples for keys {actual_evaluated_keys}")
+                if query_indices:
+                    x_coords = all_tsne_2d[query_indices, 0]
+                    y_coords = all_tsne_2d[query_indices, 1]
+                    ax.scatter(x_coords, y_coords, color='red', alpha=0.8, s=35, 
+                            marker='^', edgecolors='black', linewidth=1.0, label='Query Samples')
+    
+    # Use unified trajectory coordinates (already computed in unified t-SNE) - same as trajectory figure
+    z_2d = trajectory_tsne_2d
+    
+    if z_2d is not None:
+        # Fix: Ensure losses array matches trajectory length
+        if len(losses) != len(z_2d):
+            print(f"Warning: losses length ({len(losses)}) != trajectory length ({len(z_2d)})")
+            # Use the shorter length to avoid mismatch
+            min_length = min(len(losses), len(z_2d))
+            z_2d = z_2d[:min_length]
+            losses = losses[:min_length]
+            print(f"Adjusted to length: {min_length}")
+        
+        # Plot trajectory in latent space using precomputed t-SNE coordinates (same as trajectory figure)
+        trajectory_scatter = ax.scatter(z_2d[:, 0], z_2d[:, 1], c=losses, cmap='plasma', 
+                                     s=50, alpha=0.6, edgecolors='black', linewidth=2)
+        
+        # Draw arrows between consecutive trajectory points - same as trajectory figure
+        for i in range(len(z_2d) - 1):
+            ax.annotate('', xy=z_2d[i+1], xytext=z_2d[i],
+                     arrowprops=dict(arrowstyle='->', color='red', alpha=0.8, lw=2))
+        
+        # Mark start and end points - same as trajectory figure
+        ax.scatter(z_2d[0, 0], z_2d[0, 1], color='green', s=100, marker='o', 
+                label='Trajectory Start', edgecolors='black', linewidth=3, zorder=10, alpha=0.8)
+        ax.scatter(z_2d[-1, 0], z_2d[-1, 1], color='red', s=100, marker='s', 
+                label='Trajectory End', edgecolors='black', linewidth=3, zorder=10, alpha=0.8)
+        
+        # Add colorbar - same as trajectory figure
+        cbar = plt.colorbar(trajectory_scatter, ax=ax, shrink=0.6)
+        cbar.set_label('Loss', rotation=270, labelpad=20)
+    
+    # ✅ FIX: Add title with OOD detection
+    title = f"Trajectory Latent Space - Sample {sample_idx}"
+    if evaluated_key:
+        title += f" (Key: {evaluated_key[:20]}{'...' if len(evaluated_key) > 20 else ''})"
+    title += f" (Epoch {epoch})"
+    
+    # ✅ FIX: Detect if OOD samples are being used and add indicator
+    ood_indicator = ""
+    if ood_enabled or (all_labels is not None and any('ood_' in label for label in all_labels)):
+        ood_indicator = " (OOD SAMPLES)"
+        print(f"DEBUG: OOD sampling enabled in trajectory plot, adding OOD indicator to title: {ood_indicator}")
+    
+    title += ood_indicator
+    ax.set_title(title, fontsize=14)
+    
+    # Add legend
+    ax.legend(bbox_to_anchor=(1.01, 1), loc='upper left', fontsize=10)
+    
+    plt.xlabel('t-SNE 1')
+    plt.ylabel('t-SNE 2')
+    plt.tight_layout()
+    
+    # Save the plot
+    plt.savefig(save_path, dpi=180, bbox_inches='tight')
+    plt.close()
+    
+    print(f"[OK] Saved standalone latent space plot: {save_path}")
+    
+    # Upload to WandB if available - using step = epoch
+    if wandb_logger is not None and hasattr(wandb_logger, 'is_initialized') and wandb_logger.is_initialized:
+        try:
+            import wandb
+            
+            # ✅ FIX: Use key-specific panel name for trajectory latent space with OOD indicator
+            ood_suffix = "_ood" if ood_enabled or any('ood_' in label for label in all_labels if label) else ""
+            panel_name = f"trajectory_latent_space_{evaluated_key}{ood_suffix}" if evaluated_key else f"trajectory_latent_space{ood_suffix}"
+            
+            # ✅ FIX: Add OOD indicator to caption
+            ood_caption = " (OOD)" if ood_enabled or any('ood_' in label for label in all_labels if label) else ""
+            wandb_logger._safe_log({
+                panel_name: wandb.Image(save_path, caption=f"Trajectory Latent Space - Sample {sample_idx} - Epoch {epoch}{ood_caption}"),
                 'epoch': epoch+1 if epoch is not None else None  # ✅ ADD: Explicit epoch field
             }, step_hint=epoch+1 if epoch is not None else None)
             

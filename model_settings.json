@@ -1,27 +1,46 @@
 {
   "data_settings": {
       "training_keys": "all",
-      "n_max_keys": 10,
+      "n_max_keys": 5,
       "training_seed": 42,
       "eval_seed": 1,
       "n": 10,
       "run_base_dir": "runs_re_arc",
       "split_across_encoders": false
   },
+  "training_settings": {
+      "data_source": "synthetic",
+      "use_ood_for_training": false,
+      "num_epochs": 30,
+      "batch_size": 4,
+      "gradient_accumulation_steps": 1,
+      "learning_rate": 0.0004,
+      "optimizer_weight_decay": 0.0,
+      "beta": 0.001,
+      "use_mixed_precision": true,
+      "save_checkpoint_interval": 1,
+      "infinite_dataloader": true,
+      "batches_per_epoch": 20,
+      "return_task_keys": true,
+      "cross_pair_loss": {
+        "enabled": true,
+        "num_pairs": 10,
+        "description": "Cross-pair reconstruction loss for generalization"
+      }
+  },
   "evaluation_settings": {
-      "eval_keys": [
-          "00d62c1b",
-          "1cf80156",
-          "25d8a9c8",
-          "0a938d79"
-      ],
+      "eval_keys": "all",
+      "data_source": "ood_original_arc",
+      "use_ood_for_evaluation": true,
+      "n_max_eval_keys": 10,
+      "n_max_trajectory_plots": 4,
       "other_eval_keys": [
         "00d62c1b",
         "1cf80156",
         "25d8a9c8",
         "0a938d79"
       ],
-      "_eval_keys_comment": "with 50 keys: key0 -> enc1, key1 -> enc2, key2 -> None, key3 -> enc0",
+      "_eval_keys_comment": "Set to 'all' to use all available keys (limited by n_max_eval_keys), or provide a list of specific keys",
       "eval_n_samples": 2,
       "eval_n_queries": 2,
       "eval_epoch": 30,
@@ -79,24 +98,6 @@
           "restart_unused_codes": true,
           "restart_threshold": 0.5,
           "split_batch_size": null
-      }
-  },
-  "training_settings": {
-      "num_epochs": 30,
-      "batch_size": 8,
-      "gradient_accumulation_steps": 1,
-      "learning_rate": 0.0004,
-      "optimizer_weight_decay": 0.0,
-      "beta": 0.001,
-      "use_mixed_precision": true,
-      "save_checkpoint_interval": 1,
-      "infinite_dataloader": true,
-      "batches_per_epoch": 100,
-      "return_task_keys": true,
-      "cross_pair_loss": {
-        "enabled": true,
-        "num_pairs": 10,
-        "description": "Cross-pair reconstruction loss for generalization"
       }
   },
   "repulsion_loss_settings": {

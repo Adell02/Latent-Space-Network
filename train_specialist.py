@@ -221,7 +221,8 @@ def comprehensive_evaluation_after_epoch_specialist(
             try:
                 import wandb
                 wandb_logger._safe_log({
-                    f'phase_{phase_name.lower()}_latent_space': wandb.Image(plot_path)
+                    f'phase_{phase_name.lower()}_latent_space': wandb.Image(plot_path),
+                    'epoch': epoch+1 if epoch is not None else None  # ✅ ADD: Explicit epoch field
                 }, step_hint=epoch+1)
                 print(f"  [OK] Phase {phase_name} training latent space plot uploaded to wandb")
             except Exception as e:
@@ -261,6 +262,13 @@ def comprehensive_evaluation_after_epoch_specialist(
             for key, key_results in eval_results['key_results'].items():
                 if 'trajectory_info' in key_results and key_results['trajectory_info']:
                     try:
+                        # Get OOD settings and pass them to the function
+                        eval_data_settings = settings.get_evaluation_data_settings()
+                        ood_enabled = eval_data_settings.get('use_ood_for_evaluation', True)
+                        ood_task_keys = []
+                        if ood_enabled and 'raw_data' in key_results:
+                            ood_task_keys = key_results['raw_data'].get('ood_task_keys', [])
+
                         trajectory_plot_path = create_standalone_latent_space_plot(
                             trajectory_info=key_results['trajectory_info'][0],
                             model=model,
@@ -270,7 +278,9 @@ def comprehensive_evaluation_after_epoch_specialist(
                             evaluated_key=key,
                             device=device,
                             wandb_logger=wandb_logger,
-                            eval_results=eval_results
+                            eval_results=eval_results,
+                            ood_enabled=ood_enabled,
+                            ood_task_keys=ood_task_keys
                         )
                         if trajectory_plot_path:
                             print(f"[OK] Trajectory plot saved: {trajectory_plot_path}")
@@ -525,6 +535,8 @@ def generate_latent_histograms(model, dataloader, device, encoder_idx, epoch, wa
                 f"phase_a_latents/encoder_{encoder_idx}_mu_std": mu_std,
                 f"phase_a_latents/encoder_{encoder_idx}_logvar_mean": logvar_mean,
                 f"phase_a_latents/encoder_{encoder_idx}_logvar_std": logvar_std,
+                'epoch': epoch+1 if epoch is not None else None  
+
             }, step_hint=global_step)
             print(f"[ OK ] Logged latent histograms for Encoder {encoder_idx} at epoch {epoch}")
         except Exception as e:
@@ -764,7 +776,8 @@ def _create_comprehensive_analysis_plot(model, data_source, device, data_type, n
     if wandb_logger:
         try:
             wandb_logger._safe_log({
-                f'comprehensive_analysis_{data_type}': wandb.Image(plot_path)
+                f'comprehensive_analysis_{data_type}': wandb.Image(plot_path),
+                'epoch': global_step if global_step is not None else None  # ✅ ADD: Explicit epoch field (using global_step as epoch)
             }, step_hint=global_step)
         except Exception as e:
             print(f"[ WARNING ] Could not log comprehensive analysis plot to wandb: {e}")
@@ -858,7 +871,8 @@ def _create_accuracy_matrix(model, eval_keys, num_encoders, device, wandb_logger
             wandb_logger._safe_log({
                 "phase_b_final/accuracy_matrix": wandb.Image(temp_plot_path),
                 "phase_b_final/matrix_shape": f"{num_encoders + 1}x{len(eval_keys)}",
-                "phase_b_final/eval_keys": eval_keys
+                "phase_b_final/eval_keys": eval_keys,
+                'epoch': global_step if global_step is not None else None  # ✅ ADD: Explicit epoch field (using global_step as epoch)
             }, step_hint=global_step)
             print("[ OK ] Logged accuracy matrix")
         except Exception as e:
@@ -919,7 +933,6 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
     anti_batch_lambda = phase_a_settings.get('anti_batch_lambda', BETA)
     cross_pair_settings = phase_a_settings.get('cross_pair_loss', {})
     cross_pair_enabled = cross_pair_settings.get('enabled', False)
-    cross_pair_num_pairs = cross_pair_settings.get('num_pairs', 4)
     
     # Use settings for phase epochs if not provided
     if phase_epochs is None:
@@ -929,7 +942,7 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
     logger.info(f"Specialist Phase A configuration:")
     logger.info(f"  Cross-pair reconstruction: {'ENABLED' if cross_pair_enabled else 'DISABLED'}")
     if cross_pair_enabled:
-        logger.info(f"    - Cross-pair sampling: {cross_pair_num_pairs if cross_pair_num_pairs else 'ALL'} pairs")
+        logger.info(f"    - Cross-pair sampling: 'ALL' pairs")
     logger.info(f"  Anti-batch training: {'ENABLED' if anti_batch_size > 0 else 'DISABLED'}")
     if anti_batch_size > 0:
         logger.info(f"    - Anti-batch proportion: {anti_batch_size:.1%}")
@@ -1153,7 +1166,6 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                         anti_mask=anti_mask,  # Enable anti-batch training
                         anti_batch_lambda=anti_batch_lambda,
                         cross_pair_enabled=cross_pair_enabled,
-                        cross_pair_num_pairs=cross_pair_num_pairs,
                         # Enhanced mechanisms
                         use_cyclical_beta=use_cyclical_beta,
                         beta_cycle_length=beta_cycle_length,
@@ -1306,7 +1318,8 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                         import os
                         try:
                             wandb_logger._safe_log({
-                                f"phase_a_reconstruction/{wandb_key}": wandb.Image(plot_path)
+                                f"phase_a_reconstruction/{wandb_key}": wandb.Image(plot_path),
+                                'epoch': global_step if global_step is not None else None  # ✅ ADD: Explicit epoch field (using global_step as epoch)
                             }, step_hint=global_step)
                             logger.info(f"[ OK ] Logged Phase A reconstruction for Encoder {encoder_idx} at step {global_step}")
                         except Exception as wandb_error:
@@ -1404,7 +1417,8 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                     final_phase_a_step = (num_encoders - 1) * phase_epochs + phase_epochs
                     wandb_logger._safe_log({
                         "phase_a/encoder_losses_summary": wandb.Image(phase_a_plot_path),
-                        "phase_a/completed": True
+                        "phase_a/completed": True,
+                        'epoch': final_phase_a_step if final_phase_a_step is not None else None  # ✅ ADD: Explicit epoch field
                     }, step_hint=final_phase_a_step)
                     logger.info("[ OK ] Phase A summary plot logged to WandB")
                 except Exception as wandb_error:
@@ -1784,7 +1798,8 @@ def train_phase_b_decoder(model, encoder_datasets, device, logger, wandb_logger,
                 final_phase_b_step = base_global_step + phase_epochs
                 wandb_logger._safe_log({
                     "phase_b/decoder_loss_summary": wandb.Image(phase_b_plot_path),
-                    "phase_b/completed": True
+                    "phase_b/completed": True,
+                    'epoch': final_phase_b_step if final_phase_b_step is not None else None  # ✅ ADD: Explicit epoch field
                 }, step_hint=final_phase_b_step)
                 logger.info("[ OK ] Phase B summary plot logged to WandB")
             except Exception as wandb_error:
@@ -1822,7 +1837,7 @@ def run_evaluation_between_phases(model, device, logger, wandb_logger, run_dir, 
         return None
 
 
-def main_specialist_training(file_store_name, phases_to_run=None, resume_from_phase=None):
+def main_specialist_training(file_store_name, phases_to_run=None, resume_from_phase=None, run_dir=None, notes=None):
     """
     Main specialist training function implementing 2-phase training.
     
@@ -1830,6 +1845,8 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
         file_store_name: Name for run directory
         phases_to_run: List of phases to run ('A', 'B') - uses settings default if None
         resume_from_phase: Phase to resume from (if any)
+        run_dir: Directory to use for training (if None, creates one)
+        notes: Notes to add to the WandB run
     """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -1841,24 +1858,76 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
     specialist_settings_file = "model_specialist_settings.json"
     if os.path.exists(specialist_settings_file):
         settings = init_settings(specialist_settings_file)
-        print(f"[ OK ] Loaded specialist settings from {specialist_settings_file}")
+        print(f"[OK] Loaded specialist settings from {specialist_settings_file}")    
     else:
-        print(f"[ WARNING ] Warning: {specialist_settings_file} not found, using default settings")
+        print(f"[WARNING] Specialist settings file {specialist_settings_file} not found, using default settings")
     
     # Get current settings
     data_settings = settings.get_data_settings()
     model_architecture = settings.get_model_architecture()
     training_settings = settings.get_training_settings()
     latent_optimization = settings.get_latent_optimization()
-    repulsion_loss_settings = settings.get_repulsion_loss_settings()
+    specialist_training = settings.get_specialist_training()
     wandb_settings = settings.get_wandb_settings()
-    specialist_settings = settings.get_specialist_training_settings()
     
+    # Update global variables from settings
+    TRAINING_KEYS = data_settings['training_keys']
+    N_EXAMPLES_PER_TASK = data_settings['n_examples_per_task']
+    N_PAIRS_PER_EXAMPLE = data_settings['n_pairs_per_example']
+    DROPOUT = model_architecture['dropout']
+    BATCH_SIZE = training_settings['batch_size']
+    NUM_EPOCHS = training_settings['num_epochs']
+    LEARNING_RATE = training_settings['learning_rate']
+    BETA = training_settings['beta']
+    OPTIMIZE_Z = latent_optimization['enabled']
+    OPTIMIZE_Z_NUM_STEPS = latent_optimization['num_steps']
+    OPTIMIZE_Z_LR = latent_optimization['learning_rate']
+    OPTIMIZE_Z_INFERENCE = latent_optimization['inference']['enabled']
+    OPTIMIZE_Z_INFERENCE_NUM_STEPS = latent_optimization['inference']['num_steps']
+    OPTIMIZE_Z_INFERENCE_LR = latent_optimization['inference']['learning_rate']
+    
+    print(f"Specialist training settings:")
+    print(f"  Training keys: {TRAINING_KEYS}")
+    print(f"  N examples per task: {N_EXAMPLES_PER_TASK}")
+    print(f"  N pairs per example: {N_PAIRS_PER_EXAMPLE}")
+    print(f"  Batch size: {BATCH_SIZE}")
+    print(f"  Learning rate: {LEARNING_RATE}")
+    print(f"  Beta: {BETA}")
+    print(f"  Optimize Z: {OPTIMIZE_Z}")
+    print(f"  Optimize Z steps: {OPTIMIZE_Z_NUM_STEPS}")
+    print(f"  Optimize Z LR: {OPTIMIZE_Z_LR}")
+    print(f"  Optimize Z inference: {OPTIMIZE_Z_INFERENCE}")
+    print(f"  Optimize Z inference steps: {OPTIMIZE_Z_INFERENCE_NUM_STEPS}")
+    print(f"  Optimize Z inference LR: {OPTIMIZE_Z_INFERENCE_LR}")
+    print(f"  Phase A epochs: {specialist_training['phase_a']['epochs']}")
+    print(f"  Phase B epochs: {specialist_training['phase_b']['epochs']}")
+    
+    # Initialize wandb logger
+    wandb_logger = None
+    if wandb_settings.get('enabled', False):
+        wandb_logger = init_wandb_for_mode('specialist_train', run_dir, notes=notes)
+        if wandb_logger:
+            logger.info(f"[ OK ] Wandb logging enabled: {wandb_logger.run.name}")
+            # Verify trajectory plot settings
+            trajectory_plots_enabled = wandb_settings.get('log_trajectory_plots', False)
+            trajectory_max_samples = wandb_settings.get('trajectory_max_samples', 3)
+            eval_interval = wandb_settings.get('eval_log_interval', 10)
+            logger.info(f"[ OK ] Trajectory plots: {'ENABLED' if trajectory_plots_enabled else 'DISABLED'}")
+            logger.info(f"[ OK ] Trajectory max samples: {trajectory_max_samples}")
+            logger.info(f"[ OK ] Evaluation/plot interval: every {eval_interval} epochs")
+            if trajectory_plots_enabled:
+                print(f"Trajectory plots enabled: {trajectory_max_samples} samples every {eval_interval} epochs")
+            else:
+                print("[ WARNING ] Warning: Trajectory plots are disabled in WandB settings")
+        else:
+            logger.info("[ WARNING ] Wandb initialization failed, continuing without wandb")
+    
+
     # Use specialist settings for defaults
     if phases_to_run is None:
-        phases_to_run = specialist_settings['phases_to_run']
+        phases_to_run = specialist_training['phases_to_run']
     
-    evaluation_between_phases = specialist_settings.get('evaluation_between_phases', True)
+    evaluation_between_phases = specialist_training.get('evaluation_between_phases', True)
     
     # Validate multi-encoder configuration
     NUM_ENCODERS = model_architecture.get('num_encoders', 1)
@@ -1895,8 +1964,8 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
     print(f"- Examples per task: {N_EXAMPLES_PER_TASK}")
     print(f"- Phases to run: {phases_to_run}")
     print(f"- Evaluation between phases: {evaluation_between_phases}")
-    print(f"- Phase A epochs: {specialist_settings['phase_a']['epochs']}")
-    print(f"- Phase B epochs: {specialist_settings['phase_b']['epochs']}")
+    print(f"- Phase A epochs: {specialist_training['phase_a']['epochs']}")
+    print(f"- Phase B epochs: {specialist_training['phase_b']['epochs']}")
     print(f"- Infinite dataloader: {INFINITE_DATALOADER}")
     if INFINITE_DATALOADER:
         print(f"- Batches per epoch: {BATCHES_PER_EPOCH}")
@@ -1911,9 +1980,15 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
     
     set_seed(data_settings['training_seed'])
     
-    # Create run directory and setup logging
-    run_dir = create_run_directory(file_store_name)
+    # Use the run_dir passed from main files or create one if not provided
+    if run_dir is None:
+        run_dir = create_run_directory(file_store_name)
+    else:
+        # Ensure the directory exists
+        os.makedirs(run_dir, exist_ok=True)
+    
     logger = setup_logging(run_dir)
+    print("Using run directory:", run_dir)
     
     # ========================================
     # FREEZE CONFIGURATION FOR CONSISTENCY
@@ -1969,7 +2044,7 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
     # Initialize wandb
     wandb_logger = None
     if wandb_settings.get('enabled', False):
-        wandb_logger = init_wandb_for_mode('specialist_train', run_dir)
+        wandb_logger = init_wandb_for_mode('specialist_train', run_dir, notes=notes)
         if wandb_logger:
             logger.info(f"[ OK ] Wandb logging enabled: {wandb_logger.run.name}")
             # Verify trajectory plot settings
@@ -2150,8 +2225,8 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
             results['key_list'] = None
     
     # Run phases
-    phase_a_epochs = specialist_settings['phase_a']['epochs']
-    phase_b_epochs = specialist_settings['phase_b']['epochs']
+    phase_a_epochs = specialist_training['phase_a']['epochs']
+    phase_b_epochs = specialist_training['phase_b']['epochs']
     try:
         if 'A' in phases_to_run:
             logger.info("\n" + "=" * 100)
