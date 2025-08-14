@@ -150,41 +150,66 @@ def comprehensive_evaluation_after_epoch_specialist(
     all_training_keys = []
     all_encoder_indices = []
     
-    # Collect latents from current encoder/phase
     model.eval()
     with torch.no_grad():
-        for batch_idx, batch in enumerate(dataloader):
-            if batch_idx >= 20:  # Limit for efficiency
-                break
-                
-            if len(batch) >= 3:
-                input_seq, target_seq, batch_keys = batch[:3]
-            else:
-                input_seq, target_seq = batch[:2]
-                batch_keys = None
-            
-            input_seq = input_seq.to(device)
-            target_seq = target_seq.to(device)
-            
-            # Get latent representation based on phase
-            if phase_name == "A" and encoder_idx is not None:
-                # Phase A: specific encoder + independent decoder
-                mu, log_var, _ = model.multi_encoder.encoders[encoder_idx](input_seq, target_seq)
-                z = model.reparameterize(mu, log_var)
-            else:
-                # Phase B: PoE inference
-                mu, log_var = model(input_seq, target_seq)[1:3]
-                z = model.reparameterize(mu, log_var)
-            
-            all_training_latents.append(z.cpu().numpy())
-            # Handle batch_keys properly - if None, create default keys
-            if batch_keys is not None:
-                all_training_keys.extend(batch_keys)
-            else:
-                # Create default keys based on encoder_idx and batch size
-                default_keys = [f"encoder_{encoder_idx}_sample_{i}" for i in range(len(z))]
-                all_training_keys.extend(default_keys)
-            all_encoder_indices.extend([encoder_idx if encoder_idx is not None else -1] * len(z))
+        if phase_name == "A" and encoder_dataloaders is not None:
+            # Combined view across ALL encoders
+            from utils.model_utils import prepare_dataloader as _prepare
+            for enc_i, enc_loader in enumerate(encoder_dataloaders):
+                if enc_loader is None:
+                    continue
+                # Support either a DataLoader or (inputs, outputs) tuple
+                if isinstance(enc_loader, (list, tuple)):
+                    try:
+                        enc_loader = _prepare(enc_loader[0], enc_loader[1], batch_size=16)
+                    except Exception:
+                        continue
+                batch_counter = 0
+                for batch in enc_loader:
+                    if batch_counter >= 10:
+                        break
+                    batch_counter += 1
+                    if len(batch) >= 3:
+                        input_seq, target_seq, batch_keys = batch[:3]
+                    else:
+                        input_seq, target_seq = batch[:2]
+                        batch_keys = None
+                    input_seq = input_seq.to(device)
+                    target_seq = target_seq.to(device)
+                    mu, log_var, _ = model.multi_encoder.encoders[enc_i](input_seq, target_seq)
+                    z = model.reparameterize(mu, log_var)
+                    z_np = z.cpu().numpy()
+                    all_training_latents.append(z_np)
+                    if batch_keys is not None:
+                        all_training_keys.extend(batch_keys)
+                    else:
+                        all_training_keys.extend([f"encoder_{enc_i}_sample_{k}" for k in range(len(z_np))])
+                    all_encoder_indices.extend([enc_i] * len(z_np))
+        else:
+            # Single dataloader view (current encoder or PoE)
+            for batch_idx, batch in enumerate(dataloader):
+                if batch_idx >= 20:  # Limit for efficiency
+                    break
+                if len(batch) >= 3:
+                    input_seq, target_seq, batch_keys = batch[:3]
+                else:
+                    input_seq, target_seq = batch[:2]
+                    batch_keys = None
+                input_seq = input_seq.to(device)
+                target_seq = target_seq.to(device)
+                if phase_name == "A" and encoder_idx is not None:
+                    mu, log_var, _ = model.multi_encoder.encoders[encoder_idx](input_seq, target_seq)
+                    z = model.reparameterize(mu, log_var)
+                else:
+                    mu, log_var = model(input_seq, target_seq)[1:3]
+                    z = model.reparameterize(mu, log_var)
+                z_np = z.cpu().numpy()
+                all_training_latents.append(z_np)
+                if batch_keys is not None:
+                    all_training_keys.extend(batch_keys)
+                else:
+                    all_training_keys.extend([f"encoder_{encoder_idx}_sample_{i}" for i in range(len(z_np))])
+                all_encoder_indices.extend([encoder_idx if encoder_idx is not None else -1] * len(z_np))
     
     # Create t-SNE visualization
     if all_training_latents:
@@ -196,17 +221,32 @@ def comprehensive_evaluation_after_epoch_specialist(
                     perplexity=min(30, max(1, len(all_training_latents)//4)))
         tsne_coords = tsne.fit_transform(all_training_latents)
 
-        # Create visualization
-        plt.figure(figsize=(12, 8))
+        # Create visualization (match regular training style: color by key, marker by encoder)
+        plt.figure(figsize=(16, 12))
         unique_keys = sorted(list(set(all_training_keys)))
+        unique_encoders = sorted(list(set(all_encoder_indices)))
         key_colors = {k: plt.cm.tab20(i % 20) for i, k in enumerate(unique_keys)}
+        encoder_markers = ['o', 's', '^', 'v', 'D', 'p', '*', 'h', 'H', '+']
 
         for coord, key, enc_idx in zip(tsne_coords, all_training_keys, all_encoder_indices):
             color = key_colors.get(key, 'gray')
+            marker = encoder_markers[int(enc_idx) % len(encoder_markers)] if enc_idx is not None and enc_idx >= 0 else 'o'
             plt.scatter(coord[0], coord[1], color=color, s=80, alpha=0.7,
-                        edgecolors='k', linewidths=0.5)
+                        marker=marker, edgecolors='k', linewidths=0.5)
 
-        plt.title(f'Phase {phase_name} Training Latent Space - Epoch {epoch+1}\n(Colored by Key)')
+        # Legends: compact key legend (truncated) + encoder legend (markers)
+        legend_elems = []
+        for key in unique_keys[:20]:
+            legend_elems.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=key_colors[key],
+                                           markersize=8, label=f'{str(key)[:8]}'))
+        if len(unique_keys) > 20:
+            legend_elems.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
+                                           markersize=8, label=f'... +{len(unique_keys)-20} keys'))
+        for enc in unique_encoders:
+            m = encoder_markers[int(enc) % len(encoder_markers)] if enc is not None and enc >= 0 else 'o'
+            legend_elems.append(plt.Line2D([0], [0], marker=m, color='k', linestyle='', markersize=8, label=f'Encoder {enc if enc is not None else 0}'))
+        plt.legend(handles=legend_elems, loc='upper right', fontsize=8, ncol=2)
+        plt.title(f'Phase {phase_name} Training Latent Space - Epoch {epoch+1}\n(Colored by Key, Markers by Encoder)')
         plt.xlabel('t-SNE Dimension 1')
         plt.ylabel('t-SNE Dimension 2')
 
@@ -222,17 +262,68 @@ def comprehensive_evaluation_after_epoch_specialist(
                 import wandb
                 wandb_logger._safe_log({
                     f'phase_{phase_name.lower()}_latent_space': wandb.Image(plot_path),
-                    'epoch': epoch+1 if epoch is not None else None  # ✅ ADD: Explicit epoch field
+                    'epoch': epoch+1 if epoch is not None else None
                 }, step_hint=epoch+1)
                 print(f"  [OK] Phase {phase_name} training latent space plot uploaded to wandb")
             except Exception as e:
                 print(f"  [WARNING] Could not upload Phase {phase_name} training latent space plot to wandb: {e}")
+
+        # ADD: Encoder color-coded training latent space (as in main training)
+        try:
+            import matplotlib.pyplot as plt
+            unique_encoders = sorted(list(set(all_encoder_indices)))
+            # Map encoder index to color; include fallback for unknown (-1)
+            encoder_colors = {enc: plt.cm.tab10(enc % 10) for enc in unique_encoders if enc is not None and enc >= 0}
+            encoder_colors[-1] = 'gray'
+
+            plt.figure(figsize=(16, 12))
+            for coord, enc_idx in zip(tsne_coords, all_encoder_indices):
+                color = encoder_colors.get(enc_idx, 'gray')
+                plt.scatter(coord[0], coord[1], color=color, s=80, alpha=0.7, edgecolors='k', linewidths=0.5)
+
+            # Legend with encoders (color by encoder)
+            legend_elems = []
+            for enc in unique_encoders:
+                clr = encoder_colors.get(enc, 'gray')
+                label = f'Encoder {enc}' if enc is not None and enc >= 0 else 'Unknown'
+                legend_elems.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=clr, markersize=8, label=label))
+            plt.legend(handles=legend_elems, loc='upper right')
+            plt.title(f'Phase {phase_name} Encoder-Colored Training Latent Space - Epoch {epoch+1}')
+            plt.xlabel('t-SNE Dimension 1')
+            plt.ylabel('t-SNE Dimension 2')
+
+            # Avoid overwriting between encoders: include encoder index when available
+            enc_suffix = f"_enc_{encoder_idx}" if encoder_idx is not None else ""
+            enc_plot_path = os.path.join(run_dir, 'latent_space_plots', f'phase_{phase_name.lower()}_encoder_training_latent_space_epoch_{epoch+1}{enc_suffix}.png')
+            os.makedirs(os.path.dirname(enc_plot_path), exist_ok=True)
+            plt.savefig(enc_plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+
+            print(f"  [OK] Phase {phase_name} encoder-colored latent space plot saved: {enc_plot_path}")
+            if wandb_logger:
+                try:
+                    import wandb
+                    wandb_logger._safe_log({
+                        f'phase_{phase_name.lower()}_encoder_training_latent_space{enc_suffix}': wandb.Image(enc_plot_path),
+                        'epoch': epoch+1 if epoch is not None else None
+                    }, step_hint=epoch+1)
+                    print(f"  [OK] Phase {phase_name} encoder-colored latent space plot uploaded to wandb")
+                except Exception as e:
+                    print(f"  [WARNING] Could not upload encoder-colored latent space plot to wandb: {e}")
+        except Exception as e:
+            print(f"  [WARNING] Failed to create encoder-colored latent space plot: {e}")
 
     # 2. EVALUATE WITH SAMPLE-LEVEL OPTIMIZATION, GENERATING TRAJECTORY FIGURES
     print("2. Running evaluation with sample-level optimization...")
 
     eval_results = None
     eval_keys = evaluation_settings.get('eval_keys', training_keys[:2] if len(training_keys) >= 2 else training_keys)
+    # Normalize eval_keys: support "all" and apply n_max_eval_keys cap
+    try:
+        from utils.evaluation_utils import get_evaluation_keys_with_all_support as _get_eval_keys
+        eval_keys = _get_eval_keys(eval_keys, evaluation_settings.get('n_max_eval_keys', 10))
+    except Exception:
+        pass
     n_samples = evaluation_settings.get('eval_n_samples', 2)
     n_queries = evaluation_settings.get('eval_n_queries', 10)
     eval_seed = data_settings.get('eval_seed', 42)
@@ -574,9 +665,15 @@ def generate_phase_b_final_comparison_plot(model, encoder_datasets, device, run_
     with torch.no_grad():
         num_encoders = len(encoder_datasets)
         
-        # Get evaluation settings to use ALL eval_keys
+    # Get evaluation settings to use ALL eval_keys
         eval_settings = settings.get_evaluation_settings()
-        eval_keys = eval_settings.get('eval_keys', ['00d62c1b'])
+    eval_keys = eval_settings.get('eval_keys', ['00d62c1b'])
+    # Normalize eval_keys: support "all" and apply n_max_eval_keys cap
+    try:
+        from utils.evaluation_utils import get_evaluation_keys_with_all_support as _get_eval_keys
+        eval_keys = _get_eval_keys(eval_keys, eval_settings.get('n_max_eval_keys', 10))
+    except Exception:
+        pass
         data_settings = settings.get_data_settings()
         eval_seed = data_settings.get('eval_seed', 42)
         n_samples_per_key = eval_settings.get('eval_n_samples', 2)
@@ -1176,7 +1273,8 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                         use_contrastive_margin=use_contrastive_margin,
                         margin_tau=margin_tau,
                         debug_kl_metrics=debug_kl_metrics,
-                        return_components=True  # Get detailed loss breakdown
+                        return_components=True,  # Get detailed loss breakdown
+                        batch_keys=batch_keys
                     )
                     
                     # Extract total loss and components
@@ -1349,7 +1447,7 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                         is_multi_encoder=True,
                         num_encoders=num_encoders,
                         infinite_dataloader=is_infinite_dataloader,
-                        encoder_dataloaders=encoder_dataloaders,
+                        encoder_dataloaders=None,
                         phase_name="A",
                         encoder_idx=encoder_idx
                     )
@@ -1394,7 +1492,7 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                     losses = phase_a_results['encoder_losses'][encoder_idx]
                     epochs = range(1, len(losses) + 1)
                     encoder_keys = splitting_statistics['keys_per_encoder'][encoder_idx] if 'splitting_statistics' in locals() else [f'key_{encoder_idx}']
-                    label = f'Encoder {encoder_idx} ({", ".join(encoder_keys)})'
+                    label = f'Encoder {encoder_idx}'
                     plt.plot(epochs, losses, 'o-', color=colors[encoder_idx], 
                             linewidth=2, markersize=4, label=label)
             
@@ -1431,6 +1529,135 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
         except Exception as plot_error:
             logger.warning(f"Failed to create Phase A summary plot: {plot_error}")
             logger.info("Phase A training completed successfully despite visualization error")
+
+    # Phase A final: create a combined t-SNE latent plot with one epoch worth of samples
+    try:
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from sklearn.manifold import TSNE
+        training_settings_local = settings.get_training_settings()
+        data_settings_local = settings.get_data_settings()
+        batches_per_epoch = training_settings_local.get('batches_per_epoch', 10)
+        batch_size = training_settings_local.get('batch_size', 4)
+        is_infinite = data_settings_local.get('infinite_dataloader', False)
+
+        print("Creating Phase A final t-SNE latent plot (one epoch worth of samples per encoder)...")
+
+        collected_latents = []
+        collected_keys = []
+        collected_encoders = []
+
+        for enc_i in range(num_encoders):
+            # Obtain a dataloader for this encoder
+            if hasattr(encoder_datasets[enc_i], '__iter__') and not isinstance(encoder_datasets[enc_i], (list, tuple)):
+                dl = encoder_datasets[enc_i]
+                max_batches = batches_per_epoch
+            else:
+                enc_inputs, enc_outputs = encoder_datasets[enc_i]
+                if not enc_inputs or not enc_outputs:
+                    continue
+                from utils.model_utils import prepare_dataloader as _prepare
+                dl = _prepare(enc_inputs, enc_outputs, batch_size=batch_size, shuffle=False)
+                # Approximate one epoch worth of iterations
+                try:
+                    max_batches = min(batches_per_epoch, len(dl))
+                except Exception:
+                    max_batches = batches_per_epoch
+
+            batch_counter = 0
+            with torch.no_grad():
+                for batch in dl:
+                    if batch_counter >= max_batches:
+                        break
+                    batch_counter += 1
+                    if len(batch) >= 3:
+                        input_seq, target_seq, batch_keys = batch[:3]
+                    else:
+                        input_seq, target_seq = batch[:2]
+                        batch_keys = None
+                    input_seq = input_seq.to(device)
+                    target_seq = target_seq.to(device)
+
+                    # Encode with this encoder and take mean vectors
+                    mu, log_var, _ = model.multi_encoder.encoders[enc_i](input_seq, target_seq)
+                    z = model.reparameterize(mu, log_var)
+
+                    z_np = z.detach().cpu().numpy()
+                    collected_latents.append(z_np)
+
+                    # Derive per-sample key labels
+                    if batch_keys is not None:
+                        # Convert to list of strings
+                        try:
+                            keys_list = [str(k.item()) for k in batch_keys]
+                        except Exception:
+                            try:
+                                keys_list = [str(k) for k in batch_keys]
+                            except Exception:
+                                keys_list = [f'enc_{enc_i}'] * z_np.shape[0]
+                    else:
+                        keys_list = [f'enc_{enc_i}'] * z_np.shape[0]
+
+                    collected_keys.extend(keys_list)
+                    collected_encoders.extend([enc_i] * z_np.shape[0])
+
+        if collected_latents:
+            all_z = np.concatenate(collected_latents, axis=0)
+            # t-SNE
+            tsne = TSNE(n_components=2, random_state=data_settings_local.get('training_seed', 42), 
+                        perplexity=min(30, max(5, all_z.shape[0] // 4)))
+            coords = tsne.fit_transform(all_z)
+
+            unique_keys = sorted(list(set(collected_keys)))
+            key_colors = {k: plt.cm.tab20(i % 20) for i, k in enumerate(unique_keys)}
+            encoder_markers = ['o', 's', '^', 'v', 'D', 'p', '*', 'h', 'H', '+']
+
+            plt.figure(figsize=(16, 12))
+            for (x, y), key, enc_idx in zip(coords, collected_keys, collected_encoders):
+                color = key_colors.get(key, 'gray')
+                marker = encoder_markers[int(enc_idx) % len(encoder_markers)]
+                plt.scatter(x, y, color=color, marker=marker, s=60, alpha=0.8, edgecolors='k', linewidths=0.3)
+
+            # Legends
+            legend_elems = []
+            # Key legend (cap to 20 to keep readable)
+            for key in unique_keys[:20]:
+                legend_elems.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=key_colors[key],
+                                               markersize=8, label=str(key)))
+            if len(unique_keys) > 20:
+                legend_elems.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
+                                               markersize=8, label=f"... +{len(unique_keys)-20} keys"))
+            # Encoder marker legend
+            for enc in sorted(set(collected_encoders)):
+                m = encoder_markers[int(enc) % len(encoder_markers)]
+                legend_elems.append(plt.Line2D([0], [0], marker=m, color='k', linestyle='', markersize=8, label=f'Encoder {enc}'))
+
+            plt.legend(handles=legend_elems, loc='upper right', fontsize=8, ncol=2)
+            plt.title('Phase A Final Training Latent Space (One Epoch per Encoder)\nColor: Key, Marker: Encoder')
+            plt.xlabel('t-SNE Dimension 1')
+            plt.ylabel('t-SNE Dimension 2')
+
+            final_plot_path = os.path.join(run_dir, 'latent_space_plots', 'phase_a_final_training_latent_space.png')
+            os.makedirs(os.path.dirname(final_plot_path), exist_ok=True)
+            plt.savefig(final_plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+
+            print(f"[ OK ] Phase A final latent space plot saved: {final_plot_path}")
+            if wandb_logger:
+                try:
+                    import wandb
+                    final_phase_a_step = (num_encoders - 1) * phase_epochs + phase_epochs
+                    wandb_logger._safe_log({
+                        'phase_a/final_training_latent_space': wandb.Image(final_plot_path),
+                        'epoch': final_phase_a_step
+                    }, step_hint=final_phase_a_step)
+                    print("[ OK ] Phase A final latent space plot uploaded to wandb")
+                except Exception as e:
+                    print(f"[ WARNING ] Could not upload Phase A final latent space plot: {e}")
+        else:
+            print("[ WARNING ] No latents collected for Phase A final t-SNE plot")
+    except Exception as e:
+        logger.warning(f"Failed to create Phase A final t-SNE latent plot: {e}")
     
     return phase_a_results
 
@@ -1484,6 +1711,9 @@ def train_phase_b_decoder(model, encoder_datasets, device, logger, wandb_logger,
     # Use settings for phase epochs if not provided
     if phase_epochs is None:
         phase_epochs = specialist_settings['phase_b']['epochs']
+    
+    # Phase B does not use cross-pair loss; ensure the flag is defined locally
+    cross_pair_enabled = False
     
     # Calculate a starting global step offset based on Phase A length (num_encoders * phase_a_epochs)
     phase_a_epochs_total = specialist_settings['phase_a']['epochs'] * len(model.multi_encoder.encoders)
@@ -1591,7 +1821,8 @@ def train_phase_b_decoder(model, encoder_datasets, device, logger, wandb_logger,
                 free_bits_delta = enhanced_training.get('free_bits_delta', 0.07)
                 debug_kl_metrics = enhanced_training.get('debug_kl_metrics', False)
                 
-                # Use PoE inference with shared decoder (encoder_idx=None triggers PoE) + enhanced mechanisms
+                # Phase B: Use PoE inference with shared decoder and apply same enhanced mechanisms.
+                # Mirror Phase A semantics for cross-pair/loo if dataloader carries keys (batch_keys).
                 loss_result = compute_loss(
                     model, input_seq, target_seq,
                     beta=BETA, encoder_idx=None, use_independent_decoder=False,
@@ -1602,7 +1833,9 @@ def train_phase_b_decoder(model, encoder_datasets, device, logger, wandb_logger,
                     use_free_bits=use_free_bits,
                     free_bits_delta=free_bits_delta,
                     debug_kl_metrics=debug_kl_metrics,
-                    return_components=True  # Get detailed loss breakdown
+                    return_components=True,  # Get detailed loss breakdown
+                    cross_pair_enabled=cross_pair_enabled,
+                    batch_keys=batch_keys
                 )
                 
                 # Extract loss and components
@@ -1752,7 +1985,7 @@ def train_phase_b_decoder(model, encoder_datasets, device, logger, wandb_logger,
                         is_multi_encoder=True,
                         num_encoders=num_encoders,
                         infinite_dataloader=is_infinite_dataloader,
-                        encoder_dataloaders=encoder_dataloaders,
+                        encoder_dataloaders=None,
                         phase_name="B",
                         encoder_idx=None  # PoE inference
                     )
@@ -1821,6 +2054,12 @@ def run_evaluation_between_phases(model, device, logger, wandb_logger, run_dir, 
         # Use ALL eval keys from settings for comprehensive evaluation
         eval_settings = settings.get_evaluation_settings()
         eval_keys = eval_settings.get('eval_keys', ['00d62c1b'])
+        # Normalize eval_keys: support "all" and apply n_max_eval_keys cap
+        try:
+            from utils.evaluation_utils import get_evaluation_keys_with_all_support as _get_eval_keys
+            eval_keys = _get_eval_keys(eval_keys, eval_settings.get('n_max_eval_keys', 10))
+        except Exception:
+            pass
         print(f"  Evaluating after {phase_name} on ALL keys: {eval_keys}")
         
         eval_results = run_quick_evaluation(
@@ -1867,29 +2106,29 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
     model_architecture = settings.get_model_architecture()
     training_settings = settings.get_training_settings()
     latent_optimization = settings.get_latent_optimization()
-    specialist_training = settings.get_specialist_training()
+    specialist_training = settings.get_specialist_training_settings()
     wandb_settings = settings.get_wandb_settings()
     
-    # Update global variables from settings
-    TRAINING_KEYS = data_settings['training_keys']
-    N_EXAMPLES_PER_TASK = data_settings['n_examples_per_task']
-    N_PAIRS_PER_EXAMPLE = data_settings['n_pairs_per_example']
+    # Update global variables from settings (mirror main training)
+    TRAINING_KEYS = data_settings.get('training_keys', [data_settings.get('key', None)])
+    N_EXAMPLES_PER_TASK = data_settings['n']
     DROPOUT = model_architecture['dropout']
     BATCH_SIZE = training_settings['batch_size']
     NUM_EPOCHS = training_settings['num_epochs']
     LEARNING_RATE = training_settings['learning_rate']
     BETA = training_settings['beta']
-    OPTIMIZE_Z = latent_optimization['enabled']
-    OPTIMIZE_Z_NUM_STEPS = latent_optimization['num_steps']
-    OPTIMIZE_Z_LR = latent_optimization['learning_rate']
-    OPTIMIZE_Z_INFERENCE = latent_optimization['inference']['enabled']
-    OPTIMIZE_Z_INFERENCE_NUM_STEPS = latent_optimization['inference']['num_steps']
-    OPTIMIZE_Z_INFERENCE_LR = latent_optimization['inference']['learning_rate']
+    # Align with specialist settings structure (training/inference blocks)
+    OPTIMIZE_Z = latent_optimization.get('training', {}).get('enabled', False)
+    OPTIMIZE_Z_NUM_STEPS = latent_optimization.get('training', {}).get('num_steps', 0)
+    OPTIMIZE_Z_LR = latent_optimization.get('training', {}).get('learning_rate', 0.0)
+    OPTIMIZE_Z_INFERENCE = latent_optimization.get('inference', {}).get('enabled', True)
+    OPTIMIZE_Z_INFERENCE_NUM_STEPS = latent_optimization.get('inference', {}).get('num_steps', 100)
+    OPTIMIZE_Z_INFERENCE_LR = latent_optimization.get('inference', {}).get('learning_rate', 0.1)
     
     print(f"Specialist training settings:")
     print(f"  Training keys: {TRAINING_KEYS}")
     print(f"  N examples per task: {N_EXAMPLES_PER_TASK}")
-    print(f"  N pairs per example: {N_PAIRS_PER_EXAMPLE}")
+    # No pairs-per-example in specialist settings; use data_settings['n'] consistently
     print(f"  Batch size: {BATCH_SIZE}")
     print(f"  Learning rate: {LEARNING_RATE}")
     print(f"  Beta: {BETA}")
@@ -1902,25 +2141,7 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
     print(f"  Phase A epochs: {specialist_training['phase_a']['epochs']}")
     print(f"  Phase B epochs: {specialist_training['phase_b']['epochs']}")
     
-    # Initialize wandb logger
-    wandb_logger = None
-    if wandb_settings.get('enabled', False):
-        wandb_logger = init_wandb_for_mode('specialist_train', run_dir, notes=notes)
-        if wandb_logger:
-            logger.info(f"[ OK ] Wandb logging enabled: {wandb_logger.run.name}")
-            # Verify trajectory plot settings
-            trajectory_plots_enabled = wandb_settings.get('log_trajectory_plots', False)
-            trajectory_max_samples = wandb_settings.get('trajectory_max_samples', 3)
-            eval_interval = wandb_settings.get('eval_log_interval', 10)
-            logger.info(f"[ OK ] Trajectory plots: {'ENABLED' if trajectory_plots_enabled else 'DISABLED'}")
-            logger.info(f"[ OK ] Trajectory max samples: {trajectory_max_samples}")
-            logger.info(f"[ OK ] Evaluation/plot interval: every {eval_interval} epochs")
-            if trajectory_plots_enabled:
-                print(f"Trajectory plots enabled: {trajectory_max_samples} samples every {eval_interval} epochs")
-            else:
-                print("[ WARNING ] Warning: Trajectory plots are disabled in WandB settings")
-        else:
-            logger.info("[ WARNING ] Wandb initialization failed, continuing without wandb")
+    # (Moved WandB initialization below after run_dir and logger creation)
     
 
     # Use specialist settings for defaults
@@ -2064,52 +2285,64 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
     # Generate and split data for multi-encoder training
     logger.info("Generating and splitting data for specialist training...")
     print("Generating and splitting data...")
-    
+
+    SPLIT_ACROSS_ENCODERS = data_settings.get('split_across_encoders', True)
+    return_keys = training_settings.get('return_task_keys', False)
+
     if INFINITE_DATALOADER:
         logger.info("INFINITE_DATALOADER = True")
         print("INFINITE_DATALOADER = True")
-        
-        # Create infinite dataloaders for each encoder
+
         tasks_dir = os.path.join(os.path.dirname(__file__), 're_arc', 're_arc', 'tasks')
         encoder_dataloaders = []
         key_to_encoder_mapping = {}
         splitting_statistics = {'keys_per_encoder': {}}
-        
-        # Distribute keys across encoders
-        num_keys = len(TRAINING_KEYS)
-        keys_per_encoder = num_keys // NUM_ENCODERS
-        remaining_keys = num_keys % NUM_ENCODERS
-        
-        key_idx = 0
-        for enc_idx in range(NUM_ENCODERS):
-            # Calculate how many keys this encoder should get
-            keys_for_this_encoder = keys_per_encoder + (1 if enc_idx < remaining_keys else 0)
-            
-            # Assign keys to this encoder
-            encoder_keys = []
-            for _ in range(keys_for_this_encoder):
-                if key_idx < len(TRAINING_KEYS):
-                    key = TRAINING_KEYS[key_idx]
-                    encoder_keys.append(key)
-                    key_to_encoder_mapping.setdefault(enc_idx, []).append(key)
-                    key_idx += 1
-            
-            if encoder_keys:
-                dataloader = create_infinite_dataloader(
-                    encoder_keys, BATCH_SIZE, BATCHES_PER_EPOCH,
-                    seed=data_settings['training_seed'], data_dir=tasks_dir
-                )
-                encoder_dataloaders.append(dataloader)
-                splitting_statistics['keys_per_encoder'][enc_idx] = encoder_keys
-                logger.info(f"Encoder {enc_idx}: infinite loader for keys {encoder_keys}")
-                print(f"Encoder {enc_idx}: infinite loader for keys {encoder_keys}")
-            else:
-                encoder_dataloaders.append(None)
-                splitting_statistics['keys_per_encoder'][enc_idx] = []
-                logger.info(f"Encoder {enc_idx}: No keys assigned")
-                print(f"Encoder {enc_idx}: No keys assigned")
-        
-        # Store for later use
+
+        if SPLIT_ACROSS_ENCODERS:
+            # Distribute keys across encoders (same as main training)
+            num_keys = len(TRAINING_KEYS)
+            keys_per_encoder = num_keys // NUM_ENCODERS
+            remaining_keys = num_keys % NUM_ENCODERS
+
+            key_idx = 0
+            for enc_idx in range(NUM_ENCODERS):
+                # Calculate how many keys this encoder should get
+                keys_for_this_encoder = keys_per_encoder + (1 if enc_idx < remaining_keys else 0)
+
+                # Assign keys to this encoder
+                encoder_keys = []
+                for _ in range(keys_for_this_encoder):
+                    if key_idx < len(TRAINING_KEYS):
+                        key = TRAINING_KEYS[key_idx]
+                        encoder_keys.append(key)
+                        key_to_encoder_mapping.setdefault(enc_idx, []).append(key)
+                        key_idx += 1
+
+                if encoder_keys:
+                    dataloader = create_infinite_dataloader(
+                        encoder_keys, BATCH_SIZE, BATCHES_PER_EPOCH,
+                        seed=data_settings['training_seed'], data_dir=tasks_dir, return_keys=return_keys
+                    )
+                    encoder_dataloaders.append(dataloader)
+                    splitting_statistics['keys_per_encoder'][enc_idx] = encoder_keys
+                    logger.info(f"Encoder {enc_idx}: infinite loader for keys {encoder_keys}")
+                    print(f"Encoder {enc_idx}: infinite loader for keys {encoder_keys}")
+                else:
+                    encoder_dataloaders.append(None)
+                    splitting_statistics['keys_per_encoder'][enc_idx] = []
+                    logger.info(f"Encoder {enc_idx}: No keys assigned")
+                    print(f"Encoder {enc_idx}: No keys assigned")
+        else:
+            # Mixed dataset for all encoders
+            mixed_dataloader = create_infinite_dataloader(
+                TRAINING_KEYS, BATCH_SIZE, BATCHES_PER_EPOCH,
+                seed=data_settings['training_seed'], data_dir=tasks_dir, return_keys=return_keys
+            )
+            encoder_dataloaders = [mixed_dataloader for _ in range(NUM_ENCODERS)]
+            for enc_idx in range(NUM_ENCODERS):
+                splitting_statistics['keys_per_encoder'][enc_idx] = TRAINING_KEYS
+                key_to_encoder_mapping.setdefault(enc_idx, []).extend(TRAINING_KEYS)
+
         # For infinite dataloader, dataset_splits contains dataloaders, not (inputs, outputs) tuples
         dataset_splits = encoder_dataloaders  # Reuse variable name for compatibility
     else:
@@ -2359,7 +2592,83 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
         
         # Save model parameters
         save_model_params(run_dir, param_info)
-        
+
+        # Generate and upload samples_used before closing WandB
+        try:
+            print("\n=== GENERATING SAMPLES_USED FOLDER (specialist) ===")
+            from utils.visualizers import generate_samples_used_folder
+            from utils.evaluation_utils import get_evaluation_keys_with_all_support
+            import glob
+            import os as _os
+            
+            # Resolve training keys with 'all' support
+            try:
+                training_settings_current = settings.get_training_settings()
+                data_settings_current = settings.get_data_settings()
+                evaluation_settings_current = settings.get_evaluation_settings()
+            except Exception:
+                training_settings_current = training_settings
+                data_settings_current = data_settings
+                evaluation_settings_current = settings.get_evaluation_settings()
+
+            training_keys = (
+                training_settings_current.get('task_keys')
+                or data_settings_current.get('task_keys')
+                or data_settings_current.get('training_keys')
+            )
+
+            if isinstance(training_keys, str) and training_keys.lower() == 'all':
+                tasks_dir = _os.path.join(_os.path.dirname(__file__), 're_arc', 're_arc', 'tasks')
+                all_keys = [fname[:-5] for fname in _os.listdir(tasks_dir) if fname.endswith('.json')]
+                all_keys.sort()
+                n_max_keys = data_settings_current.get('n_max_keys', None)
+                if n_max_keys is not None:
+                    try:
+                        n_max_keys = int(n_max_keys)
+                        all_keys = all_keys[:n_max_keys]
+                    except Exception:
+                        pass
+                training_keys = all_keys
+
+            # Evaluation keys with ALL support and cap
+            eval_keys = evaluation_settings_current.get('eval_keys')
+            eval_keys = get_evaluation_keys_with_all_support(
+                eval_keys, evaluation_settings_current.get('n_max_eval_keys', 10)
+            )
+
+            if training_keys or eval_keys:
+                generate_samples_used_folder(
+                    run_dir=run_dir,
+                    training_keys=training_keys,
+                    eval_keys=eval_keys,
+                    n_samples=5
+                )
+                print("[ OK ] Samples_used folder generation completed (specialist)")
+
+                # Upload to WandB in current run
+                if wandb_logger:
+                    try:
+                        import wandb as _wandb
+                        samples_dir = _os.path.join(run_dir, "samples_used")
+                        train_dir = _os.path.join(samples_dir, "train")
+                        eval_dir = _os.path.join(samples_dir, "eval")
+                        train_images = [_wandb.Image(p) for p in sorted(glob.glob(_os.path.join(train_dir, "*.png")))] if _os.path.exists(train_dir) else []
+                        eval_images = [_wandb.Image(p) for p in sorted(glob.glob(_os.path.join(eval_dir, "*.png")))] if _os.path.exists(eval_dir) else []
+                        payload = {}
+                        if train_images:
+                            payload['samples/train'] = train_images
+                        if eval_images:
+                            payload['samples/eval'] = eval_images
+                        if payload:
+                            wandb_logger._safe_log(payload)
+                            print(f"[ OK ] Uploaded samples to WandB: train={len(train_images)}, eval={len(eval_images)}")
+                        else:
+                            print("[ INFO ] No sample images found to upload to WandB")
+                    except Exception as _e:
+                        print(f"[ WARNING ] Failed to upload samples to WandB (specialist): {_e}")
+        except Exception as e:
+            print(f"[ WARNING ] Failed to generate samples_used (specialist): {e}")
+
         if wandb_logger:
             wandb_logger.finish()
         

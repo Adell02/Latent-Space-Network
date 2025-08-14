@@ -2523,12 +2523,7 @@ def plot_training_latent_space_per_epoch(model, dataloader, device, epoch, save_
             plt.scatter(coord[0], coord[1], color=color, s=80, alpha=0.7,
                         marker=marker, edgecolors='k', linewidths=0.5)
             
-            # ✅ FIX: Match label color with key color and add small legend by encoder
-            if len(all_training_latents) <= 1000:  # Only add labels if not too many points
-                label = f"{str(key)[:4]}"  # First 4 chars of key
-                plt.text(coord[0], coord[1] + 0.3, label, fontsize=6, 
-                        ha='center', va='bottom', color=color,  # ✅ Use key color instead of black
-                        bbox=dict(boxstyle="round,pad=0.1", facecolor='white', alpha=0.7))
+            # Labels removed for clarity in evaluation latent space
 
         # Create compact legend for keys (show only first 20 keys to avoid clutter)
         legend_elements = []
@@ -2699,7 +2694,8 @@ def plot_evaluation_latent_space_by_key_and_encoder(eval_results, save_dir, epoc
                     ood_label = ood_task_keys[0] if ood_task_keys and len(ood_task_keys) > 0 else None
                     
                     # For query, we show one latent per task (not per sample)
-                    if latents:
+                    # Avoid ambiguous truth-value checks on numpy arrays
+                    if isinstance(latents, (list, np.ndarray)) and len(latents) > 0:
                         # Use the first query latent as representative for the task
                         first_latent = latents[0]
                         if isinstance(first_latent, (list, np.ndarray)):
@@ -2738,36 +2734,46 @@ def plot_evaluation_latent_space_by_key_and_encoder(eval_results, save_dir, epoc
     tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(all_latents)//4))
     tsne_coords = tsne.fit_transform(all_latents)
     
-    # Color map
+    # Color map and marker map
     key_colors = {k: plt.cm.tab20(i % 20) for i, k in enumerate(unique_keys)}
-    sample_type_colors = {'support': 'blue', 'query': 'red'}
-    encoder_markers = ['o', 's', '^', 'v', 'D', 'p', '*', 'h', 'H', '+']
+    encoder_markers = ['o', 's', '^', 'v', 'D', 'p', '*', 'h', 'H', '+']  # per-encoder
     
     plt.figure(figsize=(16, 12))
     
-    # Plot with different markers for support vs query
+    # Plot with marker per encoder (PoE uses 'X'), color per key
     for coord, key, encoder_idx, sample_type in zip(tsne_coords, all_keys, all_encoders, all_sample_types):
         color = key_colors[key]
-        marker = 'o' if sample_type == 'support' else 's'  # Circle for support, square for query
-        size = 80 if sample_type == 'support' else 120  # Larger for query samples
+        if encoder_idx == -1:
+            marker = 'X'  # PoE
+        else:
+            marker = encoder_markers[int(encoder_idx) % len(encoder_markers)] if encoder_idx is not None else 'o'
+        size = 100 if sample_type == 'query' else 80  # Slight emphasis for query
         
         plt.scatter(coord[0], coord[1], color=color, s=size, alpha=0.7,
                     marker=marker, edgecolors='k', linewidths=0.5)
         
-        # Add small label
-        label = f"{str(key)[:4]}/{sample_type[:1]}"  # key/s or key/q
-        plt.text(coord[0], coord[1] + 0.3, label, fontsize=6, 
-                ha='center', va='bottom', color='black', 
-                bbox=dict(boxstyle="round,pad=0.1", facecolor='white', alpha=0.7))
+        # Labels removed for clarity in evaluation latent space
     
-    # Create legend
+    # Create legend: show a compact encoder marker legend and a truncated key legend
     legend_elements = []
     
-    # Key legend
-    for key in unique_keys:
+    # Key legend (truncate to avoid clutter)
+    for key in unique_keys[:20]:
         color = key_colors[key]
         legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=color,
                                        markersize=8, label=f'{key[:8]}'))
+    if len(unique_keys) > 20:
+        legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
+                                           markersize=8, label=f'... +{len(unique_keys)-20} keys'))
+
+    # Encoder legend
+    enc_set = sorted(list(set(all_encoders)))
+    for enc in enc_set:
+        if enc == -1:
+            legend_elements.append(plt.Line2D([0], [0], marker='X', color='k', linestyle='', markersize=8, label='PoE'))
+        else:
+            m = encoder_markers[int(enc) % len(encoder_markers)] if enc is not None else 'o'
+            legend_elements.append(plt.Line2D([0], [0], marker=m, color='k', linestyle='', markersize=8, label=f'Enc {enc if enc is not None else 0}'))
     
     # Sample type legend
     legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='blue',
@@ -2874,9 +2880,25 @@ def create_standalone_latent_space_plot(trajectory_info, model, save_dir, epoch,
     
     # Load unified latent data (training + support + query + trajectory) - same as trajectory figure
     from LPN_reproduction.evaluate_trajectory import load_unified_latent_data_with_trajectory
-    training_latent_data, training_tsne_2d, training_labels, training_colors, trajectory_tsne_2d, all_labels, all_tsne_2d, actual_evaluated_keys = load_unified_latent_data_with_trajectory(
-        save_dir, model, device, trajectory_info, eval_results=eval_results, evaluated_key=evaluated_key, ood_enabled=ood_enabled, ood_task_keys=ood_task_keys  # ✅ Add OOD parameters
+    unified = load_unified_latent_data_with_trajectory(
+        save_dir, model, device, trajectory_info, eval_results=eval_results, evaluated_key=evaluated_key, ood_enabled=ood_enabled, ood_task_keys=ood_task_keys
     )
+    # Be tolerant to return arity (7 vs 8 elements)
+    if isinstance(unified, (list, tuple)):
+        if len(unified) == 8:
+            training_latent_data, training_tsne_2d, training_labels, training_colors, trajectory_tsne_2d, all_labels, all_tsne_2d, actual_evaluated_keys = unified
+        elif len(unified) == 7:
+            training_latent_data, training_tsne_2d, training_labels, training_colors, trajectory_tsne_2d, all_labels, all_tsne_2d = unified
+            actual_evaluated_keys = [evaluated_key] if evaluated_key is not None else []
+        else:
+            # Unexpected format; initialize safe defaults
+            training_latent_data = training_tsne_2d = training_labels = training_colors = None
+            trajectory_tsne_2d = all_labels = all_tsne_2d = None
+            actual_evaluated_keys = [evaluated_key] if evaluated_key is not None else []
+    else:
+        training_latent_data = training_tsne_2d = training_labels = training_colors = None
+        trajectory_tsne_2d = all_labels = all_tsne_2d = None
+        actual_evaluated_keys = [evaluated_key] if evaluated_key is not None else []
     
     # Get trajectory data (limit to 3 points: initial, mid, final)
     z_vectors = trajectory_info.get('z_vectors', [])
@@ -2886,15 +2908,12 @@ def create_standalone_latent_space_plot(trajectory_info, model, save_dir, epoch,
         print(f"Warning: No trajectory data found for sample {sample_idx}")
         return None
     
-    # Limit trajectory to 3 points: initial, mid, final
-    if len(z_vectors) >= 3:
-        # Take first, middle, and last points
-        indices = [0, len(z_vectors) // 2, len(z_vectors) - 1]
-        z_vectors = [z_vectors[i] for i in indices]
-        losses = [losses[i] for i in indices] if len(losses) >= len(z_vectors) else losses[:len(z_vectors)]
-        print(f"DEBUG: Limited trajectory to 3 points: initial, mid, final")
-    else:
-        print(f"DEBUG: Using all {len(z_vectors)} trajectory points (less than 3)")
+    # Do NOT downsample here: plot the full trajectory so losses and steps align
+    # Ensure losses and z_vectors have matching lengths by truncation to the shorter one
+    if isinstance(losses, list) and len(losses) != len(z_vectors):
+        min_len = min(len(losses), len(z_vectors))
+        losses = losses[:min_len]
+        z_vectors = z_vectors[:min_len]
     
     # Create the plot - replicate exactly the trajectory figure latent space
     fig, ax = plt.subplots(figsize=(12, 10))

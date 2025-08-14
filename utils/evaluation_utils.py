@@ -74,8 +74,10 @@ def generate_trajectory_plots(eval_results: Dict[str, Any], run_dir: str, epoch:
         print(f"Latent optimization disabled - no trajectory data available, skipping plots...")
         return trajectory_plots
     
-    # Get max samples from settings
+    # Get caps from settings
     max_samples = wandb_settings.get('trajectory_max_samples', max_samples)
+    eval_settings = settings.get_evaluation_settings()
+    per_key_cap = eval_settings.get('visualize_n_values', 1)
     
     try:
         # Import trajectory visualization functions
@@ -98,6 +100,14 @@ def generate_trajectory_plots(eval_results: Dict[str, Any], run_dir: str, epoch:
         else:
             print(f"[ OK ] Using provided in-memory model for trajectory plots (epoch {epoch})")
         
+        # Normalize epoch to avoid 0/None in filenames
+        try:
+            safe_epoch = int(epoch)
+        except Exception:
+            safe_epoch = 1
+        if safe_epoch < 1:
+            safe_epoch = 1
+
         # Process each key's trajectory info
         for key, key_results in eval_results.get('key_results', {}).items():
             if 'metrics' not in key_results:
@@ -109,8 +119,11 @@ def generate_trajectory_plots(eval_results: Dict[str, Any], run_dir: str, epoch:
                 
             print(f"Generating trajectory plots for key '{key}' (epoch {epoch})...")
             
-            # Limit number of samples for efficiency
-            limited_trajectory_list = trajectory_info_list[:max_samples]
+            # Limit number of samples per key: honor evaluation_settings.visualize_n_values first,
+            # then apply global cap from wandb settings
+            per_key_limit = max(1, int(per_key_cap)) if isinstance(per_key_cap, (int, float)) else 1
+            global_limit = max(1, int(max_samples)) if isinstance(max_samples, (int, float)) else 1
+            limited_trajectory_list = trajectory_info_list[: min(per_key_limit, global_limit)]
             
             # Generate plots for each sample
             for sample_idx, trajectory_info in enumerate(limited_trajectory_list):
@@ -122,8 +135,8 @@ def generate_trajectory_plots(eval_results: Dict[str, Any], run_dir: str, epoch:
                     trajectory_plots_dir = os.path.join(run_dir, "trajectory_plots")
                     os.makedirs(trajectory_plots_dir, exist_ok=True)
                     
-                    # Create descriptive filename - include epoch for file uniqueness
-                    plot_filename = f'trajectory_epoch{epoch if epoch is not None else 0}_{key}_sample{sample_idx}.png'
+                    # Create descriptive filename - include epoch for file uniqueness (no epoch 0)
+                    plot_filename = f'trajectory_epoch{safe_epoch}_{key}_sample{sample_idx}.png'
                     plot_path = os.path.join(trajectory_plots_dir, plot_filename)
                     
                     # Debug: Print the exact path being used
@@ -166,7 +179,7 @@ def generate_trajectory_plots(eval_results: Dict[str, Any], run_dir: str, epoch:
                         ood_task_keys = eval_results['key_results'][key]['raw_data'].get('ood_task_keys', [])
                     
                     latent_space_path = create_standalone_latent_space_plot(
-                        trajectory_info, model, run_dir, epoch, sample_idx, key, 
+                        trajectory_info, model, run_dir, safe_epoch, sample_idx, key, 
                         device='cuda', wandb_logger=wandb_logger, 
                         eval_results=eval_results, ood_enabled=ood_enabled, ood_task_keys=ood_task_keys
                     )

@@ -1,7 +1,7 @@
 {
   "data_settings": {
       "training_keys": "all",
-      "n_max_keys": 5,
+      "n_max_keys": 20,
       "training_seed": 42,
       "eval_seed": 1,
       "n": 10,
@@ -12,7 +12,7 @@
       "data_source": "synthetic",
       "use_ood_for_training": false,
       "num_epochs": 5,
-      "batch_size": 16,
+      "batch_size": 32,
       "gradient_accumulation_steps": 1,
       "learning_rate": 0.0004,
       "optimizer_weight_decay": 0.0,
@@ -78,8 +78,8 @@
       "decoder_layers": 2,
       "encoder_heads": 6,
       "decoder_heads": 6,
-      "encoder_hidden_dim": 48,
-      "decoder_hidden_dim": 48,
+      "encoder_hidden_dim": 96,
+      "decoder_hidden_dim": 96,
       "latent_dim": 64,
       "dropout": 1e-6,
       "decoder_input_dropout": 0,

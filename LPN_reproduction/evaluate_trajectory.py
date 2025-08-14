@@ -234,10 +234,24 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
     extract_reconstruction_grid = safe_extract_reconstruction_grid
     
     print("Loading unified latent data (training + support + query + trajectory)...")
-    training_latent_data, training_tsne_2d, training_labels, training_colors, trajectory_tsne_2d, all_labels, all_tsne_2d, actual_evaluated_keys = load_unified_latent_data_with_trajectory(
+    unified = load_unified_latent_data_with_trajectory(
         run_dir, model, device, trajectory_info, ood_enabled=ood_enabled, ood_task_keys=ood_task_keys
-
     )
+    # Be robust to different return arities (7 vs 8 values)
+    if isinstance(unified, (list, tuple)):
+        if len(unified) == 8:
+            training_latent_data, training_tsne_2d, training_labels, training_colors, trajectory_tsne_2d, all_labels, all_tsne_2d, actual_evaluated_keys = unified
+        elif len(unified) == 7:
+            training_latent_data, training_tsne_2d, training_labels, training_colors, trajectory_tsne_2d, all_labels, all_tsne_2d = unified
+            actual_evaluated_keys = []
+        else:
+            training_latent_data = training_tsne_2d = training_labels = training_colors = None
+            trajectory_tsne_2d = all_labels = all_tsne_2d = None
+            actual_evaluated_keys = []
+    else:
+        training_latent_data = training_tsne_2d = training_labels = training_colors = None
+        trajectory_tsne_2d = all_labels = all_tsne_2d = None
+        actual_evaluated_keys = []
 
     # Create figure with GridSpec for complex multi-encoder layout
     num_encoders = getattr(model, 'num_encoders', 1)
@@ -525,10 +539,17 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
                 # Fallback: use model's encoder count
                 unique_encoders = list(range(getattr(model, 'num_encoders', 1)))
             
+            # Ensure encoder_colors exists even if background plotting was skipped
+            if 'encoder_colors' not in locals():
+                try:
+                    encoder_colors = {enc: plt.cm.tab10(int(enc) % 10) for enc in unique_encoders}
+                except Exception:
+                    encoder_colors = {enc: 'gray' for enc in unique_encoders}
+
             # Add training samples to legend
             for encoder in unique_encoders:
                 legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', 
-                                               markerfacecolor=encoder_colors[encoder], 
+                                               markerfacecolor=encoder_colors.get(encoder, 'gray'), 
                                                markersize=8, label=f'Training Encoder {encoder}'))
             
             # Add support and query samples to legend for the evaluated key only
@@ -1004,7 +1025,9 @@ def plot_error_maps_row(ax_error_maps, trajectory_info, model, num_encoders):
                     ax.set_title(f'Encoder {enc_idx}\nError', fontsize=8)
                     ax.axis('off')
                 else:
-                    ax.text(0.5, 0.5, f'Encoder {enc_idx}\nNo Data', 
+                    # Distinguish between missing reconstruction vs shape mismatch
+                    msg = 'No Recon' if recon_grid is None else 'Wrong Shape'
+                    ax.text(0.5, 0.5, f'Encoder {enc_idx}\n{msg}', 
                            ha='center', va='center', transform=ax.transAxes, fontsize=8)
                     ax.set_title(f'Encoder {enc_idx}')
                     ax.axis('off')
@@ -1034,7 +1057,8 @@ def plot_error_maps_row(ax_error_maps, trajectory_info, model, num_encoders):
                     ax.set_title(f'POE {label.title()}\nError', fontsize=8)
                     ax.axis('off')
                 else:
-                    ax.text(0.5, 0.5, f'POE {label.title()}\nNo Data', 
+                    msg = 'No Recon' if recon_grid is None else 'Wrong Shape'
+                    ax.text(0.5, 0.5, f'POE {label.title()}\n{msg}', 
                            ha='center', va='center', transform=ax.transAxes, fontsize=8)
                     ax.set_title(f'POE {label.title()}')
                     ax.axis('off')
@@ -1126,12 +1150,14 @@ def plot_query_error_maps_row(ax_query_error_maps, trajectory_info, model, num_e
                     ax.set_title(f'Query Encoder {enc_idx}\nError', fontsize=8)
                     ax.axis('off')
                 else:
-                    ax.text(0.5, 0.5, f'Query Encoder {enc_idx}\nNo Data', 
+                    msg = 'No Recon' if recon_grid is None else 'Wrong Shape'
+                    ax.text(0.5, 0.5, f'Query Encoder {enc_idx}\n{msg}', 
                            ha='center', va='center', transform=ax.transAxes, fontsize=8)
                     ax.set_title(f'Query Encoder {enc_idx}')
                     ax.axis('off')
             else:
-                ax.text(0.5, 0.5, f'Query Encoder {enc_idx}\nNo Data', 
+                msg = 'No Recon' if recon_grid is None else 'Wrong Shape'
+                ax.text(0.5, 0.5, f'Query Encoder {enc_idx}\n{msg}', 
                        ha='center', va='center', transform=ax.transAxes, fontsize=8)
                 ax.set_title(f'Query Encoder {enc_idx}')
                 ax.axis('off')
@@ -1157,12 +1183,14 @@ def plot_query_error_maps_row(ax_query_error_maps, trajectory_info, model, num_e
                     ax.set_title(f'Query POE {label.title()}\nError', fontsize=8)
                     ax.axis('off')
                 else:
-                    ax.text(0.5, 0.5, f'Query POE {label.title()}\nNo Data', 
+                    msg = 'No Recon' if recon_grid is None else 'Wrong Shape'
+                    ax.text(0.5, 0.5, f'Query POE {label.title()}\n{msg}', 
                            ha='center', va='center', transform=ax.transAxes, fontsize=8)
                     ax.set_title(f'Query POE {label.title()}')
                     ax.axis('off')
             else:
-                ax.text(0.5, 0.5, f'Query POE {label.title()}\nNo Data', 
+                msg = 'No Recon' if recon_grid is None else 'Wrong Shape'
+                ax.text(0.5, 0.5, f'Query POE {label.title()}\n{msg}', 
                        ha='center', va='center', transform=ax.transAxes, fontsize=8)
                 ax.set_title(f'Query POE {label.title()}')
                 ax.axis('off')
@@ -1230,83 +1258,48 @@ def load_unified_latent_data_with_trajectory(run_dir, model, device, trajectory_
         # Fallback to the old method (but this should rarely happen)
         results_file = os.path.join(run_dir, "results.pkl")
         if not os.path.exists(results_file):
-            print("[ WARNING ] Warning: No results.pkl found")
-            return None, None, None, None, None, None, None
-        
-        with open(results_file, 'rb') as f:
-            results = pickle.load(f)
-        
-        # Get actual training data from results
-        input_sequences = results.get('input_sequences', None)
-        output_sequences = results.get('output_sequences', None)
-        key_list = results.get('key_list', None)
-        
-        if input_sequences is None:
-            print("[ WARNING ] Warning: No training sequences found in results")
-            return None, None, None, None, None, None, None
-        
-        print(f"[ OK ] Found training data: {len(input_sequences)} sequences with keys: {key_list[:5]}...")
-        
-        # Process training data
-        print("Computing training latent vectors...")
-        model.eval()
-        
-        with torch.no_grad():
-            for i, (input_seq, output_seq, key) in enumerate(zip(input_sequences, output_sequences, key_list)):
-                # Convert to tensor
-                input_tensor = torch.tensor(input_seq, dtype=torch.float32, device=device).unsqueeze(0)
-                output_tensor = torch.tensor(output_seq, dtype=torch.float32, device=device).unsqueeze(0)
-                
-                # ✅ FIX: Only process through the assigned encoder
-                if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
-                    # Get the encoder assigned to this key
-                    assigned_encoder = None
-                    if hasattr(model, 'training_metadata') and model.training_metadata:
-                        key_to_encoder_mapping = model.training_metadata.get('key_to_encoder_mapping', {})
-                        if key_to_encoder_mapping:
-                            # Split across encoders = true: find assigned encoder
-                            for enc_idx, keys in key_to_encoder_mapping.items():
-                                if key in keys:
-                                    assigned_encoder = enc_idx
-                                    break
-                        else:
-                            # Split across encoders = false: all encoders see all keys
-                            # Use encoder 0 for consistency
+            print("[ WARNING ] Warning: No results.pkl found — proceeding without training latents")
+            # Do NOT return; continue to build unified dataset from eval_results and trajectory only
+            training_latents = None
+        else:
+            with open(results_file, 'rb') as f:
+                results = pickle.load(f)
+            # Get actual training data from results
+            input_sequences = results.get('input_sequences', None)
+            output_sequences = results.get('output_sequences', None)
+            key_list = results.get('key_list', None)
+            if input_sequences is None:
+                print("[ WARNING ] Warning: No training sequences found in results")
+            else:
+                print(f"[ OK ] Found training data: {len(input_sequences)} sequences with keys: {key_list[:5]}...")
+                # Process training data
+                print("Computing training latent vectors...")
+                model.eval()
+                with torch.no_grad():
+                    for i, (input_seq, output_seq, key) in enumerate(zip(input_sequences, output_sequences, key_list)):
+                        input_tensor = torch.tensor(input_seq, dtype=torch.float32, device=device).unsqueeze(0)
+                        output_tensor = torch.tensor(output_seq, dtype=torch.float32, device=device).unsqueeze(0)
+                        if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
                             assigned_encoder = 0
-                    
-                    if assigned_encoder is not None:
-                        # ✅ Only process through the assigned encoder
-                        try:
+                            if hasattr(model, 'training_metadata') and model.training_metadata:
+                                key_to_encoder_mapping = model.training_metadata.get('key_to_encoder_mapping', {})
+                                for enc_idx, keys in key_to_encoder_mapping.items():
+                                    if key in keys:
+                                        assigned_encoder = enc_idx
+                                        break
                             mu, log_var, _ = model.multi_encoder.encoders[assigned_encoder](input_tensor, output_tensor)
                             z = model.reparameterize(mu, log_var)
-                            
                             z_numpy = z.cpu().numpy().flatten()
                             all_latents.append(z_numpy)
                             all_labels.append(f"training_enc_{assigned_encoder}_key_{key}")
-                            
-                            # Color based on whether this key matches the evaluated key
-                            if key == evaluated_key:
-                                all_colors.append(plt.cm.Set1(assigned_encoder))  # Bright color for matching key
-                            else:
-                                all_colors.append(plt.cm.tab10(assigned_encoder % 10))  # More visible color for other keys
-                        except Exception as e:
-                            print(f"    [WARNING] Error processing key '{key}' through encoder {assigned_encoder}: {e}")
-                    else:
-                        print(f"    [WARNING] Key '{key}' not assigned to any encoder, skipping...")
-                else:
-                    # Single encoder case
-                    mu, log_var, _ = model.encoder(input_tensor, output_tensor)
-                    z = model.reparameterize(mu, log_var)
-                    
-                    z_numpy = z.cpu().numpy().flatten()
-                    all_latents.append(z_numpy)
-                    all_labels.append(f"training_enc_0_key_{key}")
-                    
-                    # Color based on whether this key matches the evaluated key
-                    if key == evaluated_key:
-                        all_colors.append(plt.cm.Set1(0))  # Bright color for matching key
-                    else:
-                        all_colors.append(plt.cm.tab10(0))  # More visible color for other keys
+                            all_colors.append(plt.cm.tab10(assigned_encoder % 10))
+                        else:
+                            mu, log_var, _ = model.encoder(input_tensor, output_tensor)
+                            z = model.reparameterize(mu, log_var)
+                            z_numpy = z.cpu().numpy().flatten()
+                            all_latents.append(z_numpy)
+                            all_labels.append(f"training_enc_0_key_{key}")
+                            all_colors.append(plt.cm.tab10(0))
     
     print(f"DEBUG: Training data summary - Total: {len(all_latents)}, Matching key '{evaluated_key}': {sum(1 for key in training_keys if key == evaluated_key) if 'training_keys' in locals() else 0}")
     

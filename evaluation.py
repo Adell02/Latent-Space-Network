@@ -1431,7 +1431,7 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
     print(f"Grid accuracy: {grid_accuracy:.4f}")
     print(f"Exact match accuracy: {exact_accuracy:.4f}")
     
-    # Prepare latent data for visualization using collected latents (avoid redundant re-encoding)
+    # Prepare latent data for visualization
     print(f"\n=== COLLECTING LATENT DATA FOR VISUALIZATION (from collected latents) ===")
     
     # Initialize trajectory_info and transfer trajectory data from task_trajectories
@@ -1440,8 +1440,8 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
         for trajectory in trajectories:
             trajectory_info.append(trajectory)
     print(f"  [OK] Collected {len(trajectory_info)} trajectory samples for visualization")
-    # Build evaluation_latent_data directly from collected lists
-    # Ensure query containers exist even if multi-encoder single path was not hit
+
+    # Default minimal structure (PoE-only) from collected lists
     if 'query_poe_latent_zs' not in locals():
         query_poe_latent_zs = []
         query_poe_log_vars = []
@@ -1465,6 +1465,22 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
             'task_keys': list(set(query_keys_list))
         }
     }
+
+    # Enrich with per-encoder latents (mirror main evaluation collector)
+    try:
+        print("  [INFO] Collecting comprehensive per-encoder + PoE latents for support/query ...")
+        is_multi_encoder = hasattr(model, 'is_multi_encoder') and model.is_multi_encoder
+        num_encoders = getattr(model, 'num_encoders', 1) if is_multi_encoder else 1
+        comprehensive_eval_latent_data = collect_evaluation_latent_data(
+            model, samples_dataloader, queries_dataloader, device, is_multi_encoder, num_encoders
+        )
+        if comprehensive_eval_latent_data:
+            evaluation_latent_data = comprehensive_eval_latent_data
+            print("  [OK] Comprehensive evaluation latent data collected (includes encoder_* and poe)")
+        else:
+            print("  [WARNING] Comprehensive evaluation latent collection returned empty; using PoE-only fallback")
+    except Exception as e:
+        print(f"  [WARNING] Failed to collect comprehensive evaluation latents: {e}. Using PoE-only fallback.")
     
     results = {
         'shape_accuracy': shape_accuracy,

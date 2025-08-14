@@ -851,10 +851,11 @@ def compute_bonnet_cross_pair_loss(
             continue  # Skip if no other samples
         
         # Average latent from other samples
-        z_avg = torch.stack(other_latents).mean(dim=0, keepdim=True)
+        # Ensure 2D shape [1, D] for decoder compatibility
+        z_avg = torch.stack(other_latents).mean(dim=0)  # [1, D]
         
         # Initialize z_i' with the average latent
-        z_i_prime = z_avg.clone().detach().requires_grad_(True)
+        z_i_prime = z_avg.clone().detach().requires_grad_(True)  # [1, D]
         
         # Gradient optimization to maximize p(y_i | x_i, z_i')
         for step in range(latent_opt_steps):

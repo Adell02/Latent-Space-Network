@@ -36,7 +36,7 @@ from utils.model_utils import (
     load_model,
     save_evaluation_results
 )
-from utils.visualizers import visualize_stored_results
+from utils.visualizers import visualize_stored_results, generate_samples_used_folder
 from utils.wandb_logger import init_wandb_for_mode, get_wandb_logger
 
 # Efficient latent validation import (graceful fallback)
@@ -137,6 +137,74 @@ def main_args():
             notes=notes
         )
         print("Specialist training complete. Results saved in the run directory.")
+
+        # Generate samples_used and upload to WandB immediately after training (before any runs are closed)
+        try:
+            print("\n=== GENERATING SAMPLES_USED FOLDER (main_specialist) ===")
+            # Resolve keys from settings
+            evaluation_settings_current = settings.get_evaluation_settings()
+            data_settings_current = settings.get_data_settings()
+            from utils.evaluation_utils import get_evaluation_keys_with_all_support
+            eval_keys = evaluation_settings_current.get('eval_keys')
+            eval_keys = get_evaluation_keys_with_all_support(
+                eval_keys, evaluation_settings_current.get('n_max_eval_keys', 10)
+            )
+            training_keys = (
+                settings.get_training_settings().get('task_keys')
+                or data_settings_current.get('task_keys')
+                or data_settings_current.get('training_keys')
+            )
+            if isinstance(training_keys, str) and training_keys.lower() == 'all':
+                import os as _os
+                tasks_dir = _os.path.join(_os.path.dirname(__file__), 're_arc', 're_arc', 'tasks')
+                all_keys = [fname[:-5] for fname in _os.listdir(tasks_dir) if fname.endswith('.json')]
+                all_keys.sort()
+                n_max_keys = data_settings_current.get('n_max_keys', None)
+                if n_max_keys is not None:
+                    try:
+                        n_max_keys = int(n_max_keys)
+                        all_keys = all_keys[:n_max_keys]
+                    except Exception:
+                        pass
+                training_keys = all_keys
+
+            if training_keys or eval_keys:
+                generate_samples_used_folder(
+                    run_dir=run_dir,
+                    training_keys=training_keys,
+                    eval_keys=eval_keys,
+                    n_samples=5
+                )
+                print("[ OK ] Samples_used generated (main_specialist)")
+
+                # Upload to current WandB run if available
+                try:
+                    from utils.wandb_logger import get_wandb_logger
+                    wandb_logger = get_wandb_logger()
+                except Exception:
+                    wandb_logger = None
+                if wandb_logger:
+                    try:
+                        import os as _os, glob, wandb as _wandb
+                        samples_dir = _os.path.join(run_dir, "samples_used")
+                        train_dir = _os.path.join(samples_dir, "train")
+                        eval_dir = _os.path.join(samples_dir, "eval")
+                        train_images = [_wandb.Image(p) for p in sorted(glob.glob(_os.path.join(train_dir, "*.png")))] if _os.path.exists(train_dir) else []
+                        eval_images = [_wandb.Image(p) for p in sorted(glob.glob(_os.path.join(eval_dir, "*.png")))] if _os.path.exists(eval_dir) else []
+                        payload = {}
+                        if train_images:
+                            payload['samples/train'] = train_images
+                        if eval_images:
+                            payload['samples/eval'] = eval_images
+                        if payload:
+                            wandb_logger._safe_log(payload)
+                            print(f"[ OK ] Uploaded samples to WandB: train={len(train_images)}, eval={len(eval_images)}")
+                        else:
+                            print("[ INFO ] No sample images found to upload to WandB (main_specialist)")
+                    except Exception as _e:
+                        print(f"[ WARNING ] Failed to upload samples to WandB (main_specialist): {_e}")
+        except Exception as e:
+            print(f"[ WARNING ] Failed to generate samples_used in main_specialist: {e}")
 
     # ----------------------
     # EVALUATION
