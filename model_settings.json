@@ -1,7 +1,7 @@
 {
   "data_settings": {
       "training_keys": "all",
-      "n_max_keys": 400,
+      "n_max_keys": 5,
       "training_seed": 42,
       "eval_seed": 1,
       "n": 10,
@@ -11,8 +11,8 @@
   "training_settings": {
       "data_source": "synthetic",
       "use_ood_for_training": false,
-      "num_epochs": 30,
-      "batch_size": 32,
+      "num_epochs": 5,
+      "batch_size": 16,
       "gradient_accumulation_steps": 1,
       "learning_rate": 0.0004,
       "optimizer_weight_decay": 0.0,
@@ -20,7 +20,7 @@
       "use_mixed_precision": true,
       "save_checkpoint_interval": 1,
       "infinite_dataloader": true,
-      "batches_per_epoch": 30,
+      "batches_per_epoch": 20,
       "return_task_keys": true,
       "cross_pair_loss": {
         "enabled": true,
@@ -32,7 +32,7 @@
       "eval_keys": "all",
       "data_source": "ood_original_arc",
       "use_ood_for_evaluation": true,
-      "n_max_eval_keys": 10,
+      "n_max_eval_keys": 5,
       "n_max_trajectory_plots": 4,
       "other_eval_keys": [
         "00d62c1b",
@@ -43,7 +43,7 @@
       "_eval_keys_comment": "Set to 'all' to use all available keys (limited by n_max_eval_keys), or provide a list of specific keys",
       "eval_n_samples": 5,
       "eval_n_queries": 10,
-      "eval_epoch": 30,
+      "eval_epoch": 5,
       "visualize_n_values": 1,
       "_comment_trajectory_decoder": "trajectory_decoder_type: 'shared' uses shared decoder for all reconstructions (good for PoE analysis), 'independent' uses each encoder's independent decoder (good for specialization analysis)",
       "trajectory_decoder_type": "shared"

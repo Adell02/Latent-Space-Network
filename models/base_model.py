@@ -1080,7 +1080,8 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
                 debug_kl_metrics: bool = False,
                 # NEW: Repulsion loss parameters
                 use_repulsion_loss: bool = False, repulsion_lambda: float = 0.1,
-                repulsion_margin: float = 0.5, repulsion_logvar_min: float = -8.0) -> torch.Tensor:
+                repulsion_margin: float = 0.5, repulsion_logvar_min: float = -8.0,
+                batch_keys: torch.Tensor = None) -> torch.Tensor:
     """
     Compute loss following Bonnet's LPN approach with enhanced mechanisms for specialist training.
     
@@ -1121,6 +1122,7 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
         repulsion_lambda: Weight for repulsion loss
         repulsion_margin: Hinge margin for repulsion loss
         repulsion_logvar_min: Minimum log variance for repulsion loss
+        batch_keys: Optional tensor of task keys for grouped leave-one-out
     """
     device = input_seq.device
     
@@ -1280,20 +1282,55 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
             # 1. CROSS-PAIR RECONSTRUCTION LOSS (Bonnet's approach on in-slice samples)
             if cross_pair_enabled and has_in_slice:
                 in_slice_indices = torch.where(in_slice_mask)[0]
-                if len(in_slice_indices) >= 2:  # Need at least 2 in-slice samples
-                    in_slice_input = input_seq[in_slice_indices]
-                    in_slice_target = target_seq[in_slice_indices]
-                    
-                    # Get latent optimization settings
-                    latent_settings = get_current_settings().get('latent_optimization', {})
-                    training_settings = latent_settings.get('training', {})
-                    opt_steps = training_settings.get('num_steps', 0) if training_settings.get('enabled', False) else 0
-                    opt_lr = training_settings.get('learning_rate', 0.1)
-                    
-                    reconstruction_loss = compute_bonnet_cross_pair_loss(
-                        model, encoder_idx, in_slice_input, in_slice_target,
-                        use_independent_decoder, opt_steps, opt_lr
-                    )
+                if len(in_slice_indices) >= 2:
+                    if batch_keys is not None:
+                        # Normalize keys for the in-slice subset
+                        if isinstance(batch_keys, torch.Tensor):
+                            keys_full = batch_keys.detach().cpu().tolist()
+                        else:
+                            keys_full = list(batch_keys)
+
+                        # Group local indices by key
+                        groups = {}
+                        for local_idx, k in enumerate(keys_full):
+                            groups.setdefault(k, []).append(local_idx)
+
+                        # Prepare in-slice tensors once
+                        in_x = input_seq[in_slice_indices]
+                        in_y = target_seq[in_slice_indices]
+
+                        # Latent opt settings
+                        lat_set = get_current_settings().get('latent_optimization', {})
+                        tr_set = lat_set.get('training', {})
+                        opt_steps = tr_set.get('num_steps', 0) if tr_set.get('enabled', False) else 0
+                        opt_lr = tr_set.get('learning_rate', 0.1)
+
+                        # Weighted average over groups (true per-task LOO)
+                        group_sum = 0.0
+                        total = 0
+                        for _, idxs in groups.items():
+                            if len(idxs) < 2:
+                                continue
+                            idx_t = torch.tensor(idxs, device=in_x.device)
+                            sub_x = in_x.index_select(0, idx_t)
+                            sub_y = in_y.index_select(0, idx_t)
+                            loss_g = compute_bonnet_cross_pair_loss(
+                                model, encoder_idx, sub_x, sub_y, use_independent_decoder, opt_steps, opt_lr
+                            )
+                            group_sum = group_sum + loss_g * len(idxs)
+                            total += len(idxs)
+                        reconstruction_loss = group_sum / total if total > 0 else torch.tensor(0.0, device=input_seq.device)
+                    else:
+                        # Fallback: batch-level cross-pair (may mix tasks)
+                        in_x = input_seq[in_slice_indices]
+                        in_y = target_seq[in_slice_indices]
+                        lat_set = get_current_settings().get('latent_optimization', {})
+                        tr_set = lat_set.get('training', {})
+                        opt_steps = tr_set.get('num_steps', 0) if tr_set.get('enabled', False) else 0
+                        opt_lr = tr_set.get('learning_rate', 0.1)
+                        reconstruction_loss = compute_bonnet_cross_pair_loss(
+                            model, encoder_idx, in_x, in_y, use_independent_decoder, opt_steps, opt_lr
+                        )
             
             # 2. LATENT REGULARIZATION LOSS (KL or VQ)
             raw_kl_loss = torch.tensor(0.0, device=device)
@@ -1433,16 +1470,40 @@ def compute_loss(model: nn.Module, input_seq: torch.Tensor, target_seq: torch.Te
         batch_size = input_seq.size(0)
         use_cross_pair = cross_pair_enabled and batch_size >= 2
         if use_cross_pair:
-            # Use cross-pair loss for single-encoder
-            # Use encoder_idx=0, and model.encoder/model.decoder
-            # Get latent optimization settings
-            latent_settings = get_current_settings().get('latent_optimization', {})
-            training_settings = latent_settings.get('training', {})
-            opt_steps = training_settings.get('num_steps', 0) if training_settings.get('enabled', False) else 0
-            opt_lr = training_settings.get('learning_rate', 0.1)
-            reconstruction_loss = compute_bonnet_cross_pair_loss(
-                model, 0, input_seq, target_seq, True, opt_steps, opt_lr
-            )
+            if batch_keys is not None:
+                if isinstance(batch_keys, torch.Tensor):
+                    keys_list = batch_keys.detach().cpu().tolist()
+                else:
+                    keys_list = list(batch_keys)
+
+                groups = {}
+                for idx, k in enumerate(keys_list):
+                    groups.setdefault(k, []).append(idx)
+
+                lat_set = get_current_settings().get('latent_optimization', {})
+                tr_set = lat_set.get('training', {})
+                opt_steps = tr_set.get('num_steps', 0) if tr_set.get('enabled', False) else 0
+                opt_lr = tr_set.get('learning_rate', 0.1)
+
+                group_sum = 0.0
+                total = 0
+                for _, idxs in groups.items():
+                    if len(idxs) < 2:
+                        continue
+                    idx_t = torch.tensor(idxs, device=input_seq.device)
+                    sub_x = input_seq.index_select(0, idx_t)
+                    sub_y = target_seq.index_select(0, idx_t)
+                    loss_g = compute_bonnet_cross_pair_loss(model, 0, sub_x, sub_y, True, opt_steps, opt_lr)
+                    group_sum = group_sum + loss_g * len(idxs)
+                    total += len(idxs)
+                reconstruction_loss = group_sum / total if total > 0 else torch.tensor(0.0, device=input_seq.device)
+            else:
+                # Fallback: batch-level cross-pair
+                lat_set = get_current_settings().get('latent_optimization', {})
+                tr_set = lat_set.get('training', {})
+                opt_steps = tr_set.get('num_steps', 0) if tr_set.get('enabled', False) else 0
+                opt_lr = tr_set.get('learning_rate', 0.1)
+                reconstruction_loss = compute_bonnet_cross_pair_loss(model, 0, input_seq, target_seq, True, opt_steps, opt_lr)
         else:
             reconstruction, mu, log_var, _ = model(input_seq, target_seq)
             shape_logits, grid_logits = reconstruction

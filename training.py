@@ -257,7 +257,7 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler,
         with torch.amp.autocast(device_type=device.type, enabled=use_mixed_precision):
             # UNIFIED LOSS COMPUTATION FOR ALL TRAINING TYPES
             comp = compute_loss(
-                model, input_seq, target_seq,
+                model, input_seq.to(device), target_seq.to(device),
                 beta=BETA, return_components=True,
                 encoder_idx=encoder_idx if not joint_training else None,
                 use_independent_decoder=(encoder_idx is not None and not joint_training),
@@ -270,7 +270,8 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler,
                 use_repulsion_loss=use_repulsion_loss,
                 repulsion_lambda=repulsion_lambda,
                 repulsion_margin=repulsion_margin,
-                repulsion_logvar_min=repulsion_logvar_min
+                repulsion_logvar_min=repulsion_logvar_min,
+                batch_keys=batch_keys  # <-- new
             )
             if 'latent_magnitude' in comp:
                 logger.info(f"[DEBUG] Latent magnitude (mean L2 norm): {comp['latent_magnitude']:.4f} | KL: {comp.get('kl_loss', 0):.4f} | Repulsion: {comp.get('repulsion_loss', 0):.4f}")
@@ -652,6 +653,7 @@ def main_training(file_store_name, run_dir=None, notes=None):  # ← ADD notes p
 
             all_input_sequences = []
             all_output_sequences = []
+            key_list = []
             logger.info(f"Generating data for tasks: {TRAINING_KEYS}")
             print(f"Generating data for tasks: {TRAINING_KEYS}")
             for task_key in TRAINING_KEYS:
@@ -661,6 +663,8 @@ def main_training(file_store_name, run_dir=None, notes=None):  # ← ADD notes p
                     _, _, _, task_input_sequences, task_output_sequences = generate_and_process_tasks(task_key, N_EXAMPLES_PER_TASK)
                     all_input_sequences.extend(task_input_sequences)
                     all_output_sequences.extend(task_output_sequences)
+                    # Track per-sample task keys for true leave-one-out grouping
+                    key_list.extend([task_key] * len(task_input_sequences))
                     logger.info(f"Generated {len(task_input_sequences)} pairs for task {task_key}")
                     print(f"Generated {len(task_input_sequences)} pairs for task {task_key}")
                 except Exception as e:
@@ -678,7 +682,15 @@ def main_training(file_store_name, run_dir=None, notes=None):  # ← ADD notes p
             logger.info(f"Total generated {len(input_sequences)} pairs of sequences from {len(TRAINING_KEYS)} tasks.")
             print(f"Total generated {len(input_sequences)} pairs of sequences from {len(TRAINING_KEYS)} tasks.")
 
-            dataloader = prepare_dataloader(input_sequences, output_sequences, BATCH_SIZE)
+            from torch.utils.data import TensorDataset, DataLoader
+
+            key_to_idx = {k: i for i, k in enumerate(sorted(set(key_list)))}
+            key_indices = torch.tensor([key_to_idx[k] for k in key_list], dtype=torch.long)
+            input_tensor = torch.tensor(np.array(input_sequences), dtype=torch.float32)
+            output_tensor = torch.tensor(np.array(output_sequences), dtype=torch.float32)
+
+            dataset = TensorDataset(input_tensor, output_tensor, key_indices)
+            dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
 
             training_metadata = {
                 'training_keys': TRAINING_KEYS,
