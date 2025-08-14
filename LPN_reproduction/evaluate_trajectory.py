@@ -943,13 +943,8 @@ def plot_error_maps_row(ax_error_maps, trajectory_info, model, num_encoders):
     input_grid, input_shape = extract_grid_from_sequence(input_seq)
     target_grid, target_shape = extract_grid_from_sequence(target_seq)
     
-    # Check if dimensions match
-    if input_grid.shape != target_grid.shape:
-        ax_error_maps.text(0.5, 0.5, 'Input/Target dimensions\ndo not match', 
-                          ha='center', va='center', transform=ax_error_maps.transAxes, fontsize=10)
-        ax_error_maps.set_title('Error Maps (Dimension Mismatch)')
-        ax_error_maps.axis('off')
-        return
+    # Note: Input and target grids may have different shapes in ARC.
+    # Only require reconstruction grids to match target grid when computing error maps.
     
     # Get trajectory reconstructions
     trajectory_reconstructions = trajectory_info.get('poe_trajectory_reconstructions', {})
@@ -1070,13 +1065,8 @@ def plot_query_error_maps_row(ax_query_error_maps, trajectory_info, model, num_e
     input_grid, input_shape = extract_grid_from_sequence(query_input)
     target_grid, target_shape = extract_grid_from_sequence(query_target)
     
-    # Check if dimensions match
-    if input_grid.shape != target_grid.shape:
-        ax_query_error_maps.text(0.5, 0.5, 'Query Input/Target dimensions\ndo not match', 
-                                ha='center', va='center', transform=ax_query_error_maps.transAxes, fontsize=10)
-        ax_query_error_maps.set_title('Query Error Maps (Dimension Mismatch)')
-        ax_query_error_maps.axis('off')
-        return
+    # Note: Query input and target grids may have different shapes in ARC.
+    # Only require reconstruction grids to match query target grid when computing error maps.
     
     # Get query reconstructions
     query_encoder_reconstructions = trajectory_info.get('query_encoder_reconstructions', {})
