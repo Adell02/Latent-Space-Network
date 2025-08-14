@@ -2639,6 +2639,8 @@ def plot_evaluation_latent_space_by_key_and_encoder(eval_results, save_dir, epoc
                     ood_task_keys = []
                     if 'raw_data' in key_data and 'ood_task_keys' in key_data['raw_data']:
                         ood_task_keys = key_data['raw_data']['ood_task_keys']
+                    # Use a single, consistent label for all samples of this evaluated key when OOD is enabled
+                    ood_label = ood_task_keys[0] if ood_task_keys and len(ood_task_keys) > 0 else None
                     
                     # Fix: Ensure latents are properly shaped arrays
                     for i, latent in enumerate(latents):
@@ -2647,11 +2649,8 @@ def plot_evaluation_latent_space_by_key_and_encoder(eval_results, save_dir, epoc
                             latent_array = np.array(latent).flatten()
                             all_latents.append(latent_array)
                             
-                            # ✅ FIX: Use OOD task key if available, otherwise use evaluation key
-                            if ood_task_keys and i < len(ood_task_keys):
-                                actual_key = ood_task_keys[i]
-                            else:
-                                actual_key = key
+                            # ✅ FIX: Always use the OOD task key for labeling if available
+                            actual_key = ood_label if ood_label is not None else key
                             all_keys.append(actual_key)
                             all_encoders.append(encoder_idx)
                             all_sample_types.append('support')
@@ -2693,10 +2692,11 @@ def plot_evaluation_latent_space_by_key_and_encoder(eval_results, save_dir, epoc
                         print(f"    [WARNING] Unexpected encoder_data type: {type(encoder_data)}")
                         latents = []
                     
-                    # ✅ FIX: Use OOD task keys for query latents as well
+                    # ✅ FIX: Use OOD task key for labeling query latents as well
                     ood_task_keys = []
                     if 'raw_data' in key_data and 'ood_task_keys' in key_data['raw_data']:
                         ood_task_keys = key_data['raw_data']['ood_task_keys']
+                    ood_label = ood_task_keys[0] if ood_task_keys and len(ood_task_keys) > 0 else None
                     
                     # For query, we show one latent per task (not per sample)
                     if latents:
@@ -2707,11 +2707,8 @@ def plot_evaluation_latent_space_by_key_and_encoder(eval_results, save_dir, epoc
                             latent_array = np.array(first_latent).flatten()
                             all_latents.append(latent_array)
                             
-                            # ✅ FIX: Use OOD task key if available, otherwise use evaluation key
-                            if ood_task_keys and len(ood_task_keys) > 0:
-                                actual_key = ood_task_keys[0]  # Use first OOD task key for query
-                            else:
-                                actual_key = key
+                            # ✅ FIX: Always use the OOD task key if available for consistent labeling
+                            actual_key = ood_label if ood_label is not None else key
                             all_keys.append(actual_key)
                             all_encoders.append(encoder_idx)
                             all_sample_types.append('query')
