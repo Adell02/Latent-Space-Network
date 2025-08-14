@@ -463,6 +463,35 @@ def main_args():
                     n_samples=5
                 )
                 print("[OK] Samples_used folder generation completed!")
+
+                # Upload generated samples to WandB under a 'samples' section
+                if wandb_logger:
+                    try:
+                        import glob
+                        import wandb
+                        samples_dir = os.path.join(run_dir, "samples_used")
+                        train_dir = os.path.join(samples_dir, "train")
+                        eval_dir = os.path.join(samples_dir, "eval")
+
+                        # Collect images
+                        train_images = [wandb.Image(p) for p in sorted(glob.glob(os.path.join(train_dir, "*.png")))] if os.path.exists(train_dir) else []
+                        eval_images = [wandb.Image(p) for p in sorted(glob.glob(os.path.join(eval_dir, "*.png")))] if os.path.exists(eval_dir) else []
+
+                        log_payload = {}
+                        if train_images:
+                            log_payload['samples/train'] = train_images
+                        if eval_images:
+                            log_payload['samples/eval'] = eval_images
+
+                        if log_payload:
+                            # Advance step and log both panels
+                            step_counter += 1
+                            wandb_logger._safe_log(log_payload, step_hint=step_counter)
+                            print(f"[OK] Uploaded samples to WandB: train={len(train_images)}, eval={len(eval_images)}")
+                        else:
+                            print("[INFO] No sample images found to upload to WandB")
+                    except Exception as e:
+                        print(f"[WARNING] Failed to upload samples to WandB: {e}")
             else:
                 print("[INFO] No training or evaluation keys available, skipping samples_used generation")
                 
