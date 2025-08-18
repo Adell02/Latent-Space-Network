@@ -1666,25 +1666,29 @@ def comprehensive_evaluation_after_epoch(
                         print(f"    DEBUG: Using OOD task keys for trajectory plot: {ood_task_keys}")
                     
                     try:
-                        # Use first OOD task key for trajectory plot if available
-                        trajectory_key = ood_task_keys[0] if ood_task_keys and len(ood_task_keys) > 0 else key
-                        trajectory_plot_path = create_standalone_latent_space_plot(
-                            trajectory_info=actual_trajectory,
-                            model=model,
-                            save_dir=run_dir,
-                            epoch=epoch,
-                            sample_idx=0,
-                            evaluated_key=trajectory_key,  # Use OOD task key instead of evaluation key
-                            device=device,
-                            wandb_logger=wandb_logger,
-                            eval_results=eval_results,
-                            ood_enabled=ood_enabled,
-                            ood_task_keys=ood_task_keys
-                        )
-                        if trajectory_plot_path and os.path.exists(trajectory_plot_path):
-                            print(f"[OK] Trajectory plot saved: {trajectory_plot_path}")
-                        else:
-                            print(f"[WARNING] Trajectory plot was not saved for key {key}")
+                        wandb_settings = settings.get_wandb_settings()
+                        log_standalone_trajectory_plots = wandb_settings.get('log_standalone_trajectory_plots', False)
+
+                        if log_standalone_trajectory_plots:
+                            # Use first OOD task key for trajectory plot if available
+                            trajectory_key = ood_task_keys[0] if ood_task_keys and len(ood_task_keys) > 0 else key
+                            trajectory_plot_path = create_standalone_latent_space_plot(
+                                trajectory_info=actual_trajectory,
+                                model=model,
+                                save_dir=run_dir,
+                                epoch=epoch,
+                                sample_idx=0,
+                                evaluated_key=trajectory_key,  # Use OOD task key instead of evaluation key
+                                device=device,
+                                wandb_logger=wandb_logger,
+                                eval_results=eval_results,
+                                ood_enabled=ood_enabled,
+                                ood_task_keys=ood_task_keys
+                            )
+                            if trajectory_plot_path and os.path.exists(trajectory_plot_path):
+                                print(f"[OK] Trajectory plot saved: {trajectory_plot_path}")
+                            else:
+                                print(f"[WARNING] Trajectory plot was not saved for key {key}")
                     except Exception as e:
                         print(f"[WARNING] Trajectory plot generation failed for key {key}: {e}")
                     

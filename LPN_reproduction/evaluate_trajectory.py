@@ -1005,6 +1005,9 @@ def plot_error_maps_row(ax_error_maps, trajectory_info, model, num_encoders):
             ax = fig.add_subplot(gs_error[2, poe_start_col + poe_idx])  # Row 2, dynamic columns
             error_axes.append(ax)
     
+    # Use consistent color scheme for all error maps
+    consistent_cmap = 'RdBu_r'  # Red-Blue diverging colormap
+    
     # Plot encoder error maps
     for enc_idx in range(num_encoders):
         if enc_idx < len(error_axes):
@@ -1019,27 +1022,14 @@ def plot_error_maps_row(ax_error_maps, trajectory_info, model, num_encoders):
                 recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
                 
                 if recon_grid is not None and recon_grid.shape == target_grid.shape:
-                    # Create enhanced error map with different colors for different encoders
+                    # Create error map with consistent color scheme
                     error_map = target_grid - recon_grid
                     
-                    # Use different color schemes for different encoders to distinguish them
-                    encoder_cmaps = ['RdBu_r', 'RdYlBu_r', 'RdGy_r', 'PuOr_r', 'BrBG_r', 'PiYG_r', 'PRGn_r', 'Spectral_r']
-                    cmap = encoder_cmaps[enc_idx % len(encoder_cmaps)]
-                    
-                    # Calculate error statistics for better visualization
-                    error_std = np.std(error_map)
+                    # Calculate error statistics for consistent visualization
                     error_range = max(abs(error_map.min()), abs(error_map.max()))
                     vmin, vmax = -error_range, error_range
                     
-                    im = ax.imshow(error_map, cmap=cmap, interpolation='nearest', aspect='equal', vmin=vmin, vmax=vmax)
-                    
-                    # Add colorbar for each encoder
-                    from mpl_toolkits.axes_grid1 import make_axes_locatable
-                    divider = make_axes_locatable(ax)
-                    cax = divider.append_axes("right", size="10%", pad=0.05)
-                    cbar = plt.colorbar(im, cax=cax)
-                    cbar.set_label(f'Err', rotation=270, labelpad=8, fontsize=6)
-                    cbar.ax.tick_params(labelsize=6)
+                    im = ax.imshow(error_map, cmap=consistent_cmap, interpolation='nearest', aspect='equal', vmin=vmin, vmax=vmax)
                     
                     # Calculate error metrics
                     mae = np.mean(np.abs(error_map))
@@ -1074,27 +1064,14 @@ def plot_error_maps_row(ax_error_maps, trajectory_info, model, num_encoders):
                 recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
                 
                 if recon_grid is not None and recon_grid.shape == target_grid.shape:
-                    # Create enhanced error map with different colors for POE stages
+                    # Create error map with consistent color scheme
                     error_map = target_grid - recon_grid
                     
-                    # Use different color schemes for different POE stages
-                    poe_cmaps = {'initial': 'plasma', 'mid': 'viridis', 'final': 'inferno'}
-                    cmap = poe_cmaps.get(label, 'RdBu_r')
-                    
-                    # Calculate error statistics for better visualization
-                    error_std = np.std(error_map)
+                    # Calculate error statistics for consistent visualization
                     error_range = max(abs(error_map.min()), abs(error_map.max()))
                     vmin, vmax = -error_range, error_range
                     
-                    im = ax.imshow(error_map, cmap=cmap, interpolation='nearest', aspect='equal', vmin=vmin, vmax=vmax)
-                    
-                    # Add colorbar for each POE stage
-                    from mpl_toolkits.axes_grid1 import make_axes_locatable
-                    divider = make_axes_locatable(ax)
-                    cax = divider.append_axes("right", size="10%", pad=0.05)
-                    cbar = plt.colorbar(im, cax=cax)
-                    cbar.set_label(f'Err', rotation=270, labelpad=8, fontsize=6)
-                    cbar.ax.tick_params(labelsize=6)
+                    im = ax.imshow(error_map, cmap=consistent_cmap, interpolation='nearest', aspect='equal', vmin=vmin, vmax=vmax)
                     
                     # Calculate error metrics
                     mae = np.mean(np.abs(error_map))
@@ -1176,6 +1153,9 @@ def plot_query_error_maps_row(ax_query_error_maps, trajectory_info, model, num_e
             ax = fig.add_subplot(gs_error[4, query_poe_start_col + poe_idx])  # Row 4, dynamic columns
             error_axes.append(ax)
     
+    # Use consistent color scheme for all query error maps
+    consistent_cmap = 'RdBu_r'  # Red-Blue diverging colormap
+    
     # Plot query encoder error maps
     for enc_idx in range(num_encoders):
         if enc_idx < len(error_axes):
@@ -1190,27 +1170,14 @@ def plot_query_error_maps_row(ax_query_error_maps, trajectory_info, model, num_e
                 recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
                 
                 if recon_grid is not None and recon_grid.shape == target_grid.shape:
-                    # Create enhanced error map with different colors for query encoders
+                    # Create error map with consistent color scheme
                     error_map = target_grid - recon_grid
                     
-                    # Use different color schemes for different encoders (darker variants for query)
-                    query_encoder_cmaps = ['RdBu_r', 'RdYlBu_r', 'RdGy_r', 'PuOr_r', 'BrBG_r', 'PiYG_r', 'PRGn_r', 'Spectral_r']
-                    cmap = query_encoder_cmaps[enc_idx % len(query_encoder_cmaps)]
-                    
-                    # Calculate error statistics for better visualization
-                    error_std = np.std(error_map)
+                    # Calculate error statistics for consistent visualization
                     error_range = max(abs(error_map.min()), abs(error_map.max()))
                     vmin, vmax = -error_range, error_range
                     
-                    im = ax.imshow(error_map, cmap=cmap, interpolation='nearest', aspect='equal', vmin=vmin, vmax=vmax)
-                    
-                    # Add colorbar for each query encoder
-                    from mpl_toolkits.axes_grid1 import make_axes_locatable
-                    divider = make_axes_locatable(ax)
-                    cax = divider.append_axes("right", size="10%", pad=0.05)
-                    cbar = plt.colorbar(im, cax=cax)
-                    cbar.set_label(f'Err', rotation=270, labelpad=8, fontsize=6)
-                    cbar.ax.tick_params(labelsize=6)
+                    im = ax.imshow(error_map, cmap=consistent_cmap, interpolation='nearest', aspect='equal', vmin=vmin, vmax=vmax)
                     
                     # Calculate error metrics
                     mae = np.mean(np.abs(error_map))
@@ -1225,9 +1192,8 @@ def plot_query_error_maps_row(ax_query_error_maps, trajectory_info, model, num_e
                     ax.set_title(f'Query Encoder {enc_idx}')
                     ax.axis('off')
             else:
-                msg = 'No Recon' if recon_grid is None else 'Wrong Shape'
-                ax.text(0.5, 0.5, f'Query Encoder {enc_idx}\n{msg}', 
-                       ha='center', va='center', transform=ax.transAxes, fontsize=8)
+                ax.text(0.5, 0.5, f'Query Encoder {enc_idx}\nNo Data', 
+                       ha='center', va='center', transform=ax_query_error_maps.transAxes, fontsize=8)
                 ax.set_title(f'Query Encoder {enc_idx}')
                 ax.axis('off')
     
@@ -1244,29 +1210,15 @@ def plot_query_error_maps_row(ax_query_error_maps, trajectory_info, model, num_e
                 
                 recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
                 
-                
                 if recon_grid is not None and recon_grid.shape == target_grid.shape:
-                    # Create enhanced error map with different colors for query POE stages
+                    # Create error map with consistent color scheme
                     error_map = target_grid - recon_grid
                     
-                    # Use different color schemes for query POE stages (warmer tones)
-                    query_poe_cmaps = {'initial': 'plasma_r', 'final': 'magma_r'}
-                    cmap = query_poe_cmaps.get(label, 'hot_r')
-                    
-                    # Calculate error statistics for better visualization
-                    error_std = np.std(error_map)
+                    # Calculate error statistics for consistent visualization
                     error_range = max(abs(error_map.min()), abs(error_map.max()))
                     vmin, vmax = -error_range, error_range
                     
-                    im = ax.imshow(error_map, cmap=cmap, interpolation='nearest', aspect='equal', vmin=vmin, vmax=vmax)
-                    
-                    # Add colorbar for each query POE stage
-                    from mpl_toolkits.axes_grid1 import make_axes_locatable
-                    divider = make_axes_locatable(ax)
-                    cax = divider.append_axes("right", size="10%", pad=0.05)
-                    cbar = plt.colorbar(im, cax=cax)
-                    cbar.set_label(f'Err', rotation=270, labelpad=8, fontsize=6)
-                    cbar.ax.tick_params(labelsize=6)
+                    im = ax.imshow(error_map, cmap=consistent_cmap, interpolation='nearest', aspect='equal', vmin=vmin, vmax=vmax)
                     
                     # Calculate error metrics
                     mae = np.mean(np.abs(error_map))
@@ -1281,8 +1233,7 @@ def plot_query_error_maps_row(ax_query_error_maps, trajectory_info, model, num_e
                     ax.set_title(f'Query POE {label.title()}')
                     ax.axis('off')
             else:
-                msg = 'No Recon' if recon_grid is None else 'Wrong Shape'
-                ax.text(0.5, 0.5, f'Query POE {label.title()}\n{msg}', 
+                ax.text(0.5, 0.5, f'Query POE {label.title()}\nNo Data', 
                        ha='center', va='center', transform=ax.transAxes, fontsize=8)
                 ax.set_title(f'Query POE {label.title()}')
                 ax.axis('off')
