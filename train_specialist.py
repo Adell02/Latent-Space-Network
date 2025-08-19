@@ -352,7 +352,7 @@ def generate_latent_histograms(model, dataloader, device, encoder_idx, epoch, wa
                 f"phase_a_latents/encoder_{encoder_idx}_mu_std": mu_std,
                 f"phase_a_latents/encoder_{encoder_idx}_logvar_mean": logvar_mean,
                 f"phase_a_latents/encoder_{encoder_idx}_logvar_std": logvar_std,
-                'epoch': epoch+1 if epoch is not None else None  
+                'epoch': global_step if global_step is not None else None  
 
             }, step_hint=global_step)
             print(f"[ OK ] Logged latent histograms for Encoder {encoder_idx} at epoch {epoch}")
@@ -1132,12 +1132,30 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                     'current_encoder': encoder_idx
                 })
                 
-                # Run periodic evaluation to track accuracy progression
+                # Run periodic evaluation and visualizations
                 from utils.evaluation_utils import should_run_evaluation, run_quick_evaluation, log_evaluation_to_wandb
                 wandb_settings = settings.get_wandb_settings()
-                eval_interval = wandb_settings.get('eval_log_interval', 10)  # Evaluate every 10 epochs by default
+                eval_log_interval = wandb_settings.get('eval_log_interval', 10)  # Evaluate every 10 epochs by default
                 
-                if should_run_evaluation(epoch + 1, eval_interval, phase_epochs):
+                if should_run_evaluation(epoch + 1, eval_log_interval, phase_epochs):
+                    # Generate training latent space plot
+                    try:
+                        from utils.visualizers import plot_training_latent_space_per_epoch
+                        plot_training_latent_space_per_epoch(
+                            model, dataloader, device, global_step, run_dir, 
+                            key_list=TRAINING_KEYS[encoder_idx:encoder_idx+1],  # Only this encoder's key
+                            encoder_idx=encoder_idx,
+                            infinite_dataloader=is_infinite_dataloader,
+                            wandb_logger=wandb_logger,
+                            input_sequences=input_sequences if 'input_sequences' in locals() else None,
+                            output_sequences=output_sequences if 'output_sequences' in locals() else None,
+                            training_keys=TRAINING_KEYS[encoder_idx:encoder_idx+1]
+                        )
+                        logger.info(f"[ OK ] Training latent space plot generated for Encoder {encoder_idx} at epoch {epoch + 1}")
+                    except Exception as plot_error:
+                        logger.warning(f"Training latent space plot failed for Encoder {encoder_idx} at epoch {epoch + 1}: {plot_error}")
+                
+                if should_run_evaluation(epoch + 1, eval_log_interval, phase_epochs):
                     print(f"Running evaluation for Encoder {encoder_idx} at epoch {epoch + 1}...")
                     try:
                         # Use ALL eval keys from settings for consistent evaluation
@@ -1157,30 +1175,30 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                                 eval_results, run_dir, global_step, wandb_logger, 
                                 current_model=model, phase=f"phase_a_enc{encoder_idx}"
                             )
-                            print(f"[ OK ] Evaluation logged for Encoder {encoder_idx} at epoch {epoch + 1} on ALL keys")
+                            logger.info(f"[ OK ] Evaluation logged for Encoder {encoder_idx} at epoch {epoch + 1}")
                     except Exception as eval_error:
                         logger.warning(f"Evaluation failed for Encoder {encoder_idx} at epoch {epoch + 1}: {eval_error}")
                 
                 # Generate latent distribution histograms at evaluation intervals for ALL encoders
-                if should_run_evaluation(epoch + 1, eval_interval, phase_epochs):
+                if should_run_evaluation(epoch + 1, eval_log_interval, phase_epochs):
                     try:
-                        generate_latent_histograms(model, dataloader, device, encoder_idx, epoch + 1, wandb_logger, global_step)
-                        print(f"[ OK ] Latent histograms logged for Encoder {encoder_idx} at epoch {epoch + 1}")
+                        generate_latent_histograms(model, dataloader, device, encoder_idx, global_step, wandb_logger, global_step)
+                        logger.info(f"[ OK ] Latent histograms logged for Encoder {encoder_idx} at epoch {epoch + 1}")
                     except Exception as hist_error:
                         logger.warning(f"Latent histogram generation failed for Encoder {encoder_idx} at epoch {epoch + 1}: {hist_error}")
                 
                 # Generate per-dimension KL divergence plots at evaluation intervals
-                if should_run_evaluation(epoch + 1, eval_interval, phase_epochs):
+                if should_run_evaluation(epoch + 1, eval_log_interval, phase_epochs):
                     try:
-                        generate_per_dimension_kl_plot(model, dataloader, device, epoch + 1, encoder_idx=encoder_idx, wandb_logger=wandb_logger, global_step=global_step)
-                        print(f"[ OK ] Per-dimension KL plot logged for Encoder {encoder_idx} at epoch {epoch + 1}")
+                        generate_per_dimension_kl_plot(model, dataloader, device, global_step, encoder_idx=encoder_idx, wandb_logger=wandb_logger, global_step=global_step)
+                        logger.info(f"[ OK ] Per-dimension KL plot logged for Encoder {encoder_idx} at epoch {epoch + 1}")
                     except Exception as kl_error:
                         logger.warning(f"Per-dimension KL plot generation failed for Encoder {encoder_idx} at epoch {epoch + 1}: {kl_error}")
                 
                 # Basic visualizations are handled by the reconstruction plots above
             
             # Generate reconstruction plot at evaluation intervals            
-            if wandb_logger and should_run_evaluation(epoch + 1, eval_interval, phase_epochs):
+            if wandb_logger and should_run_evaluation(epoch + 1, eval_log_interval, phase_epochs):
                 try:
                     plot_path, wandb_key = generate_specialist_reconstruction_plot(
                         model, dataloader, device, epoch + 1, phase='A',
@@ -1194,7 +1212,7 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                         try:
                             wandb_logger._safe_log({
                                 f"phase_a_reconstruction/{wandb_key}": wandb.Image(plot_path),
-                                'epoch': global_step if global_step is not None else None  # ✅ ADD: Explicit epoch field (using global_step as epoch)
+                                'epoch': global_step  # ✅ Use global_step for consistency
                             }, step_hint=global_step)
                             logger.info(f"[ OK ] Logged Phase A reconstruction for Encoder {encoder_idx} at step {global_step}")
                         except Exception as wandb_error:
@@ -1207,62 +1225,6 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                 
                 model.train()
             
-            # Add comprehensive evaluation after each epoch
-            if wandb_logger and should_run_evaluation(epoch + 1, eval_interval, phase_epochs):
-                try:
-                    # Get training keys for this encoder
-                    encoder_keys = splitting_statistics['keys_per_encoder'][encoder_idx] if 'splitting_statistics' in locals() else [TRAINING_KEYS[encoder_idx % len(TRAINING_KEYS)]]
-                    print(f"Running comprehensive evaluation for Phase A Encoder {encoder_idx} epoch {epoch+1}")
-                    
-                    # Prepare evaluation dataloader (separate from training)
-                    evaluation_settings = settings.get_evaluation_settings()
-                    eval_keys = evaluation_settings.get('eval_keys', encoder_keys)
-                    eval_n_per_key = evaluation_settings.get('eval_n_per_key', data_settings['n'])
-                    
-                    # Generate evaluation data for this encoder's evaluation
-                    all_eval_inputs = []
-                    all_eval_outputs = []
-                    for task_key in eval_keys[:5]:  # Limit to avoid memory issues
-                        try:
-                            _, _, _, task_input_sequences, task_output_sequences = generate_and_process_tasks(task_key, min(eval_n_per_key, 10))
-                            all_eval_inputs.extend(task_input_sequences)
-                            all_eval_outputs.extend(task_output_sequences)
-                        except Exception as e:
-                            logger.warning(f"Failed to generate eval data for key {task_key}: {e}")
-                    
-                    eval_dataloader = None
-                    if all_eval_inputs:
-                        from utils.model_utils import prepare_dataloader
-                        eval_dataloader = prepare_dataloader(all_eval_inputs, all_eval_outputs, BATCH_SIZE)
-                        print(f"Created evaluation dataloader with {len(all_eval_inputs)} samples")
-                    else:
-                        print("No evaluation inputs generated, using training dataloader")
-                        eval_dataloader = dataloader  # Use training dataloader as fallback
-                    
-                    # Use regular evaluation function (same as regular training)
-                    num_encoders = len(model.multi_encoder.encoders) if hasattr(model, 'multi_encoder') else 1
-                    print(f"Calling comprehensive evaluation with {num_encoders} encoders")
-                    comprehensive_evaluation_after_epoch(
-                        model=model,
-                        dataloader=eval_dataloader,  # Evaluation dataloader, not training
-                        device=device,
-                        epoch=epoch,
-                        run_dir=run_dir,
-                        wandb_logger=wandb_logger,
-                        training_keys=encoder_keys,
-                        input_sequences=None,  # Will use stored epoch_optimized_latents
-                        output_sequences=None,
-                        key_list=None,
-                        is_multi_encoder=True,
-                        num_encoders=num_encoders,
-                        infinite_dataloader=is_infinite_dataloader,
-                        encoder_dataloaders=None
-                    )
-                    print(f"[OK] Comprehensive evaluation completed for Phase A Encoder {encoder_idx} epoch {epoch+1}")
-                except Exception as e:
-                    logger.warning(f"Comprehensive evaluation failed for Phase A Encoder {encoder_idx} epoch {epoch+1}: {e}")
-                    import traceback
-                    traceback.print_exc()
         
         # Save encoder checkpoint
         encoder_checkpoint_path = save_encoder_checkpoint(model, encoder_idx, run_dir)
@@ -1595,6 +1557,8 @@ def train_phase_b_decoder(model, encoder_datasets, device, logger, wandb_logger,
     
     # Training loop for shared decoder with PoE
     for epoch in range(phase_epochs):
+        # Compute unique global step for Phase B at the START of the epoch
+        global_step = base_global_step + epoch + 1
         model.train()
         epoch_loss = 0.0
         # For infinite dataloader, we can't get the length, so use batches_per_epoch
@@ -1687,7 +1651,7 @@ def train_phase_b_decoder(model, encoder_datasets, device, logger, wandb_logger,
                         if debug_kl_metrics and 'kl_per_dim' in loss_result and loss_result['kl_per_dim'] is not None:
                             log_dict['phase_b/kl_per_dim'] = loss_result['kl_per_dim'].item()
                         
-                        wandb_logger.log_training_metrics(base_global_step + epoch + 1, log_dict)
+                        wandb_logger.log_training_metrics(global_step, log_dict)
                 else:
                     loss = loss_result  # Fallback for backward compatibility
                     
@@ -1706,9 +1670,6 @@ def train_phase_b_decoder(model, encoder_datasets, device, logger, wandb_logger,
         avg_epoch_loss = epoch_loss / num_batches
         phase_b_results['decoder_losses'].append(avg_epoch_loss)
         
-        # Compute unique global step for Phase B
-        global_step = base_global_step + epoch + 1
-        
         logger.info(f"Phase B Epoch {epoch+1} (global step {global_step}): Loss = {avg_epoch_loss:.4f}")
         
         # Log to wandb - every epoch, not just evaluation epochs
@@ -1721,37 +1682,69 @@ def train_phase_b_decoder(model, encoder_datasets, device, logger, wandb_logger,
             # Run periodic evaluation to track PoE accuracy progression
             from utils.evaluation_utils import should_run_evaluation, run_quick_evaluation, log_evaluation_to_wandb
             wandb_settings = settings.get_wandb_settings()
-            eval_interval = wandb_settings.get('eval_log_interval', 10)  # Evaluate every 10 epochs by default
+            eval_log_interval = wandb_settings.get('eval_log_interval', 10)  # Evaluate every 10 epochs by default
             
-            if should_run_evaluation(epoch + 1, eval_interval, phase_epochs):
-                print(f"Running PoE evaluation at Phase B epoch {epoch + 1}...")
+            if should_run_evaluation(epoch + 1, eval_log_interval, phase_epochs):
+                # Generate training latent space plot for Phase B
                 try:
-                    # Use ALL eval keys from settings for consistent evaluation
-                    eval_settings = settings.get_evaluation_settings()
-                    eval_keys = eval_settings.get('eval_keys', ['00d62c1b'])
-                    print(f"  Evaluating PoE on ALL keys: {eval_keys}")
-                    
-                    # Evaluate PoE with shared decoder on ALL eval keys
-                    eval_results = run_quick_evaluation(
-                        model, run_dir, global_step, 
-                        eval_keys=eval_keys,  # Use ALL eval keys
-                        encoder_idx=None, use_independent_decoder=False  # PoE + shared decoder
+                    from utils.visualizers import plot_training_latent_space_per_epoch
+                    plot_training_latent_space_per_epoch(
+                        model, mixed_dataloader, device, global_step, run_dir, 
+                        key_list=TRAINING_KEYS,  # All keys for Phase B
+                        encoder_idx=None,  # PoE for Phase B
+                        infinite_dataloader=is_infinite_dataloader,
+                        wandb_logger=wandb_logger,
+                        input_sequences=input_sequences if 'input_sequences' in locals() else None,
+                        output_sequences=output_sequences if 'output_sequences' in locals() else None,
+                        training_keys=TRAINING_KEYS
                     )
-                    if eval_results:
-                        # Log with phase B prefix
-                        log_evaluation_to_wandb(
-                            eval_results, run_dir, global_step, wandb_logger, 
-                            current_model=model, phase="phase_b_poe"
+                    logger.info(f"[ OK ] Phase B training latent space plot generated at epoch {epoch + 1}")
+                except Exception as plot_error:
+                    logger.warning(f"Phase B training latent space plot failed at epoch {epoch + 1}: {plot_error}")
+                
+                print(f"Running comprehensive Phase B evaluation at epoch {epoch + 1}...")
+                eval_settings = settings.get_evaluation_settings()
+                eval_keys = eval_settings.get('eval_keys', ['00d62c1b'])
+                print(f"  Evaluating on ALL keys: {eval_keys}")
+                
+                # Efficient evaluation: combine all encoder+decoder combinations
+                num_encoders = len(model.multi_encoder.encoders)
+                eval_configs = []
+                
+                # Add independent encoder + independent decoder configs
+                for enc_idx in range(num_encoders):
+                    eval_configs.append((enc_idx, True, f"phase_b_enc{enc_idx}_indep"))
+                
+                # Add independent encoder + shared decoder configs  
+                for enc_idx in range(num_encoders):
+                    eval_configs.append((enc_idx, False, f"phase_b_enc{enc_idx}_shared"))
+                
+                # Add PoE + shared decoder config
+                eval_configs.append((None, False, "phase_b_poe"))
+                
+                # Run all evaluations
+                for encoder_idx, use_indep_decoder, phase_name in eval_configs:
+                    try:
+                        eval_results = run_quick_evaluation(
+                            model, run_dir, global_step,
+                            eval_keys=eval_keys,
+                            encoder_idx=encoder_idx, use_independent_decoder=use_indep_decoder
                         )
-                        print(f"[ OK ] PoE evaluation logged at Phase B epoch {epoch + 1} on ALL keys")
-                except Exception as eval_error:
-                    logger.warning(f"PoE evaluation failed at Phase B epoch {epoch + 1}: {eval_error}")
+                        if eval_results:
+                            log_evaluation_to_wandb(
+                                eval_results, run_dir, global_step, wandb_logger,
+                                current_model=model, phase=phase_name
+                            )
+                    except Exception as e:
+                        logger.warning(f"Phase B evaluation failed for {phase_name}: {e}")
+                
+                logger.info(f"[ OK ] Phase B comprehensive evaluation logged at epoch {epoch + 1}")
             
             # Generate per-dimension KL divergence plots at evaluation intervals for PoE
-            if should_run_evaluation(epoch + 1, eval_interval, phase_epochs):
+            if should_run_evaluation(epoch + 1, eval_log_interval, phase_epochs):
                 try:
-                    generate_per_dimension_kl_plot(model, mixed_dataloader, device, epoch + 1, encoder_idx=None, wandb_logger=wandb_logger, global_step=global_step)
-                    print(f"[ OK ] Per-dimension KL plot logged for PoE at Phase B epoch {epoch + 1}")
+                    generate_per_dimension_kl_plot(model, mixed_dataloader, device, global_step, encoder_idx=None, wandb_logger=wandb_logger, global_step=global_step)
+                    logger.info(f"[ OK ] Per-dimension KL plot logged for PoE at Phase B epoch {epoch + 1}")
                 except Exception as kl_error:
                     logger.warning(f"Per-dimension KL plot generation failed for PoE at Phase B epoch {epoch + 1}: {kl_error}")
             
@@ -1774,57 +1767,6 @@ def train_phase_b_decoder(model, encoder_datasets, device, logger, wandb_logger,
     logger.info(f"\n" + "=" * 60)
     logger.info(f"PHASE B COMPLETE - Shared decoder training with PoE finished (final loss: {final_loss:.4f})")
     logger.info("=" * 60)
-    
-    # Add comprehensive evaluation after each epoch for Phase B
-    if wandb_logger:
-        wandb_settings = settings.get_wandb_settings()
-        eval_log_interval = wandb_settings.get('eval_log_interval', 10)
-        
-        for epoch in range(phase_epochs):
-            if should_run_evaluation(epoch + 1, eval_log_interval, phase_epochs):
-                try:
-                    # Prepare evaluation dataloader for Phase B (separate from training)
-                    evaluation_settings = settings.get_evaluation_settings()
-                    eval_keys = evaluation_settings.get('eval_keys', TRAINING_KEYS)
-                    eval_n_per_key = evaluation_settings.get('eval_n_per_key', data_settings['n'])
-                    
-                    # Generate evaluation data for Phase B evaluation
-                    all_eval_inputs = []
-                    all_eval_outputs = []
-                    for task_key in eval_keys[:5]:  # Limit to avoid memory issues
-                        try:
-                            _, _, _, task_input_sequences, task_output_sequences = generate_and_process_tasks(task_key, min(eval_n_per_key, 10))
-                            all_eval_inputs.extend(task_input_sequences)
-                            all_eval_outputs.extend(task_output_sequences)
-                        except Exception as e:
-                            logger.warning(f"Failed to generate eval data for key {task_key}: {e}")
-                    
-                    eval_dataloader = None
-                    if all_eval_inputs:
-                        from utils.model_utils import prepare_dataloader
-                        eval_dataloader = prepare_dataloader(all_eval_inputs, all_eval_outputs, BATCH_SIZE)
-                    
-                    # Use regular evaluation function (same as regular training)
-                    num_encoders = len(model.multi_encoder.encoders) if hasattr(model, 'multi_encoder') else 1
-                    comprehensive_evaluation_after_epoch(
-                        model=model,
-                        dataloader=eval_dataloader,  # Evaluation dataloader, not training
-                        device=device,
-                        epoch=epoch,
-                        run_dir=run_dir,
-                        wandb_logger=wandb_logger,
-                        training_keys=TRAINING_KEYS,
-                        input_sequences=None,  # Will use stored epoch_optimized_latents
-                        output_sequences=None,
-                        key_list=None,
-                        is_multi_encoder=True,
-                        num_encoders=num_encoders,
-                        infinite_dataloader=is_infinite_dataloader,
-                        encoder_dataloaders=None
-                    )
-                    print(f"[OK] Comprehensive evaluation completed for Phase B epoch {epoch+1}")
-                except Exception as e:
-                    logger.warning(f"Comprehensive evaluation failed for Phase B epoch {epoch+1}: {e}")
     
     # Generate final comparison plot showing all encoder reconstructions vs PoE
     if wandb_logger:
@@ -2104,12 +2046,12 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
             # Verify trajectory plot settings
             trajectory_plots_enabled = wandb_settings.get('log_trajectory_plots', False)
             trajectory_max_samples = wandb_settings.get('trajectory_max_samples', 3)
-            eval_interval = wandb_settings.get('eval_log_interval', 10)
+            eval_log_interval = wandb_settings.get('eval_log_interval', 10)
             logger.info(f"[ OK ] Trajectory plots: {'ENABLED' if trajectory_plots_enabled else 'DISABLED'}")
             logger.info(f"[ OK ] Trajectory max samples: {trajectory_max_samples}")
-            logger.info(f"[ OK ] Evaluation/plot interval: every {eval_interval} epochs")
+            logger.info(f"[ OK ] Evaluation/plot interval: every {eval_log_interval} epochs")
             if trajectory_plots_enabled:
-                print(f"Trajectory plots enabled: {trajectory_max_samples} samples every {eval_interval} epochs")
+                print(f"Trajectory plots enabled: {trajectory_max_samples} samples every {eval_log_interval} epochs")
             else:
                 print("[ WARNING ] Warning: Trajectory plots are disabled in WandB settings")
         else:
@@ -2331,11 +2273,13 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
             save_results(results, run_dir)
             
             # Debug: Check what's in results
-            print(f"DEBUG: Results keys: {list(results.keys())}")
+            # print(f"DEBUG: Results keys: {list(results.keys())}")
             if 'input_sequences' in results:
-                print(f"DEBUG: input_sequences type: {type(results['input_sequences'])}, length: {len(results['input_sequences']) if results['input_sequences'] else 'None'}")
+                pass
+                # print(f"DEBUG: input_sequences type: {type(results['input_sequences'])}, length: {len(results['input_sequences']) if results['input_sequences'] else 'None'}")
             if 'output_sequences' in results:
-                print(f"DEBUG: output_sequences type: {type(results['output_sequences'])}, length: {len(results['output_sequences']) if results['output_sequences'] else 'None'}")
+                pass
+                # print(f"DEBUG: output_sequences type: {type(results['output_sequences'])}, length: {len(results['output_sequences']) if results['output_sequences'] else 'None'}")
             
             # Verify results.pkl is being created
             results_file = os.path.join(run_dir, 'results.pkl')
@@ -2343,11 +2287,12 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
                 print(f"DEBUG: results.pkl exists at {results_file}")
                 # Check file size
                 file_size = os.path.getsize(results_file)
-                print(f"DEBUG: results.pkl file size: {file_size} bytes")
+                # print(f"DEBUG: results.pkl file size: {file_size} bytes")
             else:
                 print(f"DEBUG: results.pkl NOT found at {results_file}")
         
         if 'B' in phases_to_run:
+            pass
             logger.info("\n" + "=" * 100)
             logger.info("STARTING PHASE B: SHARED DECODER TRAINING WITH POE")
             logger.info("=" * 100)
@@ -2398,19 +2343,21 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
             save_results(results, run_dir)
             
             # Debug: Check what's in results
-            print(f"DEBUG: Results keys: {list(results.keys())}")
+            # print(f"DEBUG: Results keys: {list(results.keys())}")
             if 'input_sequences' in results:
-                print(f"DEBUG: input_sequences type: {type(results['input_sequences'])}, length: {len(results['input_sequences']) if results['input_sequences'] else 'None'}")
+                pass
+                # print(f"DEBUG: input_sequences type: {type(results['input_sequences'])}, length: {len(results['input_sequences']) if results['input_sequences'] else 'None'}")
             if 'output_sequences' in results:
-                print(f"DEBUG: output_sequences type: {type(results['output_sequences'])}, length: {len(results['output_sequences']) if results['output_sequences'] else 'None'}")
+                pass
+                # print(f"DEBUG: output_sequences type: {type(results['output_sequences'])}, length: {len(results['output_sequences']) if results['output_sequences'] else 'None'}")
             
             # Verify results.pkl is being created
             results_file = os.path.join(run_dir, 'results.pkl')
             if os.path.exists(results_file):
-                print(f"DEBUG: results.pkl exists at {results_file}")
+                # print(f"DEBUG: results.pkl exists at {results_file}")
                 # Check file size
                 file_size = os.path.getsize(results_file)
-                print(f"DEBUG: results.pkl file size: {file_size} bytes")
+                # print(f"DEBUG: results.pkl file size: {file_size} bytes")
             else:
                 print(f"DEBUG: results.pkl NOT found at {results_file}")
     

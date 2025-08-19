@@ -669,13 +669,13 @@ def visualize_all_results(results, save_dir=None, eval_results=None, epoch=None)
         except Exception as e:
             print(f"[ WARNING ] Could not create multi-encoder accuracy plots: {e}")
 
-    # Plot trajectory reconstructions if evaluation results available
-    if eval_results and save_dir:
-        try:
-            print("\nPlotting trajectory reconstructions...")
-            plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir, epoch=epoch)
-        except Exception as e:
-            print(f"[ WARNING ] Could not create trajectory reconstructions: {e}")
+    # Plot trajectory reconstructions if evaluation results available - DISABLED
+    # if eval_results and save_dir:
+    #     try:
+    #         print("\nPlotting trajectory reconstructions...")
+    #         plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir, epoch=epoch)
+    #     except Exception as e:
+    #         print(f"[ WARNING ] Could not create trajectory reconstructions: {e}")
 
     if 'losses_gradient_ascent' in results:
         if len(results['losses_gradient_ascent']) > 0:
@@ -2241,12 +2241,12 @@ def generate_per_dimension_kl_plot(model, dataloader, device, epoch, encoder_idx
                 f'{metrics_key}_free_bits_delta': delta_per_dim,
                 f'{metrics_key}_latent_dimension': latent_dim,
                 f'{metrics_key}_samples_analyzed': all_mus.shape[0],
-                'epoch': epoch+1 if epoch is not None else None  # ✅ ADD: Explicit epoch field
+                'epoch': epoch if epoch is not None else None  # ✅ Use epoch as-is (now global_step)
             }
             
-            wandb_logger._safe_log(log_dict, step_hint=global_step)
+            wandb_logger._safe_log(log_dict, step_hint=epoch)
             
-            print(f"[ OK ] Per-dimension KL plot logged to WandB at step {global_step}")
+            print(f"[ OK ] Per-dimension KL plot logged to WandB at epoch {epoch}")
             print(f"  - Encoder: {'PoE' if encoder_idx is None else encoder_idx}")
             print(f"  - Latent dimension: {latent_dim}")
             print(f"  - Mean KL per dimension (RAW): {mean_kl_raw:.3f}")
@@ -2315,7 +2315,7 @@ def plot_latent_space_by_key_and_encoder(latent_tuples, title, save_path=None, k
     if phase:
         full_title = f"{phase.title()} Latent Space: " + full_title
     if epoch is not None:
-        full_title += f" (Epoch {epoch+1 if epoch is not None else 'N/A'})"
+        full_title += f" (Epoch {epoch if epoch is not None else 'N/A'})"
     if infinite_dataloader:
         full_title += " [Infinite Dataloader]"
     plt.title(full_title, fontsize=15)
@@ -2548,11 +2548,11 @@ def plot_training_latent_space_per_epoch(model, dataloader, device, epoch, save_
                                            markersize=8, label=f'Encoder {encoder_idx}'))
 
         plt.legend(handles=legend_elements, loc='upper right', fontsize=8, ncol=2)
-        plt.title(f'REAL Training Latent Space - Epoch {epoch+1 if epoch is not None else "N/A"}\n(Actual latents used in training - Colored by Key, Markers by Encoder)', fontsize=12)
+        plt.title(f'REAL Training Latent Space - Epoch {epoch if epoch is not None else "N/A"}\n(Actual latents used in training - Colored by Key, Markers by Encoder)', fontsize=12)
         plt.xlabel('t-SNE Dimension 1')
         plt.ylabel('t-SNE Dimension 2')
 
-        plot_path = os.path.join(latent_plots_dir, f'training_latent_space_epoch_{epoch+1 if epoch is not None else "N_A"}.png')
+        plot_path = os.path.join(latent_plots_dir, f'training_latent_space_epoch_{epoch if epoch is not None else "N_A"}.png')
         plt.savefig(plot_path, dpi=300, bbox_inches='tight')
         plt.close()
 
@@ -2565,8 +2565,8 @@ def plot_training_latent_space_per_epoch(model, dataloader, device, epoch, save_
                 # Use consistent key for single panel with epoch as step
                 wandb_logger._safe_log({
                     'training_latent_space': wandb.Image(plot_path),
-                    'epoch': epoch+1 if epoch is not None else None  # ✅ ADD: Explicit epoch field
-                }, step_hint=epoch+1 if epoch is not None else None)
+                    'epoch': epoch if epoch is not None else None  # ✅ Use epoch as-is (now global_step)
+                }, step_hint=epoch if epoch is not None else None)
                 print(f"  [OK] REAL training latent space plot uploaded to wandb")
             except Exception as e:
                 print(f"  [WARNING] Could not upload REAL training latent space plot to wandb: {e}")
@@ -2811,11 +2811,11 @@ def plot_evaluation_latent_space_by_key_and_encoder(eval_results, save_dir, epoc
                 ood_indicator = " (OOD SAMPLES)"
                 break
     
-    plt.title(f'Evaluation Latent Space - Epoch {epoch+1 if epoch is not None else "N/A"}{ood_indicator}\n(Support: per-sample, Query: per-task)', fontsize=12)
+    plt.title(f'Evaluation Latent Space - Epoch {epoch if epoch is not None else "N/A"}{ood_indicator}\n(Support: per-sample, Query: per-task)', fontsize=12)
     plt.xlabel('t-SNE Dimension 1')
     plt.ylabel('t-SNE Dimension 2')
     
-    plot_path = os.path.join(save_dir, 'latent_space_plots', f'evaluation_latent_space_epoch_{epoch+1 if epoch is not None else "N_A"}.png')
+    plot_path = os.path.join(save_dir, 'latent_space_plots', f'evaluation_latent_space_epoch_{epoch if epoch is not None else "N_A"}.png')
     os.makedirs(os.path.dirname(plot_path), exist_ok=True)
     plt.savefig(plot_path, dpi=300, bbox_inches='tight')
     plt.close()
@@ -2832,9 +2832,9 @@ def plot_evaluation_latent_space_by_key_and_encoder(eval_results, save_dir, epoc
             # ✅ FIX: Add OOD indicator to caption
             ood_caption = " (OOD)" if ood_indicator else ""
             wandb_logger._safe_log({
-                panel_name: wandb.Image(plot_path, caption=f"Evaluation Latent Space - Epoch {epoch+1 if epoch is not None else 'N/A'}{ood_caption}"),
-                'epoch': epoch+1 if epoch is not None else None  # ✅ ADD: Explicit epoch field
-            }, step_hint=epoch+1 if epoch is not None else None)
+                panel_name: wandb.Image(plot_path, caption=f"Evaluation Latent Space - Epoch {epoch if epoch is not None else 'N/A'}{ood_caption}"),
+                'epoch': epoch if epoch is not None else None  # ✅ Use epoch as-is (now global_step)
+            }, step_hint=epoch if epoch is not None else None)
             print(f"  [OK] Evaluation latent space plot uploaded to wandb panel '{panel_name}'")
         except Exception as e:
             print(f"  [WARNING] Could not upload evaluation latent space plot to wandb: {e}")
@@ -3095,8 +3095,8 @@ def create_standalone_latent_space_plot(trajectory_info, model, save_dir, epoch,
             ood_caption = " (OOD)" if ood_enabled or any('ood_' in label for label in all_labels if label) else ""
             wandb_logger._safe_log({
                 panel_name: wandb.Image(save_path, caption=f"Trajectory Latent Space - Sample {sample_idx} - Epoch {epoch}{ood_caption}"),
-                'epoch': epoch+1 if epoch is not None else None  # ✅ ADD: Explicit epoch field
-            }, step_hint=epoch+1 if epoch is not None else None)
+                'epoch': epoch if epoch is not None else None  # ✅ Use epoch as-is (now global_step)
+            }, step_hint=epoch if epoch is not None else None)
             
             print(f"[ OK ] Uploaded trajectory latent space plot to wandb panel '{panel_name}' (step={epoch})")
             

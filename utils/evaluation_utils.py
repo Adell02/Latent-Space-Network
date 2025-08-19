@@ -168,21 +168,27 @@ def generate_trajectory_plots(eval_results: Dict[str, Any], run_dir: str, epoch:
                         # Continue with next sample instead of failing completely
                         continue
                     
-                    # Create standalone latent space plot for this trajectory
-                    from utils.visualizers import create_standalone_latent_space_plot
+                    # Create standalone latent space plot for this trajectory (if enabled)
+                    wandb_settings = settings.get_wandb_settings()
+                    log_standalone_trajectory_plots = wandb_settings.get('log_standalone_trajectory_plots', True)
                     
-                    # Get OOD settings and pass them to the function
-                    eval_data_settings = settings.get_evaluation_data_settings()
-                    ood_enabled = eval_data_settings.get('use_ood_for_evaluation', True)
-                    ood_task_keys = []
-                    if ood_enabled and 'raw_data' in eval_results.get('key_results', {}).get(key, {}):
-                        ood_task_keys = eval_results['key_results'][key]['raw_data'].get('ood_task_keys', [])
-                    
-                    latent_space_path = create_standalone_latent_space_plot(
-                        trajectory_info, model, run_dir, safe_epoch, sample_idx, key, 
-                        device='cuda', wandb_logger=wandb_logger, 
-                        eval_results=eval_results, ood_enabled=ood_enabled, ood_task_keys=ood_task_keys
-                    )
+                    if log_standalone_trajectory_plots:
+                        from utils.visualizers import create_standalone_latent_space_plot
+                        
+                        # Get OOD settings and pass them to the function
+                        eval_data_settings = settings.get_evaluation_data_settings()
+                        ood_enabled = eval_data_settings.get('use_ood_for_evaluation', True)
+                        ood_task_keys = []
+                        if ood_enabled and 'raw_data' in eval_results.get('key_results', {}).get(key, {}):
+                            ood_task_keys = eval_results['key_results'][key]['raw_data'].get('ood_task_keys', [])
+                        
+                        latent_space_path = create_standalone_latent_space_plot(
+                            trajectory_info, model, run_dir, safe_epoch, sample_idx, key, 
+                            device='cuda', wandb_logger=wandb_logger, 
+                            eval_results=eval_results, ood_enabled=ood_enabled, ood_task_keys=ood_task_keys
+                        )
+                    else:
+                        latent_space_path = None
                     
                     # Store plot path with consistent key for slider visualization
                     # Use key_sample format without epoch in the key for consistent naming across epochs

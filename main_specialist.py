@@ -105,11 +105,25 @@ def main_args():
     if not args.file_name:
         raise ValueError("--file_name must be specified")
 
-    # Create run directory with timestamp
+    # Resolve run directory:
+    # - If training (or 'all'), create a NEW timestamped directory
+    # - If eval/visualize ONLY and an existing directory with this name exists, reuse it
+    # - Otherwise, create a new timestamped directory
+    import os as _os
     timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-    run_dir = os.path.join(BASE_DIR, f"{args.file_name}_{timestamp}")
-    os.makedirs(run_dir, exist_ok=True)
-    print(f"Created run directory: {run_dir}")
+    candidate_existing = _os.path.join(BASE_DIR, args.file_name)
+    if ('train' in args.mode or 'all' in args.mode):
+        run_dir = _os.path.join(BASE_DIR, f"{args.file_name}_{timestamp}")
+        _os.makedirs(run_dir, exist_ok=True)
+        print(f"Created run directory (training): {run_dir}")
+    else:
+        if _os.path.isdir(candidate_existing):
+            run_dir = candidate_existing
+            print(f"Reusing existing run directory for eval/visualize: {run_dir}")
+        else:
+            run_dir = _os.path.join(BASE_DIR, f"{args.file_name}_{timestamp}")
+            _os.makedirs(run_dir, exist_ok=True)
+            print(f"Created run directory (eval/visualize): {run_dir}")
 
     # Generate notes for this run
     notes = f"Specialist run: {args.file_name} | Specialist training"

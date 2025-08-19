@@ -1693,32 +1693,34 @@ def comprehensive_evaluation_after_epoch(
                         print(f"[WARNING] Trajectory plot generation failed for key {key}: {e}")
                     
                     # ✅ ADD: Generate and upload main trajectory plot with reconstructions
-                    try:
-                        from LPN_reproduction.evaluate_trajectory import visualize_comprehensive_trajectory
-                        # ✅ FIX: Use OOD task key in filename if available
-                        reconstruction_key = ood_task_keys[0] if ood_task_keys and len(ood_task_keys) > 0 else key
-                        main_reconstruction_path = os.path.join(
-                            run_dir, "trajectory_plots", f"main_reconstruction_{reconstruction_key}_epoch_{epoch+1}.png"
-                        )
-                        visualize_comprehensive_trajectory(
-                            actual_trajectory, model, main_reconstruction_path, run_dir, device=device,
-                            ood_enabled=ood_enabled, ood_task_keys=ood_task_keys
-                        )
-                        print(f"[OK] Main trajectory plot with reconstructions saved: {main_reconstruction_path}")
-                        
-                        # ✅ ADD: Upload main trajectory plot to WandB with key-specific panel
-                        if wandb_logger:
-                            try:
-                                import wandb
-                                wandb_logger._safe_log({
-                                    f'main_reconstruction_{key}': wandb.Image(main_reconstruction_path),
-                                    'epoch': epoch+1  # ✅ ADD: Explicit epoch field
-                                }, step_hint=epoch+1)
-                                print(f"[OK] Main trajectory plot uploaded to wandb panel 'main_reconstruction_{key}' (step={epoch+1})")
-                            except Exception as e:
-                                print(f"[WARNING] Could not upload main trajectory plot to wandb: {e}")
-                    except Exception as e:
-                        print(f"[WARNING] Main trajectory plot generation failed for key {key}: {e}")
+                    log_main_reconstruction_plots = wandb_settings.get('log_main_reconstruction_plots', True)
+                    if log_main_reconstruction_plots:
+                        try:
+                            from LPN_reproduction.evaluate_trajectory import visualize_comprehensive_trajectory
+                            # ✅ FIX: Use OOD task key in filename if available
+                            reconstruction_key = ood_task_keys[0] if ood_task_keys and len(ood_task_keys) > 0 else key
+                            main_reconstruction_path = os.path.join(
+                                run_dir, "trajectory_plots", f"main_reconstruction_{reconstruction_key}_epoch_{epoch+1}.png"
+                            )
+                            visualize_comprehensive_trajectory(
+                                actual_trajectory, model, main_reconstruction_path, run_dir, device=device,
+                                ood_enabled=ood_enabled, ood_task_keys=ood_task_keys
+                            )
+                            print(f"[OK] Main trajectory plot with reconstructions saved: {main_reconstruction_path}")
+                            
+                            # ✅ ADD: Upload main trajectory plot to WandB with key-specific panel
+                            if wandb_logger:
+                                try:
+                                    import wandb
+                                    wandb_logger._safe_log({
+                                        f'main_reconstruction_{key}': wandb.Image(main_reconstruction_path),
+                                        'epoch': epoch+1  # ✅ ADD: Explicit epoch field
+                                    }, step_hint=epoch+1)
+                                    print(f"[OK] Main trajectory plot uploaded to wandb panel 'main_reconstruction_{key}' (step={epoch+1})")
+                                except Exception as e:
+                                    print(f"[WARNING] Could not upload main trajectory plot to wandb: {e}")
+                        except Exception as e:
+                            print(f"[WARNING] Main trajectory plot generation failed for key {key}: {e}")
 
                     trajectory_plot_count += 1
 
