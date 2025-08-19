@@ -170,41 +170,39 @@ set_seed(get_training_seed())
 #  Low‑level helper: diagonal‑Gaussian PoE
 # -------------------------------------------------
 
-def gaussian_poe(mu: torch.Tensor, logvar: torch.Tensor, debug=False) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Multiply K diagonal Gaussians.
-    Args
-    -----
-    mu      : (K, B, D)
-    logvar  : (K, B, D)
-    debug   : bool, whether to print debugging information
-    Returns
-    -------
-    fused_mu, fused_logvar : (B, D)
+def gaussian_poe(mu: torch.Tensor, logvar: torch.Tensor, debug: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
     """
+    Prior-corrected PoE for the SAME-SAMPLE, EQUAL-WEIGHT case under standard normal prior.
+    Inputs:
+        mu     : (K, B, D)
+        logvar : (K, B, D)
+    Returns:
+        fused_mu     : (B, D)
+        fused_logvar : (B, D)
+    """
+    K, B, D = mu.shape
+    lv = torch.clamp(logvar, -20.0, 20.0)        # numerical safety
+    tau = torch.exp(-lv)                          # precisions (K,B,D)
+
+    # Equal weights for same-sample case: sum(alpha)=1 => alpha=1/K
+    alpha = 1.0 / K
+
+    # Prior-correct form with sum(alpha)=1 collapses to simple averages:
+    # tau* = average of per-encoder precisions
+    tau_star = alpha * tau.sum(dim=0)             # (B,D)
+    tau_star = torch.clamp(tau_star, min=1e-6)
+
+    # h* = average of per-encoder natural means (tau * mu)
+    h_star = alpha * (tau * mu).sum(dim=0)        # (B,D)
+
+    fused_mu = h_star / tau_star
+    fused_logvar = torch.log(1.0 / tau_star)
+
     if debug:
-        print(f"PoE Debug: Input shapes - mu: {mu.shape}, logvar: {logvar.shape}")
-        print(f"PoE Debug: mu stats - min: {mu.min():.4f}, max: {mu.max():.4f}, mean: {mu.mean():.4f}")
-        print(f"PoE Debug: logvar stats - min: {logvar.min():.4f}, max: {logvar.max():.4f}, mean: {logvar.mean():.4f}")
-        
-        # Check if encoders are producing identical outputs
-        if mu.shape[0] > 1:
-            mu_diff = torch.abs(mu[0] - mu[1]).mean()
-            logvar_diff = torch.abs(logvar[0] - logvar[1]).mean()
-            print(f"PoE Debug: Encoder differences - mu_diff: {mu_diff:.6f}, logvar_diff: {logvar_diff:.6f}")
-            
-            if mu_diff < 1e-6 and logvar_diff < 1e-6:
-                print("WARNING: Encoders are producing nearly identical outputs!")
-    
-    precision   = torch.exp(-logvar)            # Σ⁻¹
-    fused_var   = 1. / precision.sum(0)         # (B,D)
-    fused_mu    = fused_var * (precision * mu).sum(0)
-    fused_logvar = fused_var.log()
-    
-    if debug:
-        print(f"PoE Debug: Output shapes - fused_mu: {fused_mu.shape}, fused_logvar: {fused_logvar.shape}")
-        print(f"PoE Debug: fused_mu stats - min: {fused_mu.min():.4f}, max: {fused_mu.max():.4f}, mean: {fused_mu.mean():.4f}")
-    
+        print(f"[PoE] K={K}  tau*: [{tau_star.min().item():.3e}, {tau_star.max().item():.3e}]")
+
     return fused_mu, fused_logvar
+
 
 ##############################
 # Define Model Components
@@ -417,24 +415,26 @@ class TransformerDecoder(nn.Module):
         self.shape_output = nn.Linear(hidden_dim, 31)
         self.grid_output  = nn.Linear(hidden_dim, 10)
         self.layer_norm   = nn.LayerNorm(hidden_dim)
+        
+        # Add BOS embeddings for teacher forcing
+        self.bos_grid = nn.Parameter(torch.randn(1, hidden_dim))
+        self.bos_shape = nn.Parameter(torch.randn(1, hidden_dim))
 
     def build_causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
         """
-        Create LPN-style causal mask: allow latent+shape+input (<903) to see everything,
-        only mask the output grid portion (>=903).
-        
-        FIXED: Works on all PyTorch versions
+        Create proper causal mask: allow latent+input+input_shape (0..901) to see everything,
+        only mask the target segment (902..) causally.
         """
         # Build upper triangular mask (causal)
         tri = torch.triu(torch.ones(seq_len, seq_len, device=device), 1)
-        tri[:903, :] = 0  # 0..902 (latent + rows/cols + input) unmasked
-        mask = tri.bool()  # bool for ≥2.0, will cast to float later
+        tri[:902, :] = 0  # 0..901 (latent + input_grid + input_shape) unmasked
+        mask_bool = tri.bool()
         
         if torch.__version__ < '2':
             # float mask for 1.x
-            mask = mask.float().masked_fill(mask, float('-inf'))
+            mask_bool = mask_bool.float().masked_fill(mask_bool, float('-inf'))
         
-        return mask
+        return mask_bool
 
     def get_position_embedding(self, row_idx: int, col_idx: int, device: torch.device) -> torch.Tensor:
         """Get positional embedding for grid positions (0-29, 0-29)"""
@@ -459,7 +459,7 @@ class TransformerDecoder(nn.Module):
                 zero_latent: bool = False,
                 perturb_latent: float = 0.0) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        FIXED: Proper latent integration in decoder
+        FIXED: Proper teacher forcing with shifted targets and causal masking
         """
         batch_size, device = input_seq.size(0), input_seq.device
         
@@ -493,17 +493,20 @@ class TransformerDecoder(nn.Module):
             latent_emb = latent_emb + noise
         
         # FIXED: Broadcast latent to all positions for proper integration
-        # This ensures the latent affects ALL output positions
         latent_broadcast = latent_emb.unsqueeze(1).expand(-1, 902, -1)  # [B, 902, H]
         
-        # FIXED: Add latent to input embeddings (not just as a separate token)
+        # FIXED: Add latent to input embeddings
         input_grid_emb = input_grid_emb + latent_broadcast[:, :900, :]
         input_shape_emb = input_shape_emb + latent_broadcast[:, 900:902, :]
         
-        # Add positional embeddings
+        # Add positional embeddings for input grid
         pos_i = torch.arange(30, device=device).view(1, -1, 1).repeat(batch_size, 1, 30)
         pos_j = torch.arange(30, device=device).view(1, 1, -1).repeat(batch_size, 30, 1)
         input_grid_emb = input_grid_emb + (self.row_embedding(pos_i) + self.col_embedding(pos_j)).view(batch_size, 900, -1)
+        
+        # FIXED: Add distinct absolute positions for shape tokens
+        shape_pos = self.get_shape_position_embeddings(device).unsqueeze(0).expand(batch_size, -1, -1)
+        input_shape_emb = input_shape_emb + shape_pos
         
         # FIXED: Simple autoregressive generation (no teacher forcing during inference)
         if target_seq is None:
@@ -512,27 +515,42 @@ class TransformerDecoder(nn.Module):
             grid_logits = self.grid_output(input_grid_emb)
             return shape_logits, grid_logits
         else:
-            # Training: use teacher forcing but with proper latent integration
+            # TRAINING: Teacher forcing with proper shifting and masking
             target_grid = torch.clamp(target_seq[:, :900], 0, 9).long()
             target_shape = torch.clamp(target_seq[:, 900:902], 0, 30).long()
             
             target_grid_emb = self.output_grid_embedding(target_grid)
             target_shape_emb = self.output_shape_embedding(target_shape)
             
-            # FIXED: Add latent to target embeddings too
+            # FIXED: Add latent to target embeddings
             target_grid_emb = target_grid_emb + latent_broadcast[:, :900, :]
             target_shape_emb = target_shape_emb + latent_broadcast[:, 900:902, :]
             
-            # Add positional embeddings
+            # Add positional embeddings for target grid
             target_grid_emb = target_grid_emb + (self.row_embedding(pos_i) + self.col_embedding(pos_j)).view(batch_size, 900, -1)
             
-            # FIXED: Use transformer to process the integrated sequence
-            seq_emb = torch.cat([input_grid_emb, input_shape_emb, target_grid_emb, target_shape_emb], dim=1)
+            # FIXED: Add distinct absolute positions for target shape tokens
+            target_shape_emb = target_shape_emb + shape_pos
             
-            # Apply transformer
-            output = self.layer_norm(self.transformer(seq_emb))
+            # ---- TEACHER FORCING SHIFT ----
+            bos_grid = self.bos_grid.expand(batch_size, 1, -1)
+            bos_shape = self.bos_shape.expand(batch_size, 1, -1)
             
-            # CORRECT: Extract from TARGET positions
+            # Grid: predict 900 tokens from [BOS, y[:899]]
+            target_grid_in = torch.cat([bos_grid, target_grid_emb[:, :-1, :]], dim=1)
+            
+            # Shape: predict [rows, cols] from [BOS_shape, rows]
+            target_shape_in = torch.cat([bos_shape, target_shape_emb[:, :1, :]], dim=1)
+            
+            # FIXED: Pack sequence with shifted targets
+            # [input_grid(900), input_shape(2), target_grid_in(900), target_shape_in(2)]
+            seq_emb = torch.cat([input_grid_emb, input_shape_emb, target_grid_in, target_shape_in], dim=1)
+            
+            # FIXED: Apply causal mask over target segment
+            attn_mask = self.build_causal_mask(seq_emb.size(1), device)
+            output = self.layer_norm(self.transformer(seq_emb, mask=attn_mask))
+            
+            # FIXED: Extract from target positions (same slices)
             shape_logits = self.shape_output(output[:, 1802:1804])  # Target shape positions
             grid_logits = self.grid_output(output[:, 902:1802])     # Target grid positions
             
