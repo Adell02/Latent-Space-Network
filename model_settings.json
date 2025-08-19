@@ -1,18 +1,18 @@
 {
   "data_settings": {
       "training_keys": "all",
-      "n_max_keys": 10,
+      "n_max_keys": 20,
       "training_seed": 42,
       "eval_seed": 1,
-      "n": 10,
+      "n": 1,
       "run_base_dir": "runs_re_arc",
       "split_across_encoders": false
   },
   "training_settings": {
       "data_source": "synthetic",
       "use_ood_for_training": false,
-      "num_epochs": 5,
-      "batch_size": 128,
+      "num_epochs": 10,
+      "batch_size": 64,
       "gradient_accumulation_steps": 1,
       "learning_rate": 0.0004,
       "optimizer_weight_decay": 0.0,
@@ -20,7 +20,7 @@
       "use_mixed_precision": true,
       "save_checkpoint_interval": 1,
       "infinite_dataloader": true,
-      "batches_per_epoch": 50,
+      "batches_per_epoch": 30,
       "return_task_keys": true,
       "cross_pair_loss": {
         "enabled": true,
@@ -33,7 +33,7 @@
       "data_source": "ood_original_arc",
       "use_ood_for_evaluation": true,
       "n_max_eval_keys": 10,
-      "n_max_trajectory_plots": 10,
+      "n_max_trajectory_plots": 5,
       "other_eval_keys": [
         "00d62c1b",
         "1cf80156",
@@ -41,9 +41,9 @@
         "0a938d79"
       ],
       "_eval_keys_comment": "Set to 'all' to use all available keys (limited by n_max_eval_keys), or provide a list of specific keys",
-      "eval_n_samples": 20,
-      "eval_n_queries": 20,
-      "eval_epoch": 5,
+      "eval_n_samples": 5,
+      "eval_n_queries": 5,
+      "eval_epoch": 10,
       "visualize_n_values": 1,
       "_comment_trajectory_decoder": "trajectory_decoder_type: 'shared' uses shared decoder for all reconstructions (good for PoE analysis), 'independent' uses each encoder's independent decoder (good for specialization analysis)",
       "trajectory_decoder_type": "shared"
@@ -56,7 +56,7 @@
       },
       "inference": {
           "enabled": true,
-          "num_steps": 100,
+          "num_steps": 5,
           "learning_rate": 0.1
       },
       "method": "gradient",
@@ -74,12 +74,12 @@
   },
   "model_architecture": {
       "num_encoders": 1,
-      "encoder_layers": 2,
-      "decoder_layers": 2,
-      "encoder_heads": 4,
-      "decoder_heads": 4,
-      "encoder_hidden_dim": 56,
-      "decoder_hidden_dim": 56,
+      "encoder_layers": 3,
+      "decoder_layers": 3,
+      "encoder_heads": 6,
+      "decoder_heads": 6,
+      "encoder_hidden_dim": 90,
+      "decoder_hidden_dim": 90,
       "latent_dim": 64,
       "dropout": 1e-6,
       "decoder_input_dropout": 0,
@@ -127,11 +127,11 @@
       "enabled": true,
       "entity": "ga624-imperial-college-london",
       "api_key": "e2853fdc991b057f1cebf7df2a747ecca6fdaf6c",
-      "project_name": "LPN_reproduce_long",
+      "project_name": "LPN_specialist_paper",
       "log_interval": 1,
       "log_trajectory_plots": true,
-      "trajectory_max_samples": 3,
-      "eval_log_interval": 1
+      "trajectory_max_samples": 10,
+      "eval_log_interval": 3
   },
   "specialist_training": {
       "phase_a": {
