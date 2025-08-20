@@ -11,7 +11,7 @@
   "training_settings": {
       "data_source": "synthetic",
       "use_ood_for_training": false,
-      "num_epochs": 10,
+      "num_epochs": 20,
       "batch_size": 64,
       "gradient_accumulation_steps": 1,
       "learning_rate": 0.0004,
@@ -20,8 +20,9 @@
       "use_mixed_precision": true,
       "save_checkpoint_interval": 1,
       "infinite_dataloader": true,
-      "batches_per_epoch": 30,
+      "batches_per_epoch": 40,
       "return_task_keys": true,
+      "enable_training_latent_tsne_plot": true,
       "cross_pair_loss": {
         "enabled": true,
         "num_pairs": 10,
@@ -32,7 +33,7 @@
       "eval_keys": "all",
       "data_source": "ood_original_arc",
       "use_ood_for_evaluation": true,
-      "n_max_eval_keys": 10,
+      "n_max_eval_keys": 20,
       "n_max_trajectory_plots": 5,
       "other_eval_keys": [
         "00d62c1b",
@@ -42,9 +43,10 @@
       ],
       "_eval_keys_comment": "Set to 'all' to use all available keys (limited by n_max_eval_keys), or provide a list of specific keys",
       "eval_n_samples": 5,
-      "eval_n_queries": 5,
-      "eval_epoch": 10,
+      "eval_n_queries": 10,
+      "eval_epoch": 20,
       "visualize_n_values": 1,
+      "enable_evaluation_latent_tsne_plot": true,
       "_comment_trajectory_decoder": "trajectory_decoder_type: 'shared' uses shared decoder for all reconstructions (good for PoE analysis), 'independent' uses each encoder's independent decoder (good for specialization analysis)",
       "trajectory_decoder_type": "shared"
   },
@@ -56,7 +58,7 @@
       },
       "inference": {
           "enabled": true,
-          "num_steps": 5,
+          "num_steps": 10,
           "learning_rate": 0.1
       },
       "method": "gradient",
@@ -74,12 +76,12 @@
   },
   "model_architecture": {
       "num_encoders": 1,
-      "encoder_layers": 3,
+      "encoder_layers": 8,
       "decoder_layers": 3,
       "encoder_heads": 6,
       "decoder_heads": 6,
-      "encoder_hidden_dim": 90,
-      "decoder_hidden_dim": 90,
+      "encoder_hidden_dim": 150,
+      "decoder_hidden_dim": 150,
       "latent_dim": 64,
       "dropout": 1e-6,
       "decoder_input_dropout": 0,
@@ -131,7 +133,9 @@
       "log_interval": 1,
       "log_trajectory_plots": true,
       "trajectory_max_samples": 10,
-      "eval_log_interval": 3
+      "eval_log_interval": 3,
+      "log_standalone_trajectory_plots": false,
+      "log_main_reconstruction_plots": true
   },
   "specialist_training": {
       "phase_a": {

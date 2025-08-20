@@ -134,13 +134,17 @@ def evaluate_accuracy(model, dataloader, device, is_multi_encoder=False, encoder
                 tgt_cols_eval = int(batch_target_eval[i, 901].item())
                 active_pixels_eval = tgt_rows_eval * tgt_cols_eval
                 if active_pixels_eval > 0:
-                    epoch_grid_correct += (grid_pred_eval[i, :active_pixels_eval] == grid_tgt_eval[i, :active_pixels_eval]).sum().item()
+                    grid_correct_count = (grid_pred_eval[i, :active_pixels_eval] == grid_tgt_eval[i, :active_pixels_eval]).sum().item()
+                    epoch_grid_correct += grid_correct_count
                     epoch_grid_tokens += active_pixels_eval
+                    # Check exact match: shape correct AND all active grid pixels correct
                     if torch.all(shape_pred_eval[i] == shape_tgt_eval[i]) and \
-                       torch.all(grid_pred_eval[i, :active_pixels_eval] == grid_tgt_eval[i, :active_pixels_eval]):
+                       grid_correct_count == active_pixels_eval:
                         sample_exact_correct += 1
-                elif torch.all(shape_pred_eval[i] == shape_tgt_eval[i]):
-                    sample_exact_correct += 1
+                else:
+                    # If no active pixels, only shape needs to be correct for exact match
+                    if torch.all(shape_pred_eval[i] == shape_tgt_eval[i]):
+                        sample_exact_correct += 1
 
     # Calculate accuracies
     shape_accuracy = epoch_shape_correct / epoch_shape_tokens if epoch_shape_tokens > 0 else 0.0
@@ -174,7 +178,7 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler,
     device = next(model.parameters()).device
 
     # DETERMINE IF THIS IS A MULTI-ENCODER MODEL
-    is_multi_encoder = hasattr(model, 'is_multi_encoder') and model.is_multi_encoder
+    is_multi_encoder = hasattr(model, 'is_multi_encoder') and model.is_multi_encoder and not (hasattr(model, 'is_actually_single_encoder') and model.is_actually_single_encoder)
     
     # Reset training latents at the beginning of each epoch (only keep last epoch's data)
     if hasattr(model, 'epoch_optimized_latents'):
@@ -1324,137 +1328,190 @@ def comprehensive_evaluation_after_epoch(
     # 1. PLOT TRAINING LATENTS ON T-SNE (COLORED BY KEY + BY ENCODER)
     print("1. Plotting training latents on t-SNE...")
 
-    # Use stored optimized latents from training (REAL SAMPLES USED IN TRAINING!)
-    if hasattr(model, 'epoch_optimized_latents') and model.epoch_optimized_latents:
-        all_training_latents = model.epoch_optimized_latents['latents']
-        all_training_keys = model.epoch_optimized_latents['keys']
-        all_encoder_indices = model.epoch_optimized_latents['encoder_indices']
-        
-        print(f"  [OK] Using {len(all_training_latents)} REAL OPTIMIZED latents from LAST EPOCH only (actual samples used in training)")
+    # Check if training latent t-SNE plots are enabled
+    training_settings = settings.get_training_settings()
+    enable_training_tsne = training_settings.get('enable_training_latent_tsne_plot', True)
+    
+    if not enable_training_tsne:
+        print("  [INFO] Training latent t-SNE plots disabled in settings, skipping training latent space visualization and distance metrics")
+        # Still continue to evaluation section
     else:
-        print("  [WARNING] No stored optimized latents found, falling back to recomputation")
-        # Fallback to the old method (but this should rarely happen)
-        all_training_latents = []
-        all_training_keys = []
-        all_encoder_indices = []
-        
-        # ... existing fallback code ...
-
-    # Create t-SNE visualization of REAL OPTIMIZED training latents
-    if all_training_latents:
-        all_training_latents = np.array(all_training_latents)
-        print(f"REAL OPTIMIZED training latents shape: {all_training_latents.shape}")
-
-        # Apply t-SNE
-        print("  Applying t-SNE to REAL OPTIMIZED training latents...")
-        calculated_perplexity = min(30, max(1, len(all_training_latents)//4))
-        print(f"    DEBUG: t-SNE perplexity calculation - samples: {len(all_training_latents)}, calculated: {calculated_perplexity}")
-        if calculated_perplexity < 2:
-            calculated_perplexity = 2
-            print(f"    WARNING: Perplexity too low, setting to minimum value: {calculated_perplexity}")
-        
-        tsne = TSNE(n_components=2, random_state=data_settings.get('training_seed', 42), perplexity=calculated_perplexity)
-        tsne_coords = tsne.fit_transform(all_training_latents)
-
-        # Create visualization
-        unique_keys = sorted(list(set(all_training_keys)))
-        unique_encoders = sorted(list(set(all_encoder_indices)))
-        
-        # Debug: Show encoder distribution
-        encoder_counts = {}
-        for enc_idx in all_encoder_indices:
-            encoder_counts[enc_idx] = encoder_counts.get(enc_idx, 0) + 1
-        print(f"  [DEBUG] Training latent space encoder distribution: {encoder_counts}")
-        print(f"  [DEBUG] Total training latents: {len(all_training_latents)} from {len(unique_keys)} keys and {len(unique_encoders)} encoders")
-
-        # Create color map for up to 400 keys with clear, distinguishable colors
-        if len(unique_keys) <= 400:
-            # Use a combination of color maps for better distinction
-            colors1 = plt.cm.tab20(np.linspace(0, 1, 20))
-            colors2 = plt.cm.Set3(np.linspace(0, 1, 12))
-            colors3 = plt.cm.Pastel1(np.linspace(0, 1, 9))
-            colors4 = plt.cm.Paired(np.linspace(0, 1, 12))
+        # Use stored optimized latents from training (REAL SAMPLES USED IN TRAINING!)
+        if hasattr(model, 'epoch_optimized_latents') and model.epoch_optimized_latents:
+            all_training_latents = model.epoch_optimized_latents['latents']
+            all_training_keys = model.epoch_optimized_latents['keys']
+            all_encoder_indices = model.epoch_optimized_latents['encoder_indices']
             
-            all_colors = np.vstack([colors1, colors2, colors3, colors4])
-            # Repeat colors if needed
-            while len(all_colors) < len(unique_keys):
-                all_colors = np.vstack([all_colors, all_colors])
-            
-            key_colors = {k: all_colors[i % len(all_colors)] for i, k in enumerate(unique_keys)}
+            print(f"  [OK] Using {len(all_training_latents)} REAL OPTIMIZED latents from LAST EPOCH only (actual samples used in training)")
         else:
-            # For more than 400 keys, use a continuous color map
-            print(f"  [WARNING] Too many keys ({len(unique_keys)}), using continuous color map")
-            key_colors = {k: plt.cm.viridis(i / len(unique_keys)) for i, k in enumerate(unique_keys)}
-
-        encoder_markers = ['o', 's', '^', 'v', 'D', 'p', '*', 'h', 'H', '+']
-
-        plt.figure(figsize=(16, 12))
-        
-        # Plot by key (colored) and encoder (markers) WITH LABELS
-        for coord, key, encoder_idx in zip(tsne_coords, all_training_keys, all_encoder_indices):
-            color = key_colors.get(key, 'gray')
-            # Fix: Handle None encoder_idx
-            if encoder_idx is not None and is_multi_encoder:
-                marker = encoder_markers[encoder_idx % len(encoder_markers)]
-            else:
-                marker = 'o'
+            print("  [WARNING] No stored optimized latents found, falling back to recomputation")
+            # Fallback to the old method (but this should rarely happen)
+            all_training_latents = []
+            all_training_keys = []
+            all_encoder_indices = []
             
-            plt.scatter(coord[0], coord[1], color=color, s=80, alpha=0.7,
-                        marker=marker, edgecolors='k', linewidths=0.5)
+            # ... existing fallback code ...
+
+        # Create t-SNE visualization of REAL OPTIMIZED training latents
+        if all_training_latents:
+            all_training_latents = np.array(all_training_latents)
+            print(f"REAL OPTIMIZED training latents shape: {all_training_latents.shape}")
+
+            # Apply t-SNE
+            print("  Applying t-SNE to REAL OPTIMIZED training latents...")
+            calculated_perplexity = min(30, max(1, len(all_training_latents)//4))
+            print(f"    DEBUG: t-SNE perplexity calculation - samples: {len(all_training_latents)}, calculated: {calculated_perplexity}")
+            if calculated_perplexity < 2:
+                calculated_perplexity = 2
+                print(f"    WARNING: Perplexity too low, setting to minimum value: {calculated_perplexity}")
             
-            # ✅ FIX: Match label color with key color and add small legend by encoder
-            if len(all_training_latents) <= 100:  # Only add labels if not too many points
-                label = f"{str(key)[:4]}"  # First 4 chars of key
-                plt.text(coord[0], coord[1] + 0.3, label, fontsize=6, 
-                        ha='center', va='bottom', color=color,  # ✅ Use key color instead of black
-                        bbox=dict(boxstyle="round,pad=0.1", facecolor='white', alpha=0.7))
+            tsne = TSNE(n_components=2, random_state=data_settings.get('training_seed', 42), perplexity=calculated_perplexity)
+            tsne_coords = tsne.fit_transform(all_training_latents)
 
-        # Create compact legend for keys (show only first 20 keys to avoid clutter)
-        legend_elements = []
-        keys_to_show = unique_keys[:20]  # Show only first 20 keys in legend
-        for key in keys_to_show:
-            color = key_colors[key]
-            legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=color,
-                                               markersize=8, label=f'{key[:8]}'))
+            # Create visualization
+            unique_keys = sorted(list(set(all_training_keys)))
+            unique_encoders = sorted(list(set(all_encoder_indices)))
+            
+            # Debug: Show encoder distribution
+            encoder_counts = {}
+            for enc_idx in all_encoder_indices:
+                encoder_counts[enc_idx] = encoder_counts.get(enc_idx, 0) + 1
+            print(f"  [DEBUG] Training latent space encoder distribution: {encoder_counts}")
+            print(f"  [DEBUG] Total training latents: {len(all_training_latents)} from {len(unique_keys)} keys and {len(unique_encoders)} encoders")
 
-        if len(unique_keys) > 20:
-            legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
-                                               markersize=8, label=f'... and {len(unique_keys)-20} more keys'))
-
-        # ✅ ADD: Small legend by encoder (always show, not just when multiple encoders)
-        for encoder_idx in unique_encoders:
-            # Fix: Handle None encoder_idx
-            if encoder_idx is not None:
-                marker = encoder_markers[encoder_idx % len(encoder_markers)]
+            # Create color map for up to 400 keys with clear, distinguishable colors
+            if len(unique_keys) <= 400:
+                # Use a combination of color maps for better distinction
+                colors1 = plt.cm.tab20(np.linspace(0, 1, 20))
+                colors2 = plt.cm.Set3(np.linspace(0, 1, 12))
+                colors3 = plt.cm.Pastel1(np.linspace(0, 1, 9))
+                colors4 = plt.cm.Paired(np.linspace(0, 1, 12))
+                
+                all_colors = np.vstack([colors1, colors2, colors3, colors4])
+                # Repeat colors if needed
+                while len(all_colors) < len(unique_keys):
+                    all_colors = np.vstack([all_colors, all_colors])
+                
+                key_colors = {k: all_colors[i % len(all_colors)] for i, k in enumerate(unique_keys)}
             else:
-                marker = 'o'
-            legend_elements.append(plt.Line2D([0], [0], marker=marker, color='k', linestyle='',
-                                               markersize=8, label=f'Encoder {encoder_idx}'))
+                # For more than 400 keys, use a continuous color map
+                print(f"  [WARNING] Too many keys ({len(unique_keys)}), using continuous color map")
+                key_colors = {k: plt.cm.viridis(i / len(unique_keys)) for i, k in enumerate(unique_keys)}
 
-        plt.legend(handles=legend_elements, loc='upper right', fontsize=8, ncol=2)
-        plt.title(f'REAL Training Latent Space - Epoch {epoch+1}\n(Actual samples used in training - Colored by Key, Markers by Encoder)', fontsize=12)
-        plt.xlabel('t-SNE Dimension 1')
-        plt.ylabel('t-SNE Dimension 2')
+            encoder_markers = ['o', 's', '^', 'v', 'D', 'p', '*', 'h', 'H', '+']
 
-        plot_path = os.path.join(run_dir, 'latent_space_plots', f'training_latent_space_epoch_{epoch+1}.png')
-        os.makedirs(os.path.dirname(plot_path), exist_ok=True)
-        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-        plt.close()
+            plt.figure(figsize=(16, 12))
+            
+            # Plot by key (colored) and encoder (markers) WITH LABELS
+            for coord, key, encoder_idx in zip(tsne_coords, all_training_keys, all_encoder_indices):
+                color = key_colors.get(key, 'gray')
+                # Fix: Handle None encoder_idx
+                if encoder_idx is not None and is_multi_encoder:
+                    marker = encoder_markers[encoder_idx % len(encoder_markers)]
+                else:
+                    marker = 'o'
+                
+                plt.scatter(coord[0], coord[1], color=color, s=80, alpha=0.7,
+                            marker=marker, edgecolors='k', linewidths=0.5)
+                
+                # ✅ FIX: Match label color with key color and add small legend by encoder
+                if len(all_training_latents) <= 100:  # Only add labels if not too many points
+                    label = f"{str(key)[:4]}"  # First 4 chars of key
+                    plt.text(coord[0], coord[1] + 0.3, label, fontsize=6, 
+                            ha='center', va='bottom', color=color,  # ✅ Use key color instead of black
+                            bbox=dict(boxstyle="round,pad=0.1", facecolor='white', alpha=0.7))
 
-        print(f"  [OK] REAL training latent space plot saved: {plot_path}")
-        print(f"  [INFO] Visualization shows {len(all_training_latents)} REAL samples from {len(unique_keys)} unique keys used in training")
+            # Create compact legend for keys (show only first 20 keys to avoid clutter)
+            legend_elements = []
+            keys_to_show = unique_keys[:20]  # Show only first 20 keys in legend
+            for key in keys_to_show:
+                color = key_colors[key]
+                legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=color,
+                                                   markersize=8, label=f'{key[:8]}'))
 
-        if wandb_logger:
-            try:
-                import wandb
-                # Use consistent key for single panel with epoch as step
-                wandb_logger._safe_log({
-                    'training_latent_space': wandb.Image(plot_path),
-                    'epoch': epoch+1 if epoch is not None else None  # ✅ ADD: Explicit epoch field
-                }, step_hint=epoch+1)
-                print(f"  [OK] REAL training latent space plot uploaded to wandb")
-            except Exception as e:
-                print(f"  [WARNING] Could not upload REAL training latent space plot to wandb: {e}")
+            if len(unique_keys) > 20:
+                legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
+                                                   markersize=8, label=f'... and {len(unique_keys)-20} more keys'))
+
+            # ✅ ADD: Small legend by encoder (always show, not just when multiple encoders)
+            for encoder_idx in unique_encoders:
+                # Fix: Handle None encoder_idx
+                if encoder_idx is not None:
+                    marker = encoder_markers[encoder_idx % len(encoder_markers)]
+                else:
+                    marker = 'o'
+                legend_elements.append(plt.Line2D([0], [0], marker=marker, color='k', linestyle='',
+                                                   markersize=8, label=f'Encoder {encoder_idx}'))
+
+            plt.legend(handles=legend_elements, loc='upper right', fontsize=8, ncol=2)
+            plt.title(f'REAL Training Latent Space - Epoch {epoch+1}\n(Actual samples used in training - Colored by Key, Markers by Encoder)', fontsize=12)
+            plt.xlabel('t-SNE Dimension 1')
+            plt.ylabel('t-SNE Dimension 2')
+
+            plot_path = os.path.join(run_dir, 'latent_space_plots', f'training_latent_space_epoch_{epoch+1}.png')
+            os.makedirs(os.path.dirname(plot_path), exist_ok=True)
+            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+
+            print(f"  [OK] REAL training latent space plot saved: {plot_path}")
+            print(f"  [INFO] Visualization shows {len(all_training_latents)} REAL samples from {len(unique_keys)} unique keys used in training")
+
+            if wandb_logger:
+                try:
+                    import wandb
+                    # Use consistent key for single panel with epoch as step
+                    wandb_logger._safe_log({
+                        'training_latent_space': wandb.Image(plot_path),
+                        'epoch': epoch+1 if epoch is not None else None  # ✅ ADD: Explicit epoch field
+                    }, step_hint=epoch+1)
+                    print(f"  [OK] REAL training latent space plot uploaded to wandb")
+                except Exception as e:
+                    print(f"  [WARNING] Could not upload REAL training latent space plot to wandb: {e}")
+            
+            # Compute and log task distance metrics
+            if all_training_latents is not None and len(all_training_latents) > 0:
+                try:
+                    print("  Computing task distance metrics for training latents...")
+                    print(f"    DEBUG: latent_data type: {type(all_training_latents)}, shape: {all_training_latents.shape if hasattr(all_training_latents, 'shape') else 'no shape'}")
+                    print(f"    DEBUG: task_keys type: {type(all_training_keys)}, length: {len(all_training_keys)}")
+                    print(f"    DEBUG: task_keys sample: {all_training_keys[:5] if all_training_keys and len(all_training_keys) > 0 else 'empty'}")
+                    print(f"    DEBUG: encoder_indices type: {type(all_encoder_indices)}, length: {len(all_encoder_indices)}")
+                    print(f"    DEBUG: encoder_indices sample: {all_encoder_indices[:5] if all_encoder_indices and len(all_encoder_indices) > 0 else 'empty'}")
+                    
+                    from utils.latent_metrics import compute_task_distance_metrics
+                    
+                    print("    DEBUG: About to call compute_task_distance_metrics...")
+                    distance_metrics = compute_task_distance_metrics(
+                        latent_data=all_training_latents,
+                        task_keys=all_training_keys,
+                        encoder_indices=all_encoder_indices,
+                        distance_metric='cosine',
+                        normalize=True
+                    )
+                    print(f"    DEBUG: Function returned: {type(distance_metrics)}")
+                    
+                    # Log to WandB
+                    if wandb_logger and distance_metrics is not None and len(distance_metrics) > 0:
+                        wandb_metrics = {}
+                        for key, value in distance_metrics.items():
+                            wandb_metrics[f'training_latent_distances/{key}'] = value
+                        
+                        wandb_metrics['epoch'] = epoch + 1 if epoch is not None else None
+                        wandb_logger._safe_log(wandb_metrics, step_hint=epoch + 1)
+                        print(f"  [OK] Training task distance metrics logged to WandB")
+                        
+                        # Print key metrics
+                        if 'separation_ratio' in distance_metrics:
+                            print(f"    Training separation ratio: {distance_metrics['separation_ratio']:.3f}")
+                        if 'within_task_mean' in distance_metrics:
+                            print(f"    Training within-task distance: {distance_metrics['within_task_mean']:.4f} ± {distance_metrics['within_task_std']:.4f}")
+                        if 'between_task_mean' in distance_metrics:
+                            print(f"    Training between-task distance: {distance_metrics['between_task_mean']:.4f} ± {distance_metrics['between_task_std']:.4f}")
+                            
+                except Exception as e:
+                    print(f"  [WARNING] Failed to compute training task distance metrics: {e}")
+            else:
+                print("  [INFO] No training latents available, skipping task distance metrics computation")
 
         # Encoder-specific training plot
         print(f"  DEBUG: is_multi_encoder={is_multi_encoder}, num_encoders={num_encoders}")
@@ -1550,8 +1607,8 @@ def comprehensive_evaluation_after_epoch(
                 print(f"  [OK] REAL encoder-specific training latent space plot uploaded to wandb")
             except Exception as e:
                 print(f"  [WARNING] Could not upload REAL encoder-specific training latent space plot to wandb: {e}")
-    else:
-        print("  [WARNING] Skipping training latent space plot because no REAL latents were collected")
+        else:
+            print("  [WARNING] Skipping training latent space plot because no REAL latents were collected")
 
     # 2. EVALUATE WITH SAMPLE-LEVEL OPTIMIZATION, GENERATING TRAJECTORY FIGURES
     print("2. Running evaluation with sample-level optimization...")
@@ -1693,29 +1750,37 @@ def comprehensive_evaluation_after_epoch(
                         print(f"[WARNING] Trajectory plot generation failed for key {key}: {e}")
                     
                     # ✅ ADD: Generate and upload main trajectory plot with reconstructions
-                    log_main_reconstruction_plots = wandb_settings.get('log_main_reconstruction_plots', True)
-                    if log_main_reconstruction_plots:
-                        try:
-                            from utils.visualizers import plot_multi_encoder_trajectory_reconstructions
-                            # Use the trajectory plotting helper that respects n_max_trajectory_plots
-                            plot_multi_encoder_trajectory_reconstructions(
-                                eval_results, save_dir=run_dir, epoch=epoch+1
-                            )
-                            print(f"[OK] Main trajectory plots with reconstructions saved using helper function")
-                            
-                            # ✅ ADD: Upload main trajectory plot to WandB with key-specific panel
-                            if wandb_logger:
-                                try:
-                                    import wandb
-                                    wandb_logger._safe_log({
-                                        f'main_reconstruction_{key}': wandb.Image(main_reconstruction_path),
-                                        'epoch': epoch+1  # ✅ ADD: Explicit epoch field
-                                    }, step_hint=epoch+1)
-                                    print(f"[OK] Main trajectory plot uploaded to wandb panel 'main_reconstruction_{key}' (step={epoch+1})")
-                                except Exception as e:
-                                    print(f"[WARNING] Could not upload main trajectory plot to wandb: {e}")
-                        except Exception as e:
-                            print(f"[WARNING] Main trajectory plot generation failed for key {key}: {e}")
+                    try:
+                        from LPN_reproduction.evaluate_trajectory import visualize_comprehensive_trajectory
+                        # ✅ FIX: Use OOD task key in filename if available
+                        reconstruction_key = ood_task_keys[0] if ood_task_keys and len(ood_task_keys) > 0 else key
+                        
+                        # Create trajectory_plots directory if it doesn't exist
+                        trajectory_plots_dir = os.path.join(run_dir, "trajectory_plots")
+                        os.makedirs(trajectory_plots_dir, exist_ok=True)
+                        
+                        main_reconstruction_path = os.path.join(
+                            trajectory_plots_dir, f"main_reconstruction_{reconstruction_key}_epoch_{epoch+1}.png"
+                        )
+                        visualize_comprehensive_trajectory(
+                            actual_trajectory, model, main_reconstruction_path, run_dir, device=device,
+                            ood_enabled=ood_enabled, ood_task_keys=ood_task_keys
+                        )
+                        print(f"[OK] Main trajectory plot with reconstructions saved: {main_reconstruction_path}")
+                        
+                        # ✅ ADD: Upload main trajectory plot to WandB with key-specific panel
+                        if wandb_logger:
+                            try:
+                                import wandb
+                                wandb_logger._safe_log({
+                                    f'main_reconstruction_{key}': wandb.Image(main_reconstruction_path),
+                                    'epoch': epoch+1  # ✅ ADD: Explicit epoch field
+                                }, step_hint=epoch+1)
+                                print(f"[OK] Main trajectory plot uploaded to wandb panel 'main_reconstruction_{key}' (step={epoch+1})")
+                            except Exception as e:
+                                print(f"[WARNING] Could not upload main trajectory plot to wandb: {e}")
+                    except Exception as e:
+                        print(f"[WARNING] Main trajectory plot generation failed for key {key}: {e}")
 
                     trajectory_plot_count += 1
 
@@ -1743,11 +1808,11 @@ def comprehensive_evaluation_after_epoch(
             try:
                 from utils.visualizers import plot_evaluation_latent_space_by_key_and_encoder
                 plot_evaluation_latent_space_by_key_and_encoder(
-                    eval_results=eval_results, 
-                    save_dir=run_dir, 
-                    epoch=epoch, 
+                    eval_results=eval_results,
+                    save_dir=run_dir,
+                    epoch=epoch+1,                 # pass 1-based
                     wandb_logger=wandb_logger,
-                    use_task_optimization=False  # Use original Bonnet approach for per-sample visualization
+                    use_task_optimization=False
                 )
                 print("  [ OK ] Evaluation latent space plot with encoders, PoE, and optimized positions completed")
             except Exception as e:

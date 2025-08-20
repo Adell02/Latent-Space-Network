@@ -1083,43 +1083,63 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                     if len(opt_latents) < _max_latents_to_store:
                         # Iterate samples in the batch but respect the per-epoch cap
                         bs = input_seq.size(0)
+                        print(f"    DEBUG: Phase A latent collection: batch_size={bs}, current_latents={len(opt_latents)}, max_latents={_max_latents_to_store}")
                         for i in range(bs):
                             if len(opt_latents) >= _max_latents_to_store:
                                 break
-                            _inp = input_seq[i:i+1]
-                            _tgt = target_seq[i:i+1]
-                            z_opt, _ = get_optimized_z(
-                                model, _inp, _tgt,
-                                context='training',
-                                num_steps=_opt_num_steps,
-                                lr=_opt_lr,
-                                encoder_idx=encoder_idx,
-                                use_independent_decoder=True
-                            )
-                            opt_latents.append(z_opt[0].cpu().numpy())
-                            if batch_keys is not None and i < len(batch_keys):
-                                opt_keys.append(batch_keys[i])
-                            else:
-                                opt_keys.append('unknown')
-                            opt_enc_indices.append(encoder_idx)
+                            try:
+                                _inp = input_seq[i:i+1]
+                                _tgt = target_seq[i:i+1]
+                                z_opt, _ = get_optimized_z(
+                                    model, _inp, _tgt,
+                                    context='training',
+                                    num_steps=_opt_num_steps,
+                                    lr=_opt_lr,
+                                    encoder_idx=encoder_idx,
+                                    use_independent_decoder=True
+                                )
+                                opt_latents.append(z_opt[0].cpu().numpy())
+                                if batch_keys is not None and i < len(batch_keys):
+                                    opt_keys.append(batch_keys[i])
+                                else:
+                                    opt_keys.append('unknown')
+                                opt_enc_indices.append(encoder_idx)
+                                print(f"    DEBUG: Phase A latent {i} collected successfully")
+                            except Exception as e:
+                                print(f"    DEBUG: Failed to collect latent for sample {i}: {e}")
+                                continue
+                    else:
+                        print(f"    DEBUG: Phase A latent collection: already at max ({len(opt_latents)}/{_max_latents_to_store})")
                 pbar.set_postfix({'loss': f'{loss.item() * gradient_accumulation_steps:.4f}'})
             
             avg_epoch_loss = epoch_loss / num_batches
             # Persist REAL optimized latents for this epoch (preferred by per-epoch plots)
             if opt_latents:
-                if hasattr(model, 'epoch_optimized_latents') and model.epoch_optimized_latents and encoder_idx is not None:
+                print(f"    DEBUG: Storing {len(opt_latents)} latents for encoder {encoder_idx}")
+                if hasattr(model, 'epoch_optimized_latents') and model.epoch_optimized_latents:
                     _ex = model.epoch_optimized_latents
                     model.epoch_optimized_latents = {
                         'latents': _ex['latents'] + opt_latents,
                         'keys': _ex['keys'] + opt_keys,
                         'encoder_indices': _ex['encoder_indices'] + opt_enc_indices
                     }
+                    print(f"    DEBUG: Appended to existing latents, total: {len(model.epoch_optimized_latents['latents'])}")
                 else:
                     model.epoch_optimized_latents = {
                         'latents': opt_latents,
                         'keys': opt_keys,
                         'encoder_indices': opt_enc_indices
                     }
+                    print(f"    DEBUG: Created new epoch_optimized_latents with {len(opt_latents)} latents")
+            else:
+                print(f"    DEBUG: No latents to store for encoder {encoder_idx}")
+            
+            # Debug: Check if latents were collected during this epoch
+            if 'opt_latents' in locals():
+                print(f"    DEBUG: opt_latents collected this epoch: {len(opt_latents) if opt_latents else 0}")
+            else:
+                print(f"    DEBUG: opt_latents not initialized this epoch")
+            
             encoder_losses.append(avg_epoch_loss)
             
             logger.info(f"Encoder {encoder_idx} Epoch {epoch+1}: Loss = {avg_epoch_loss:.4f}")
@@ -1139,6 +1159,10 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                 
                 if should_run_evaluation(epoch + 1, eval_log_interval, phase_epochs):
                     # Generate training latent space plot
+                    print(f"    DEBUG: About to call plot_training_latent_space_per_epoch for encoder {encoder_idx}")
+                    print(f"    DEBUG: model.epoch_optimized_latents exists: {hasattr(model, 'epoch_optimized_latents')}")
+                    if hasattr(model, 'epoch_optimized_latents'):
+                        print(f"    DEBUG: model.epoch_optimized_latents: {model.epoch_optimized_latents}")
                     try:
                         from utils.visualizers import plot_training_latent_space_per_epoch
                         plot_training_latent_space_per_epoch(
@@ -1414,6 +1438,44 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
             plt.close()
 
             print(f"[ OK ] Phase A final latent space plot saved: {final_plot_path}")
+            
+            # Compute and log Phase A final task distance metrics
+            try:
+                print("Computing Phase A final task distance metrics...")
+                from utils.latent_metrics import compute_task_distance_metrics
+                
+                distance_metrics = compute_task_distance_metrics(
+                    latent_data=all_z,
+                    task_keys=collected_keys,
+                    encoder_indices=collected_encoders,
+                    distance_metric='cosine',
+                    normalize=True
+                )
+                
+                # Log to WandB
+                if wandb_logger and distance_metrics:
+                    final_phase_a_step = (num_encoders - 1) * phase_epochs + phase_epochs
+                    wandb_metrics = {}
+                    for key, value in distance_metrics.items():
+                        wandb_metrics[f'phase_a_final/latent_distances/{key}'] = value
+                    
+                    # Use final Phase A step
+                    wandb_metrics['epoch'] = final_phase_a_step
+                    
+                    wandb_logger._safe_log(wandb_metrics, step_hint=final_phase_a_step)
+                    print(f"[ OK ] Phase A final task distance metrics logged to WandB")
+                    
+                    # Print key metrics
+                    if 'separation_ratio' in distance_metrics:
+                        print(f"  Final separation ratio: {distance_metrics['separation_ratio']:.3f}")
+                    if 'within_task_mean' in distance_metrics:
+                        print(f"  Final within-task distance: {distance_metrics['within_task_mean']:.4f} ± {distance_metrics['within_task_std']:.4f}")
+                    if 'between_task_mean' in distance_metrics:
+                        print(f"  Final between-task distance: {distance_metrics['between_task_mean']:.4f} ± {distance_metrics['between_task_std']:.4f}")
+                        
+            except Exception as e:
+                print(f"[ WARNING ] Failed to compute Phase A final task distance metrics: {e}")
+            
             if wandb_logger:
                 try:
                     import wandb
@@ -1656,7 +1718,7 @@ def train_phase_b_decoder(model, encoder_datasets, device, logger, wandb_logger,
                     loss = loss_result  # Fallback for backward compatibility
                     
                 loss = loss / gradient_accumulation_steps
-            
+
             scaler.scale(loss).backward()
             
             if (batch_idx + 1) % gradient_accumulation_steps == 0 or (batch_idx + 1) == num_batches:
@@ -2347,6 +2409,35 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
                 encoder_idx=None, use_independent_decoder=False  # PoE + shared decoder
             )
             results['phase_a']['poe_accuracies'] = [poe_accuracy]
+            
+            # Add individual encoder accuracies using independent decoders (to match trajectory plots)
+            num_encoders = getattr(model, 'num_encoders', 1)
+            print(f"Recording Phase A individual encoder accuracies using independent decoders...")
+            encoder_accuracies = {}
+            for encoder_idx in range(num_encoders):
+                print(f"  Evaluating Encoder {encoder_idx} with independent decoder...")
+                encoder_accuracy = run_quick_evaluation(
+                    model, run_dir, epoch=f"Phase A Epoch {phase_a_epochs}", eval_keys=eval_keys,
+                    encoder_idx=encoder_idx, use_independent_decoder=True  # Individual encoder + independent decoder
+                )
+                encoder_accuracies[f'encoder_{encoder_idx}'] = encoder_accuracy
+                print(f"  Encoder {encoder_idx} evaluation completed")
+            
+            results['phase_a']['encoder_accuracies'] = encoder_accuracies
+            
+            # Log individual encoder accuracies to WandB
+            if wandb_logger:
+                for encoder_idx in range(num_encoders):
+                    encoder_key = f'encoder_{encoder_idx}'
+                    if encoder_key in encoder_accuracies and encoder_accuracies[encoder_key]:
+                        print(f"  Logging Encoder {encoder_idx} metrics to WandB...")
+                        log_evaluation_to_wandb(
+                            encoder_accuracies[encoder_key], run_dir, 
+                            f"Phase A Epoch {phase_a_epochs}", wandb_logger,
+                            current_model=model, phase=f"phase_a_enc_{encoder_idx}"
+                        )
+                print(f"  All individual encoder metrics logged to WandB")
+            
             # Save results after each epoch
             save_results(results, run_dir)
             

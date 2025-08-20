@@ -962,6 +962,10 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
     
     plt.close()
     print(f"[ OK ] Saved optimized multi-encoder trajectory visualization to: {save_path}")
+    
+    # Return the save_path for the calling function to use
+    print(f"[DEBUG] visualize_comprehensive_trajectory returning: {save_path}")
+    return save_path
 
 def create_error_map(target_grid, reconstruction_grid, title="Error Map"):
     """

@@ -921,7 +921,7 @@ def plot_multi_encoder_accuracies(results, save_dir=None):
     else:
         plt.show()
 
-def plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir=None, epoch=None):
+def plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir=None, epoch=None, model=None):
     """
     Create trajectory reconstruction plots for multi-encoder models by reusing evaluate_trajectory.py functionality.
     Shows individual encoder outputs (once) and PoE trajectory evolution during optimization (5 steps).
@@ -929,6 +929,8 @@ def plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir=None, e
     Args:
         eval_results: Dictionary containing evaluation results for each key
         save_dir: Directory to save plots (optional)
+        epoch: Epoch number for naming files (optional)
+        model: Pre-loaded model to use for reconstructions (optional, avoids checkpoint loading)
     """
     # Import required functions from LPN_reproduction/evaluate_trajectory.py
     import sys
@@ -1014,9 +1016,12 @@ def plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir=None, e
         trajectory_type = f"single encoder (unified)" if num_encoders == 1 else f"multi-encoder ({num_encoders} encoders)"
         print(f"  Found {len(valid_trajectories)} trajectory samples ({trajectory_type})")
         
-        # Load model for reconstruction computation - use the same logic as load_model()
-        model = None
-        if save_dir:
+        # Use provided model or load from checkpoint as fallback
+        if model is not None:
+            print(f"  [ OK ] Using provided model for trajectory reconstruction")
+            # Move model to correct device if needed
+            model = model.to(device)
+        elif save_dir:
             try:
                 # Use provided epoch parameter or extract from evaluation metadata
                 epoch_to_load = epoch
@@ -1029,7 +1034,7 @@ def plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir=None, e
                 print(f"  [ WARNING ] Could not load model: {e}")
                 continue
         else:
-            print(f"  [ WARNING ] No save directory provided for model loading")
+            print(f"  [ WARNING ] No model provided and no save directory for model loading")
             continue
                 
         # ✅ MODIFY: Calculate samples to generate for this key, respecting total limit
@@ -1055,14 +1060,18 @@ def plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir=None, e
                 save_path = os.path.join(trajectory_plots_dir, filename)
                 
                 print(f"    Sample {sample_idx + 1}: Creating comprehensive visualization...")
+                print(f"    [DEBUG] save_path: {save_path}")
+                print(f"    [DEBUG] trajectory_info keys: {list(trajectory_info.keys()) if isinstance(trajectory_info, dict) else 'Not a dict'}")
                 
                 # ✅ FIX: Pass OOD parameters (default to False/None for regular evaluation)
-                visualize_comprehensive_trajectory(
+                result = visualize_comprehensive_trajectory(
                     trajectory_info, model, save_path, save_dir, device=device,
                     ood_enabled=False, ood_task_keys=None
                 )
+                print(f"    [DEBUG] visualize_comprehensive_trajectory returned: {result}")
                 
                 print(f"    [ OK ] Saved: {save_path}")
+                print(f"    [DEBUG] File exists after save: {os.path.exists(save_path)}")
                 
                 # ✅ ADD: Increment total plots counter
                 total_plots_generated += 1
@@ -1075,6 +1084,21 @@ def plot_multi_encoder_trajectory_reconstructions(eval_results, save_dir=None, e
     
     print(f"\n[ OK ] Multi-encoder trajectory reconstruction visualization complete!")
     print(f"[INFO] Total trajectory plots generated: {total_plots_generated}/{n_max_trajectory_plots}")
+    
+    # Return the path of the last generated plot for WandB upload
+    if total_plots_generated > 0 and save_dir:
+        trajectory_plots_dir = os.path.join(save_dir, "trajectory_plots")
+        # Find the most recent plot file
+        plot_files = [f for f in os.listdir(trajectory_plots_dir) if f.endswith('.png') and 'multi_encoder_trajectory_reconstruction' in f]
+        if plot_files:
+            # Sort by modification time and return the most recent
+            plot_files.sort(key=lambda x: os.path.getmtime(os.path.join(trajectory_plots_dir, x)), reverse=True)
+            final_path = os.path.join(trajectory_plots_dir, plot_files[0])
+            print(f"[DEBUG] plot_multi_encoder_trajectory_reconstructions returning: {final_path}")
+            return final_path
+    
+    print(f"[DEBUG] plot_multi_encoder_trajectory_reconstructions returning: None (no plots generated)")
+    return None
 
 
 def generate_experiment_summary_json(results, model_params, save_dir=None, eval_results=None, epoch=None):
@@ -2473,8 +2497,15 @@ def plot_training_latent_space_per_epoch(model, dataloader, device, epoch, save_
         all_encoder_indices = model.epoch_optimized_latents['encoder_indices']
         
         print(f"  [OK] Using {len(all_training_latents)} REAL training latents from training (actual latents used in epoch)")
+        print(f"    DEBUG: model.epoch_optimized_latents keys: {list(model.epoch_optimized_latents.keys())}")
+        print(f"    DEBUG: all_training_latents type: {type(all_training_latents)}")
+        print(f"    DEBUG: all_training_keys type: {type(all_training_keys)}")
+        print(f"    DEBUG: all_encoder_indices type: {type(all_encoder_indices)}")
     else:
         print("  [WARNING] No stored training latents found, falling back to recomputation")
+        print(f"    DEBUG: model.epoch_optimized_latents exists: {hasattr(model, 'epoch_optimized_latents')}")
+        if hasattr(model, 'epoch_optimized_latents'):
+            print(f"    DEBUG: model.epoch_optimized_latents value: {model.epoch_optimized_latents}")
         # Fallback to the old method (but this should rarely happen)
         all_training_latents = []
         all_training_keys = []
@@ -2520,11 +2551,11 @@ def plot_training_latent_space_per_epoch(model, dataloader, device, epoch, save_
         plt.figure(figsize=(16, 12))
         
         # Plot by key (colored) and encoder (markers)
-        for coord, key, encoder_idx in zip(tsne_coords, all_training_keys, all_encoder_indices):
+        for coord, key, enc_idx in zip(tsne_coords, all_training_keys, all_encoder_indices):
             color = key_colors.get(key, 'gray')
             # Fix: Handle None encoder_idx
-            if encoder_idx is not None and len(unique_encoders) > 1:
-                marker = encoder_markers[encoder_idx % len(encoder_markers)]
+            if enc_idx is not None and len(unique_encoders) > 1:
+                marker = encoder_markers[enc_idx % len(encoder_markers)]
             else:
                 marker = 'o'
             
@@ -2546,14 +2577,14 @@ def plot_training_latent_space_per_epoch(model, dataloader, device, epoch, save_
                                            markersize=8, label=f'... and {len(unique_keys)-20} more keys'))
 
         # ✅ ADD: Small legend by encoder (always show, not just when multiple encoders)
-        for encoder_idx in unique_encoders:
+        for enc_idx in unique_encoders:
             # Fix: Handle None encoder_idx
-            if encoder_idx is not None:
-                marker = encoder_markers[encoder_idx % len(encoder_markers)]
+            if enc_idx is not None:
+                marker = encoder_markers[enc_idx % len(encoder_markers)]
             else:
                 marker = 'o'
             legend_elements.append(plt.Line2D([0], [0], marker=marker, color='k', linestyle='',
-                                           markersize=8, label=f'Encoder {encoder_idx}'))
+                                           markersize=8, label=f'Encoder {enc_idx}'))
 
         plt.legend(handles=legend_elements, loc='upper right', fontsize=8, ncol=2)
         plt.title(f'REAL Training Latent Space - Epoch {epoch if epoch is not None else "N/A"}\n(Actual latents used in training - Colored by Key, Markers by Encoder)', fontsize=12)
@@ -2578,6 +2609,60 @@ def plot_training_latent_space_per_epoch(model, dataloader, device, epoch, save_
                 print(f"  [OK] REAL training latent space plot uploaded to wandb")
             except Exception as e:
                 print(f"  [WARNING] Could not upload REAL training latent space plot to wandb: {e}")
+        
+        # Compute and log task distance metrics
+        if all_training_latents is not None and len(all_training_latents) > 0:
+            try:
+                print("  Computing task distance metrics for training latents...")
+                print(f"    DEBUG: Function encoder_idx parameter: {encoder_idx}")
+                print(f"    DEBUG: all_training_latents shape: {all_training_latents.shape}")
+                print(f"    DEBUG: all_training_keys length: {len(all_training_keys)}")
+                print(f"    DEBUG: all_encoder_indices length: {len(all_encoder_indices)}")
+                from utils.latent_metrics import compute_task_distance_metrics
+                
+                # Ensure encoder_indices is properly formatted for the distance metrics function
+                encoder_indices_for_metrics = all_encoder_indices if all_encoder_indices else None
+                if encoder_indices_for_metrics and len(encoder_indices_for_metrics) != len(all_training_latents):
+                    print(f"    WARNING: encoder_indices length mismatch, using None")
+                    encoder_indices_for_metrics = None
+                
+                distance_metrics = compute_task_distance_metrics(
+                    latent_data=all_training_latents,
+                    task_keys=all_training_keys,
+                    encoder_indices=encoder_indices_for_metrics,
+                    distance_metric='cosine',
+                    normalize=True
+                )
+                
+                # Log to WandB
+                if wandb_logger and distance_metrics:
+                    wandb_metrics = {}
+                    for key, value in distance_metrics.items():
+                        # Use more specific namespace for specialist training
+                        if encoder_idx is not None:
+                            wandb_metrics[f'phase_a/encoder_{encoder_idx}/latent_distances/{key}'] = value
+                        else:
+                            wandb_metrics[f'latent_distances/{key}'] = value
+                    
+                    # Add epoch tracking
+                    wandb_metrics['epoch'] = epoch if epoch is not None else None
+                    
+                    wandb_logger._safe_log(wandb_metrics, step_hint=epoch if epoch is not None else None)
+                    print(f"  [OK] Task distance metrics logged to WandB: {len(distance_metrics)} metrics")
+                    print(f"    DEBUG: WandB keys being logged: {list(wandb_metrics.keys())}")
+                    
+                    # Print key metrics to console
+                    if 'separation_ratio' in distance_metrics:
+                        print(f"    Separation ratio (between/within): {distance_metrics['separation_ratio']:.3f}")
+                    if 'within_task_mean' in distance_metrics:
+                        print(f"    Within-task distance: {distance_metrics['within_task_mean']:.4f} ± {distance_metrics['within_task_mean']:.4f}")
+                    if 'between_task_mean' in distance_metrics:
+                        print(f"    Between-task distance: {distance_metrics['between_task_mean']:.4f} ± {distance_metrics['between_task_mean']:.4f}")
+                    
+            except Exception as e:
+                print(f"  [WARNING] Failed to compute task distance metrics: {e}")
+        else:
+            print("  [INFO] No training latents available, skipping task distance metrics computation")
     else:
         print("  [WARNING] Skipping training latent space plot because no REAL latents were collected")
 
