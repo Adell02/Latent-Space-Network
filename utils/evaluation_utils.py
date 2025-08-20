@@ -78,6 +78,7 @@ def generate_trajectory_plots(eval_results: Dict[str, Any], run_dir: str, epoch:
     max_samples = wandb_settings.get('trajectory_max_samples', max_samples)
     eval_settings = settings.get_evaluation_settings()
     per_key_cap = eval_settings.get('visualize_n_values', 1)
+    n_max_trajectory_plots = eval_settings.get('n_max_trajectory_plots', 4)
     
     try:
         # Import trajectory visualization functions
@@ -108,8 +109,13 @@ def generate_trajectory_plots(eval_results: Dict[str, Any], run_dir: str, epoch:
         if safe_epoch < 1:
             safe_epoch = 1
 
-        # Process each key's trajectory info
+        # Process each key's trajectory info with total plot limit
+        total_plots_generated = 0
         for key, key_results in eval_results.get('key_results', {}).items():
+            # Check if we've reached the global trajectory plot limit
+            if total_plots_generated >= n_max_trajectory_plots:
+                print(f"[INFO] Reached trajectory plot limit ({n_max_trajectory_plots}), stopping generation")
+                break
             if 'metrics' not in key_results:
                 continue
                 
@@ -127,6 +133,10 @@ def generate_trajectory_plots(eval_results: Dict[str, Any], run_dir: str, epoch:
             
             # Generate plots for each sample
             for sample_idx, trajectory_info in enumerate(limited_trajectory_list):
+                # Check if we've reached the global trajectory plot limit
+                if total_plots_generated >= n_max_trajectory_plots:
+                    print(f"[INFO] Reached trajectory plot limit ({n_max_trajectory_plots}), stopping sample generation")
+                    break
                 try:
                     # Add the evaluated key to the trajectory info for proper filtering
                     trajectory_info['evaluated_key'] = key
@@ -160,6 +170,8 @@ def generate_trajectory_plots(eval_results: Dict[str, Any], run_dir: str, epoch:
                             trajectory_info, model, plot_path, run_dir, device='cuda',
                             ood_enabled=ood_enabled, ood_task_keys=ood_task_keys
                         )
+                        # Increment total plots counter
+                        total_plots_generated += 1
                     except KeyboardInterrupt:
                         print(f"  [ WARNING ] Trajectory visualization interrupted for {key} sample {sample_idx}")
                         continue

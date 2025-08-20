@@ -47,6 +47,7 @@ def count_model_parameters(model: nn.Module, logger=None, exclude_independent_de
         }
     # Calculate multi-encoder specific breakdown if applicable
     encoder_breakdown = {}
+    decoder_breakdown = {}
     decoder_params = 0
     shared_params = 0
     if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
@@ -60,7 +61,19 @@ def count_model_parameters(model: nn.Module, logger=None, exclude_independent_de
                 encoder_idx = name.split('.')[2]  # multi_encoder.encoders.0.something
                 encoder_key = f'encoder_{encoder_idx}'
                 encoder_breakdown[encoder_key] = encoder_breakdown.get(encoder_key, 0) + num_params
-            elif 'multi_encoder.decoder' in name or 'decoder' in name:
+            elif 'multi_encoder.independent_decoders' in name:
+                # Extract decoder index
+                parts = name.split('.')  # multi_encoder.independent_decoders.0....
+                if len(parts) > 3:
+                    dec_idx = parts[2]
+                    dec_key = f'decoder_ind_{dec_idx}'
+                else:
+                    dec_key = 'decoder_ind_unknown'
+                decoder_breakdown[dec_key] = decoder_breakdown.get(dec_key, 0) + num_params
+                decoder_params += num_params
+            elif ('multi_encoder.shared_decoder' in name) or ('multi_encoder.decoder' in name):
+                dec_key = 'decoder_shared'
+                decoder_breakdown[dec_key] = decoder_breakdown.get(dec_key, 0) + num_params
                 decoder_params += num_params
             else:
                 shared_params += num_params
@@ -78,6 +91,7 @@ def count_model_parameters(model: nn.Module, logger=None, exclude_independent_de
     # Add multi-encoder specific info
     if param_info['is_multi_encoder']:
         param_info['encoder_breakdown'] = encoder_breakdown
+        param_info['decoder_breakdown'] = decoder_breakdown
         param_info['decoder_params'] = decoder_params
         param_info['shared_params'] = shared_params
         # Calculate per-encoder average

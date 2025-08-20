@@ -1837,9 +1837,19 @@ def run_evaluation_between_phases(model, device, logger, wandb_logger, run_dir, 
             pass
         print(f"  Evaluating after {phase_name} on ALL keys: {eval_keys}")
         
-        eval_results = run_quick_evaluation(
-            model, run_dir, epoch=f"{phase_name}_final", eval_keys=eval_keys  # Use ALL eval keys
-        )
+        # Choose evaluation mode based on phase
+        if "Phase A" in phase_name:
+            # Phase A: Use current encoder + independent decoder (we don't know which encoder is trained, so use PoE for now)
+            eval_results = run_quick_evaluation(
+                model, run_dir, epoch=f"{phase_name}_final", eval_keys=eval_keys,
+                encoder_idx=None, use_independent_decoder=False  # Use PoE + shared decoder for Phase A final eval
+            )
+        else:
+            # Phase B or other: Use PoE + shared decoder
+            eval_results = run_quick_evaluation(
+                model, run_dir, epoch=f"{phase_name}_final", eval_keys=eval_keys,
+                encoder_idx=None, use_independent_decoder=False  # PoE + shared decoder
+            )
         if eval_results and wandb_logger:
             # Pass the current model to avoid loading from disk
             log_evaluation_to_wandb(eval_results, run_dir, f"{phase_name}_final", wandb_logger, 
@@ -2154,6 +2164,73 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
     model = build_model(device, wandb_logger, global_step=0)
     param_info = count_model_parameters(model)
     logger.info(f"Model initialized with {param_info['total_params']:,} parameters")
+    # Log encoder/decoder parameter breakdown to WandB (if enabled)
+    if wandb_logger:
+        try:
+            enc_bd = param_info.get('encoder_breakdown', {}) or {}
+            dec_bd = param_info.get('decoder_breakdown', {}) or {}
+            # Choose one decoder for final-model-style total: prefer shared, else first independent
+            one_decoder_params = 0
+            if 'decoder_shared' in dec_bd:
+                one_decoder_params = dec_bd['decoder_shared']
+            else:
+                # pick any independent decoder count if available
+                for k, v in dec_bd.items():
+                    if k.startswith('decoder_ind_'):
+                        one_decoder_params = v
+                        break
+            total_encoders = sum(enc_bd.values()) if enc_bd else 0
+            total_one_decoder = total_encoders + one_decoder_params
+            payload = {
+                'model_params/total': param_info.get('total_params', 0),
+                'model_params/trainable': param_info.get('trainable_params', 0),
+                'model_params/decoder': param_info.get('decoder_params', 0),
+                'model_params/shared': param_info.get('shared_params', 0),
+                'model_params/total_one_decoder': total_one_decoder,
+            }
+            # Per-encoder counts
+            for k, v in enc_bd.items():
+                payload[f"model_params/encoders/{k}"] = v
+            # Per-decoder counts
+            for k, v in dec_bd.items():
+                payload[f"model_params/decoders/{k}"] = v
+            # Optional aggregates
+            if 'avg_encoder_params' in param_info:
+                payload['model_params/encoders/avg'] = param_info['avg_encoder_params']
+            if 'total_encoder_params' in param_info:
+                payload['model_params/encoders/total'] = param_info['total_encoder_params']
+            wandb_logger._safe_log(payload, step_hint=0)
+        except Exception as _e:
+            print(f"[ WARNING ] Failed to log parameter breakdown to WandB: {_e}")
+    # Also log breakdown to training.log
+    try:
+        logger.info("Parameter breakdown (encoders):")
+        if param_info.get('encoder_breakdown'):
+            for k, v in param_info['encoder_breakdown'].items():
+                logger.info(f"  {k}: {v:,}")
+        else:
+            logger.info("  (none)")
+        logger.info("Parameter breakdown (decoders):")
+        if param_info.get('decoder_breakdown'):
+            for k, v in param_info['decoder_breakdown'].items():
+                logger.info(f"  {k}: {v:,}")
+        else:
+            logger.info("  (none)")
+        # Log final-model style total: sum(encoders) + 1 decoder
+        enc_total = sum((param_info.get('encoder_breakdown') or {}).values())
+        shared_count = (param_info.get('decoder_breakdown') or {}).get('decoder_shared', 0)
+        if shared_count > 0:
+            one_dec = shared_count
+        else:
+            # pick any decoder_ind_* if present
+            one_dec = 0
+            for dk, dv in (param_info.get('decoder_breakdown') or {}).items():
+                if dk.startswith('decoder_ind_'):
+                    one_dec = dv
+                    break
+        logger.info(f"Total params (encoders + 1 decoder): {(enc_total + one_dec):,}")
+    except Exception as _le:
+        print(f"[ WARNING ] Failed to log parameter breakdown to training.log: {_le}")
     
     # Collect **all** training sequences (needed for latent visualisation later)
     if not INFINITE_DATALOADER:
@@ -2266,7 +2343,8 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
             eval_keys = eval_settings.get('eval_keys', ['00d62c1b'])
             print(f"Recording Phase A PoE accuracy snapshot on ALL keys: {eval_keys}")
             poe_accuracy = run_quick_evaluation(
-                model, run_dir, epoch=f"Phase A Epoch {phase_a_epochs}", eval_keys=eval_keys  # Use ALL eval keys
+                model, run_dir, epoch=f"Phase A Epoch {phase_a_epochs}", eval_keys=eval_keys,
+                encoder_idx=None, use_independent_decoder=False  # PoE + shared decoder
             )
             results['phase_a']['poe_accuracies'] = [poe_accuracy]
             # Save results after each epoch
@@ -2322,7 +2400,8 @@ def main_specialist_training(file_store_name, phases_to_run=None, resume_from_ph
             eval_keys = eval_settings.get('eval_keys', ['00d62c1b'])
             print(f"Recording Phase B PoE accuracy snapshot on ALL keys: {eval_keys}")
             poe_accuracy = run_quick_evaluation(
-                model, run_dir, epoch=f"Phase B Epoch {phase_b_epochs}", eval_keys=eval_keys  # Use ALL eval keys
+                model, run_dir, epoch=f"Phase B Epoch {phase_b_epochs}", eval_keys=eval_keys,
+                encoder_idx=None, use_independent_decoder=False  # PoE + shared decoder
             )
             results['phase_b']['poe_accuracies'] = [poe_accuracy]
             

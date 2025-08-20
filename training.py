@@ -1696,17 +1696,12 @@ def comprehensive_evaluation_after_epoch(
                     log_main_reconstruction_plots = wandb_settings.get('log_main_reconstruction_plots', True)
                     if log_main_reconstruction_plots:
                         try:
-                            from LPN_reproduction.evaluate_trajectory import visualize_comprehensive_trajectory
-                            # ✅ FIX: Use OOD task key in filename if available
-                            reconstruction_key = ood_task_keys[0] if ood_task_keys and len(ood_task_keys) > 0 else key
-                            main_reconstruction_path = os.path.join(
-                                run_dir, "trajectory_plots", f"main_reconstruction_{reconstruction_key}_epoch_{epoch+1}.png"
+                            from utils.visualizers import plot_multi_encoder_trajectory_reconstructions
+                            # Use the trajectory plotting helper that respects n_max_trajectory_plots
+                            plot_multi_encoder_trajectory_reconstructions(
+                                eval_results, save_dir=run_dir, epoch=epoch+1
                             )
-                            visualize_comprehensive_trajectory(
-                                actual_trajectory, model, main_reconstruction_path, run_dir, device=device,
-                                ood_enabled=ood_enabled, ood_task_keys=ood_task_keys
-                            )
-                            print(f"[OK] Main trajectory plot with reconstructions saved: {main_reconstruction_path}")
+                            print(f"[OK] Main trajectory plots with reconstructions saved using helper function")
                             
                             # ✅ ADD: Upload main trajectory plot to WandB with key-specific panel
                             if wandb_logger:

@@ -177,8 +177,8 @@ def load_task_level_latent_data(task_latent_data, task_trajectories=None):
     return all_latents, all_labels, all_colors, task_metadata
 
 #     # Helper function to generate reconstruction from latent vector with proper input sequences
-def generate_reconstruction_from_latent(z_vector, model, device, input_seq=None, target_seq=None):
-    """Generate reconstruction from latent vector using model decoder with proper input sequences"""
+def generate_reconstruction_from_latent(z_vector, model, device, input_seq=None, target_seq=None, encoder_idx=None, use_independent_decoder=False):
+    """Generate reconstruction from latent vector using appropriate decoder for multi-encoder models"""
     try:
         with torch.no_grad():
             if not isinstance(z_vector, torch.Tensor):
@@ -190,10 +190,29 @@ def generate_reconstruction_from_latent(z_vector, model, device, input_seq=None,
             if input_seq is not None and target_seq is not None:
                 input_tensor = torch.tensor(input_seq, dtype=torch.float32).unsqueeze(0).to(device)
                 target_tensor = torch.tensor(target_seq, dtype=torch.float32).unsqueeze(0).to(device)
-                shape_logits, grid_logits = model.decoder(z_vector, input_tensor, target_seq=target_tensor)
+                
+                # Choose appropriate decoder for multi-encoder models
+                if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
+                    if use_independent_decoder and encoder_idx is not None and hasattr(model.multi_encoder, 'independent_decoders'):
+                        # Phase A: Use independent decoder for specific encoder
+                        shape_logits, grid_logits = model.multi_encoder.independent_decoders[encoder_idx](
+                            z_vector, input_tensor, target_seq=target_tensor)
+                    else:
+                        # Phase B: Use shared decoder
+                        shape_logits, grid_logits = model.multi_encoder.shared_decoder(
+                            z_vector, input_tensor, target_seq=target_tensor)
+                else:
+                    # Single encoder model
+                    shape_logits, grid_logits = model.decoder(z_vector, input_tensor, target_seq=target_tensor)
             else:
                 # Fallback to just latent vector (may not work for all decoders)
-                shape_logits, grid_logits = model.decoder(z_vector)
+                if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
+                    if use_independent_decoder and encoder_idx is not None:
+                        shape_logits, grid_logits = model.multi_encoder.independent_decoders[encoder_idx](z_vector)
+                    else:
+                        shape_logits, grid_logits = model.multi_encoder.shared_decoder(z_vector)
+                else:
+                    shape_logits, grid_logits = model.decoder(z_vector)
             
             recon_grid, recon_rows, recon_cols = extract_reconstruction_grid(shape_logits, grid_logits)
             return recon_grid, recon_rows, recon_cols
@@ -438,9 +457,11 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
                     
                     # Filter support samples for the evaluated key
                     support_indices = []
+                    # Handle case where actual_evaluated_keys might be None
+                    keys_to_check = actual_evaluated_keys if actual_evaluated_keys is not None else []
                     for i, label in enumerate(all_labels):
                         if 'support' in label:
-                            for key in actual_evaluated_keys:
+                            for key in keys_to_check:
                                 if key in label:
                                     support_indices.append(i)
                                     break
@@ -456,7 +477,7 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
                     query_indices = []
                     for i, label in enumerate(all_labels):
                         if 'query' in label:
-                            for key in actual_evaluated_keys:
+                            for key in keys_to_check:
                                 if key in label:
                                     query_indices.append(i)
                                     break                    
@@ -556,7 +577,9 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
             if all_labels is not None:
                 support_labels = []
                 query_labels = []
-                for key in actual_evaluated_keys:
+                # Handle case where actual_evaluated_keys might be None
+                keys_to_check = actual_evaluated_keys if actual_evaluated_keys is not None else []
+                for key in keys_to_check:
                     support_labels.extend([l for l in all_labels if 'support' in l and key in l])
                     query_labels.extend([l for l in all_labels if 'query' in l and key in l])
                 
@@ -654,8 +677,12 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
                 if z_vectors and len(z_vectors) > 0:
                     # Use the final z vector for encoder reconstruction
                     final_z = z_vectors[-1]
+                    # Determine if we should use independent decoder based on trajectory info
+                    has_individual_reconstructions = trajectory_info.get('individual_encoder_reconstructions', {})
+                    use_independent = len(has_individual_reconstructions) > 0
                     recon_grid, recon_rows, recon_cols = generate_reconstruction_from_latent(
-                        final_z, model, device, input_seq, target_seq
+                        final_z, model, device, input_seq, target_seq, 
+                        encoder_idx=enc_idx, use_independent_decoder=use_independent
                     )
                     if recon_grid is not None:
                         ax_enc.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
@@ -706,8 +733,10 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
                 else:  # Final
                     z_vector = z_vectors[-1]
                 
+                # For PoE reconstructions, use shared decoder (Phase B behavior)
                 recon_grid, recon_rows, recon_cols = generate_reconstruction_from_latent(
-                    z_vector, model, device, input_seq, target_seq
+                    z_vector, model, device, input_seq, target_seq, 
+                    encoder_idx=None, use_independent_decoder=False
                 )
                 if recon_grid is not None:
                     ax_poe.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
@@ -766,8 +795,12 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
                 if z_vectors and len(z_vectors) > 0:
                     # Use the final z vector for query encoder reconstruction
                     final_z = z_vectors[-1]
+                    # Determine if we should use independent decoder based on trajectory info
+                    has_individual_reconstructions = trajectory_info.get('individual_encoder_reconstructions', {})
+                    use_independent = len(has_individual_reconstructions) > 0
                     recon_grid, recon_rows, recon_cols = generate_reconstruction_from_latent(
-                        final_z, model, device, input_seq, target_seq
+                        final_z, model, device, input_seq, target_seq, 
+                        encoder_idx=enc_idx, use_independent_decoder=use_independent
                     )
                     if recon_grid is not None:
                         ax_query_enc.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
@@ -811,8 +844,10 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
         if z_vectors and len(z_vectors) > 0:
             # Use the initial z vector for query POE initial reconstruction
             initial_z = z_vectors[0]
+            # For POE reconstructions, use shared decoder (Phase B behavior)
             recon_grid, recon_rows, recon_cols = generate_reconstruction_from_latent(
-                initial_z, model, device, input_seq, target_seq
+                initial_z, model, device, input_seq, target_seq, 
+                encoder_idx=None, use_independent_decoder=False
             )
             if recon_grid is not None:
                 ax_query_poe_initial.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
@@ -851,8 +886,10 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
         if z_vectors and len(z_vectors) > 0:
             # Use the final z vector for query POE final reconstruction
             final_z = z_vectors[-1]
+            # For POE reconstructions, use shared decoder (Phase B behavior)
             recon_grid, recon_rows, recon_cols = generate_reconstruction_from_latent(
-                final_z, model, device, input_seq, target_seq
+                final_z, model, device, input_seq, target_seq, 
+                encoder_idx=None, use_independent_decoder=False
             )
             if recon_grid is not None:
                 ax_query_poe_final.imshow(recon_grid, cmap='viridis', interpolation='nearest', aspect='equal')
@@ -879,14 +916,24 @@ def visualize_comprehensive_trajectory(trajectory_info, model, save_path, run_di
     training_count = len([l for l in training_labels if 'training' in l]) if training_labels else 0
     support_count = 0
     query_count = 0
-    for key in actual_evaluated_keys:
+    # Handle case where actual_evaluated_keys might be None
+    keys_to_check = actual_evaluated_keys if actual_evaluated_keys is not None else []
+    for key in keys_to_check:
         support_count += len([l for l in all_labels if 'support' in l and key in l]) if all_labels else 0
         query_count += len([l for l in all_labels if 'query' in l and key in l]) if all_labels else 0
     data_summary = f"Training: {training_count}, Support: {support_count}, Query: {query_count}"
     
     ood_indicator = ""
-    if ood_enabled or any('ood_' in label for label in all_labels if label):
-        ood_indicator = " (OOD SAMPLES)"
+    try:
+        has_ood_labels = False
+        # Guard against None when t-SNE/labels are skipped
+        if all_labels is not None:
+            has_ood_labels = any((lbl is not None) and ('ood_' in str(lbl)) for lbl in all_labels)
+        if ood_enabled or has_ood_labels:
+            ood_indicator = " (OOD SAMPLES)"
+    except Exception as _e:
+        # Be resilient if labels are unavailable
+        has_ood_labels = False
         print(f"DEBUG: OOD sampling enabled, adding OOD indicator to title: {ood_indicator}")
     
     plt.suptitle(f'Multi-Encoder Trajectory Analysis{ood_indicator}\nEVALUATION DATA - Trajectory Reconstructions: {decoder_display}\nData: {data_summary}', fontsize=16)

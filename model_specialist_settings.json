@@ -21,7 +21,7 @@
         "use_mixed_precision": true,
         "save_checkpoint_interval": 1,
         "infinite_dataloader": true,
-        "batches_per_epoch": 15,
+        "batches_per_epoch": 10,
         "return_task_keys": true,
         "enable_training_latent_tsne_plot": false,
         "cross_pair_loss": {
@@ -30,8 +30,8 @@
         }
     },
     "evaluation_settings": {
-        "data_source": "ood_original_arc",
-        "use_ood_for_evaluation": true,
+        "data_source": "original_arc",
+        "use_ood_for_evaluation": false,
         "eval_keys": "all",
         "n_max_eval_keys": 10,
         "n_max_trajectory_plots": 5,
@@ -42,8 +42,8 @@
           "0a938d79"
         ],
         "_eval_keys_comment": "Set to 'all' to use all available keys (limited by n_max_eval_keys), or provide a list of specific keys",
-        "eval_n_samples": 5,
-        "eval_n_queries": 5,
+        "eval_n_samples": 2,
+        "eval_n_queries": 1,
         "eval_epoch": "final_phase_b",
         "visualize_n_values": 1,
         "enable_evaluation_latent_tsne_plot": false,
@@ -80,8 +80,8 @@
         "decoder_layers": 3,
         "encoder_heads": 6,
         "decoder_heads": 6,
-        "encoder_hidden_dim": 90,
-        "decoder_hidden_dim": 90,
+        "encoder_hidden_dim": 150,
+        "decoder_hidden_dim": 150,
         "latent_dim": 64,
         "dropout": 1e-6,
         "decoder_input_dropout": 0,

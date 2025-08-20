@@ -1124,11 +1124,14 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                     elif query_target.shape[-1] > 902:
                         query_target = query_target[..., :902]
                 
-                # Decode using the averaged latent
+                # Decode using the appropriate latent
                 if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
                     if use_independent_decoder and encoder_idx is not None:
+                        # For Phase A evaluation, use encoder-specific latent, not averaged latent
+                        mu, log_var, _ = model.multi_encoder.encoders[encoder_idx](query_input, query_target)
+                        encoder_specific_latent = model.reparameterize(mu, log_var)
                         shape_logits, grid_logits = model.multi_encoder.independent_decoders[encoder_idx](
-                            query_latent, query_input, target_seq=query_target)
+                            encoder_specific_latent, query_input, target_seq=query_target)
                     else:
                         shape_logits, grid_logits = model.multi_encoder.shared_decoder(
                             query_latent, query_input, target_seq=query_target)
@@ -1144,15 +1147,40 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                 
                 # Calculate metrics
                 shape_correct = (shape_pred == shape_target).sum().item()
-                grid_correct = (grid_pred == grid_target).sum().item()
+                
+                # Calculate grid accuracy only over active region (rows × cols)
+                if shape_correct == 2:  # Only if shape is correct
+                    rows, cols = shape_target[0].item(), shape_target[1].item()
+                    active_pixels = rows * cols
+                    if active_pixels > 0 and active_pixels <= 900:
+                        # Reshape to 30x30 grid and extract active region
+                        grid_pred_2d = grid_pred.view(30, 30)
+                        grid_target_2d = grid_target.view(30, 30)
+                        active_pred = grid_pred_2d[:rows, :cols]
+                        active_target = grid_target_2d[:rows, :cols]
+                        grid_correct = (active_pred == active_target).sum().item()
+                        active_grid_tokens = active_pixels
+                    else:
+                        grid_correct = 0
+                        active_grid_tokens = 1  # Avoid division by zero
+                else:
+                    # If shape is wrong, grid accuracy over active region is meaningless
+                    # But still compute it for debugging
+                    grid_correct = (grid_pred == grid_target).sum().item()
+                    active_grid_tokens = 900  # Fall back to full grid
                 
                 total_shape_correct += shape_correct
                 total_shape_tokens += 2  # Shape has 2 tokens
                 total_grid_correct += grid_correct
-                total_grid_tokens += 900  # Grid has 900 tokens
+                total_grid_tokens += active_grid_tokens
                 
-                # Check exact match
-                exact_match = (shape_correct == 2 and grid_correct == 900)
+                # Check exact match (shape correct AND all active grid pixels correct)
+                if shape_correct == 2:
+                    rows, cols = shape_target[0].item(), shape_target[1].item()
+                    active_pixels = rows * cols
+                    exact_match = (grid_correct == active_pixels)
+                else:
+                    exact_match = False
                 total_exact_correct += exact_match
                 total_samples += 1
                 
