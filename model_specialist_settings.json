@@ -23,6 +23,7 @@
         "infinite_dataloader": true,
         "batches_per_epoch": 15,
         "return_task_keys": true,
+        "enable_training_latent_tsne_plot": false,
         "cross_pair_loss": {
           "enabled": true,
           "description": "Cross-pair reconstruction loss for generalization"
@@ -45,6 +46,7 @@
         "eval_n_queries": 5,
         "eval_epoch": "final_phase_b",
         "visualize_n_values": 1,
+        "enable_evaluation_latent_tsne_plot": false,
         "_comment_trajectory_decoder": "trajectory_decoder_type: 'shared' uses shared decoder for all reconstructions (good for PoE analysis), 'independent' uses each encoder's independent decoder (good for specialization analysis)",
         "trajectory_decoder_type": "independent"
     },
@@ -76,9 +78,9 @@
         "num_encoders": 4,
         "encoder_layers": 2,
         "decoder_layers": 3,
-        "encoder_heads": 5,
+        "encoder_heads": 6,
         "decoder_heads": 6,
-        "encoder_hidden_dim": 55,
+        "encoder_hidden_dim": 90,
         "decoder_hidden_dim": 90,
         "latent_dim": 64,
         "dropout": 1e-6,

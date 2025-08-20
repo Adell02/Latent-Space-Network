@@ -1711,6 +1711,17 @@ def load_unified_latent_data_with_trajectory(run_dir, model, device, trajectory_
     print(f"  - Query: {len([l for l in all_labels if 'query' in l])}")
     print(f"  - Trajectory: {len([l for l in all_labels if 'trajectory' in l])}")
     
+    # Respect config: if standalone trajectory plots are disabled, skip any t-SNE work here
+    try:
+        wandb_settings_local = settings.get_wandb_settings()
+        if not wandb_settings_local.get('log_standalone_trajectory_plots', True):
+            print("[INFO] log_standalone_trajectory_plots is False -> skipping t-SNE for trajectory visualization")
+            # Return empty/None t-SNE outputs; callers will skip latent-space panels but can still render reconstructions
+            return None, None, None, None, None, None, None, actual_evaluated_keys
+    except Exception:
+        # If settings are unavailable, fall through to default behavior
+        pass
+
     # Apply unified t-SNE to ALL latent vectors together
     print("Applying unified t-SNE to all latent vectors...")
     from sklearn.manifold import TSNE

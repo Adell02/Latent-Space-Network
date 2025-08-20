@@ -2450,6 +2450,14 @@ def plot_training_latent_space_per_epoch(model, dataloader, device, epoch, save_
     Plot training latent space using ACTUAL latents from training (not task-level optimization).
     Shows the real latents used during training (mean, optimized, etc.).
     """
+    # Config gate: allow disabling training t-SNE latent plot generation
+    try:
+        training_settings_local = settings.get_training_settings()
+        if training_settings_local is not None and not training_settings_local.get('enable_training_latent_tsne_plot', True):
+            print("[INFO] enable_training_latent_tsne_plot is False -> skipping training latent t-SNE plot")
+            return
+    except Exception:
+        pass
     import matplotlib.pyplot as plt
     import numpy as np
     from sklearn.manifold import TSNE
@@ -2579,6 +2587,14 @@ def plot_evaluation_latent_space_by_key_and_encoder(eval_results, save_dir, epoc
     Support latents: per-sample latents from support samples
     Query latents: per-task latents (one per task) for query samples
     """
+    # Config gate: allow disabling evaluation t-SNE latent plot generation
+    try:
+        evaluation_settings_local = settings.get_evaluation_settings()
+        if evaluation_settings_local is not None and not evaluation_settings_local.get('enable_evaluation_latent_tsne_plot', True):
+            print("[INFO] enable_evaluation_latent_tsne_plot is False -> skipping evaluation latent t-SNE plot")
+            return
+    except Exception:
+        pass
     import matplotlib.pyplot as plt
     import numpy as np
     from sklearn.manifold import TSNE

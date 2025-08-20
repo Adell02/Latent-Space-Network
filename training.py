@@ -1735,18 +1735,28 @@ def comprehensive_evaluation_after_epoch(
     print("3. Plotting evaluation latent space with support/query samples, encoders, PoE, and optimized positions...")
 
     if eval_results:
+        # Config gate: allow disabling evaluation t-SNE latent plot generation
+        _skip_eval_tsne = False
         try:
-            from utils.visualizers import plot_evaluation_latent_space_by_key_and_encoder
-            plot_evaluation_latent_space_by_key_and_encoder(
-                eval_results=eval_results, 
-                save_dir=run_dir, 
-                epoch=epoch, 
-                wandb_logger=wandb_logger,
-                use_task_optimization=False  # Use original Bonnet approach for per-sample visualization
-            )
-            print("  [ OK ] Evaluation latent space plot with encoders, PoE, and optimized positions completed")
-        except Exception as e:
-            print(f"  [ WARNING ] Could not plot evaluation latent space with encoders/PoE: {e}")
+            if not settings.get_evaluation_settings().get('enable_evaluation_latent_tsne_plot', True):
+                print("[INFO] enable_evaluation_latent_tsne_plot is False -> skipping evaluation latent t-SNE plot")
+                _skip_eval_tsne = True
+        except Exception:
+            pass
+
+        if not _skip_eval_tsne:
+            try:
+                from utils.visualizers import plot_evaluation_latent_space_by_key_and_encoder
+                plot_evaluation_latent_space_by_key_and_encoder(
+                    eval_results=eval_results, 
+                    save_dir=run_dir, 
+                    epoch=epoch, 
+                    wandb_logger=wandb_logger,
+                    use_task_optimization=False  # Use original Bonnet approach for per-sample visualization
+                )
+                print("  [ OK ] Evaluation latent space plot with encoders, PoE, and optimized positions completed")
+            except Exception as e:
+                print(f"  [ WARNING ] Could not plot evaluation latent space with encoders/PoE: {e}")
             
             # Fallback to basic evaluation latent space plotting
             try:
