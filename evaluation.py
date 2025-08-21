@@ -784,14 +784,15 @@ def main_test(model, keys, run_dir, n_samples, n_queries, seed, device='cuda',
             aggregated_metrics['successful_evaluations'] += 1
             
             # Collect metrics for aggregation
-            if 'error' not in key_metrics.get('metrics', {}):
-                metrics = key_metrics.get('metrics', {})
+            # The evaluate_model_original_bonnet_approach function returns metrics directly at the top level
+            if 'error' not in key_metrics:
+                # Extract metrics directly from key_metrics (they're at the top level)
                 key_summary = {
-                    'support_loss': metrics.get('support_loss', 0.0),
-                    'query_loss': metrics.get('query_loss', 0.0),
-                    'shape_accuracy': metrics.get('shape_accuracy', 0.0),
-                    'grid_accuracy': metrics.get('grid_accuracy', 0.0),
-                    'sample_exact_accuracy': metrics.get('sample_exact_accuracy', 0.0),
+                    'support_loss': key_metrics.get('support_loss', 0.0),
+                    'query_loss': key_metrics.get('query_loss', 0.0),
+                    'shape_accuracy': key_metrics.get('shape_accuracy', 0.0),
+                    'grid_accuracy': key_metrics.get('grid_accuracy', 0.0),
+                    'sample_exact_accuracy': key_metrics.get('exact_accuracy', 0.0),  # Note: function returns 'exact_accuracy', not 'sample_exact_accuracy'
                     'trajectory_samples': len(key_metrics.get('trajectory_info', []))
                 }
                 aggregated_metrics['per_key_summary'][key] = key_summary
@@ -923,6 +924,11 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
     support_poe_latent_zs = []
     support_poe_log_vars = []
     support_keys_list = []
+    
+    # Initialize query latent containers at the top level
+    query_poe_latent_zs = []
+    query_poe_log_vars = []
+    query_keys_list = []
     
     # Support metrics accumulators (pre-/post-optimization)
     support_counts = {
@@ -1289,11 +1295,7 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                         # Single encoder: capture encoder latent (non-optimized)
                         mu_q, logvar_q, _ = model.encoder(query_input, query_target)
                         z_q = model.reparameterize(mu_q, logvar_q)
-                        # Initialize containers if not yet
-                        if 'query_poe_latent_zs' not in locals():
-                            query_poe_latent_zs = []
-                            query_poe_log_vars = []
-                            query_keys_list = []
+                        # Add to containers (already initialized at top level)
                         query_poe_latent_zs.append(z_q[0].detach().cpu().numpy())
                         query_poe_log_vars.append(logvar_q[0].detach().cpu().numpy())
                         query_keys_list.append(task_key)
@@ -1470,10 +1472,7 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                                 'grid_logits': grid_logits.detach().cpu().numpy()
                             }
                             # Collect query PoE latent for evaluation viz
-                            if 'query_poe_latent_zs' not in locals():
-                                query_poe_latent_zs = []
-                                query_poe_log_vars = []
-                                query_keys_list = []
+                            # Add to containers (already initialized at top level)
                             query_poe_latent_zs.append(poe_z_initial[0].detach().cpu().numpy())
                             query_poe_log_vars.append(poe_logvar[0].detach().cpu().numpy())
                             query_keys_list.append(task_key)
@@ -1553,11 +1552,7 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
             trajectory_info.append(trajectory)
     print(f"  [OK] Collected {len(trajectory_info)} trajectory samples for visualization")
 
-    # Default minimal structure (PoE-only) from collected lists
-    if 'query_poe_latent_zs' not in locals():
-        query_poe_latent_zs = []
-        query_poe_log_vars = []
-        query_keys_list = []
+    # Use the query latent containers that were populated during evaluation
 
     evaluation_latent_data = {
         'support': {
@@ -1643,7 +1638,10 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
         'trajectory_info': trajectory_info,  # Add trajectory information
         'evaluation_method': 'original_bonnet_approach',
         'support_metrics': support_metrics,
-        'query_metrics': query_metrics
+        'query_metrics': query_metrics,
+        # Add missing fields that the main evaluation loop expects
+        'support_loss': support_metrics.get('post_opt', {}).get('final_opt_loss', 0.0) if support_metrics else 0.0,
+        'query_loss': query_metrics.get('shape_loss', 0.0) + query_metrics.get('grid_loss', 0.0) if query_metrics else 0.0
     }
     
     return results
