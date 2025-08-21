@@ -2620,11 +2620,9 @@ def plot_training_latent_space_per_epoch(model, dataloader, device, epoch, save_
                 print(f"    DEBUG: all_encoder_indices length: {len(all_encoder_indices)}")
                 from utils.latent_metrics import compute_task_distance_metrics
                 
-                # Ensure encoder_indices is properly formatted for the distance metrics function
-                encoder_indices_for_metrics = all_encoder_indices if all_encoder_indices else None
-                if encoder_indices_for_metrics and len(encoder_indices_for_metrics) != len(all_training_latents):
-                    print(f"    WARNING: encoder_indices length mismatch, using None")
-                    encoder_indices_for_metrics = None
+                # Always compute metrics across all latents REGARDLESS of encoder
+                # to match regular training behavior (general across encoders)
+                encoder_indices_for_metrics = None
                 
                 distance_metrics = compute_task_distance_metrics(
                     latent_data=all_training_latents,
@@ -2638,11 +2636,8 @@ def plot_training_latent_space_per_epoch(model, dataloader, device, epoch, save_
                 if wandb_logger and distance_metrics:
                     wandb_metrics = {}
                     for key, value in distance_metrics.items():
-                        # Use more specific namespace for specialist training
-                        if encoder_idx is not None:
-                            wandb_metrics[f'phase_a/encoder_{encoder_idx}/latent_distances/{key}'] = value
-                        else:
-                            wandb_metrics[f'latent_distances/{key}'] = value
+                        # Use general namespace across encoders (consistent with regular training)
+                        wandb_metrics[f'training_latent_distances/{key}'] = value
                     
                     # Add epoch tracking
                     wandb_metrics['epoch'] = epoch if epoch is not None else None

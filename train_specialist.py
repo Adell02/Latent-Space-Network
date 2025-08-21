@@ -1439,7 +1439,7 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
 
             print(f"[ OK ] Phase A final latent space plot saved: {final_plot_path}")
             
-            # Compute and log Phase A final task distance metrics
+            # Compute and log Phase A final task distance metrics (general across encoders)
             try:
                 print("Computing Phase A final task distance metrics...")
                 from utils.latent_metrics import compute_task_distance_metrics
@@ -1447,7 +1447,7 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                 distance_metrics = compute_task_distance_metrics(
                     latent_data=all_z,
                     task_keys=collected_keys,
-                    encoder_indices=collected_encoders,
+                    encoder_indices=None,
                     distance_metric='cosine',
                     normalize=True
                 )
@@ -1457,13 +1457,14 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                     final_phase_a_step = (num_encoders - 1) * phase_epochs + phase_epochs
                     wandb_metrics = {}
                     for key, value in distance_metrics.items():
-                        wandb_metrics[f'phase_a_final/latent_distances/{key}'] = value
+                        # Use general namespace consistent with regular training
+                        wandb_metrics[f'training_latent_distances/{key}'] = value
                     
                     # Use final Phase A step
                     wandb_metrics['epoch'] = final_phase_a_step
                     
                     wandb_logger._safe_log(wandb_metrics, step_hint=final_phase_a_step)
-                    print(f"[ OK ] Phase A final task distance metrics logged to WandB")
+                    print(f"[ OK ] Phase A final task distance metrics logged to WandB (general across encoders)")
                     
                     # Print key metrics
                     if 'separation_ratio' in distance_metrics:
