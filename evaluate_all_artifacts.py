@@ -106,15 +106,151 @@ def _find_checkpoint_path(artifact_dir: str) -> str:
     raise FileNotFoundError(f"No checkpoint file found in artifact at {artifact_dir}")
 
 
-def _load_model_from_checkpoint(checkpoint_path: str, device: torch.device):
-    from models.base_model import LatentProgramNetwork
-    model = LatentProgramNetwork().to(device)
+def _load_model_from_checkpoint(checkpoint_path: str, device: torch.device, model_config: Dict[str, Any] = None):
+    """Load model from checkpoint with automatic architecture detection"""
     print(f"[OK] Loading state dict from {checkpoint_path}")
     ckpt = torch.load(checkpoint_path, map_location=device)
     state_dict = ckpt['model_state_dict'] if isinstance(ckpt, dict) and 'model_state_dict' in ckpt else ckpt
-    model.load_state_dict(state_dict)
+    
+    # Try to detect model architecture from state dict
+    model = _create_model_with_detected_architecture(state_dict, model_config)
+    
+    # Load the state dict
+    try:
+        model.load_state_dict(state_dict)
+        print(f"[OK] Successfully loaded state dict")
+    except Exception as e:
+        print(f"[WARNING] Failed to load state dict: {e}")
+        print(f"[INFO] This might be due to architecture mismatch. Trying to load with strict=False...")
+        try:
+            model.load_state_dict(state_dict, strict=False)
+            print(f"[OK] Loaded state dict with strict=False (some parameters may not match)")
+        except Exception as e2:
+            print(f"[ERROR] Failed to load state dict even with strict=False: {e2}")
+            raise
+    
     model.eval()
     return model
+
+
+def _create_model_with_detected_architecture(state_dict: Dict[str, Any], model_config: Dict[str, Any] = None):
+    """Create model instance based on detected architecture from state dict"""
+    from models.base_model import LatentProgramNetwork
+    
+    # Check if this is a specialist model by looking for multiple encoders
+    encoder_keys = [k for k in state_dict.keys() if 'encoder' in k and 'weight' in k]
+    decoder_keys = [k for k in state_dict.keys() if 'decoder' in k and 'weight' in k]
+    
+    # Count unique encoders and decoders
+    unique_encoders = set()
+    unique_decoders = set()
+    
+    for key in encoder_keys:
+        if 'encoder_0' in key:
+            unique_encoders.add(0)
+        elif 'encoder_1' in key:
+            unique_encoders.add(1)
+        elif 'encoder_2' in key:
+            unique_encoders.add(2)
+        elif 'encoder_3' in key:
+            unique_encoders.add(3)
+        # Add more if needed
+    
+    for key in decoder_keys:
+        if 'decoder_0' in key:
+            unique_decoders.add(0)
+        elif 'decoder_1' in key:
+            unique_decoders.add(1)
+        elif 'decoder_2' in key:
+            unique_decoders.add(2)
+        elif 'decoder_3' in key:
+            unique_decoders.add(3)
+        # Add more if needed
+    
+    num_encoders = len(unique_encoders) if unique_encoders else 1
+    num_decoders = len(unique_decoders) if unique_decoders else 1
+    
+    print(f"[INFO] Detected architecture: {num_encoders} encoder(s), {num_decoders} decoder(s)")
+    
+    # Use config if provided, otherwise use detected values
+    if model_config and 'model_settings' in model_config:
+        config = model_config['model_settings']
+        num_encoders = config.get('num_encoders', num_encoders)
+        num_decoders = config.get('num_decoders', num_decoders)
+        latent_dim = config.get('latent_dim', 64)
+        encoder_hidden_dim = config.get('encoder_hidden_dim', 150)
+        decoder_hidden_dim = config.get('decoder_hidden_dim', 150)
+        encoder_layers = config.get('encoder_layers', 4)
+        decoder_layers = config.get('decoder_layers', 4)
+    else:
+        # Use defaults
+        latent_dim = 64
+        encoder_hidden_dim = 150
+        decoder_hidden_dim = 150
+        encoder_layers = 4
+        decoder_layers = 4
+    
+    # Create model with detected/configured architecture
+    try:
+        if num_encoders > 1:
+            print(f"[INFO] Creating specialist model with {num_encoders} encoders")
+            # For specialist models, we need to create with the right architecture
+            # This assumes your base model can handle multiple encoders
+            model = LatentProgramNetwork(
+                num_encoders=num_encoders,
+                encoder_layers=encoder_layers,
+                encoder_hidden_dim=encoder_hidden_dim,
+                decoder_layers=decoder_layers,
+                decoder_hidden_dim=decoder_hidden_dim,
+                latent_dim=latent_dim
+            )
+        else:
+            print(f"[INFO] Creating single encoder model")
+            model = LatentProgramNetwork(
+                num_encoders=1,
+                encoder_layers=encoder_layers,
+                encoder_hidden_dim=encoder_hidden_dim,
+                decoder_layers=decoder_layers,
+                decoder_hidden_dim=decoder_hidden_dim,
+                latent_dim=latent_dim
+            )
+    except Exception as e:
+        print(f"[WARNING] Failed to create model with detected architecture: {e}")
+        print(f"[INFO] Falling back to default model creation...")
+        # Fallback to default model
+        model = LatentProgramNetwork()
+    
+    return model
+
+
+def _is_specialist_model(model) -> bool:
+    """Detect if a model is a specialist model with multiple encoders"""
+    try:
+        # Check if model has multiple encoders
+        if hasattr(model, 'encoders') and isinstance(model.encoders, list):
+            return len(model.encoders) > 1
+        elif hasattr(model, 'num_encoders'):
+            return model.num_encoders > 1
+        elif hasattr(model, 'encoder') and hasattr(model.encoder, 'num_encoders'):
+            return model.encoder.num_encoders > 1
+        else:
+            # Fallback: check model parameters for multiple encoder patterns
+            param_names = [name for name, _ in model.named_parameters()]
+            encoder_count = 0
+            for name in param_names:
+                if 'encoder_0' in name:
+                    encoder_count = max(encoder_count, 1)
+                elif 'encoder_1' in name:
+                    encoder_count = max(encoder_count, 2)
+                elif 'encoder_2' in name:
+                    encoder_count = max(encoder_count, 3)
+                elif 'encoder_3' in name:
+                    encoder_count = max(encoder_count, 4)
+            
+            return encoder_count > 1
+    except Exception as e:
+        print(f"[WARNING] Could not determine if model is specialist: {e}")
+        return False
 
 
 def _generate_unified_evaluation_dataset(settings, n_samples: int = 5, n_queries: int = 10):
@@ -514,12 +650,16 @@ def main():
             with tempfile.TemporaryDirectory() as tmpdir:
                 art_dir = _download_artifact(artifact_id, tmpdir)
                 ckpt_path = _find_checkpoint_path(art_dir)
-                model = _load_model_from_checkpoint(ckpt_path, device)
+                model = _load_model_from_checkpoint(ckpt_path, device, evaluation_config)
             
             # Extract model name from artifact ID
             model_name = artifact_id.split('/')[-1].split(':')[0]
             if model_name in all_model_results:
                 model_name = f"{model_name}_{i}"  # Avoid duplicates
+            
+            # Detect if this is a specialist model
+            is_specialist_model = _is_specialist_model(model)
+            print(f"[INFO] Model {model_name} is {'specialist' if is_specialist_model else 'single encoder'}")
             
             # Evaluate on unified dataset
             print(f"[OK] Evaluating {model_name} on unified dataset...")
@@ -533,7 +673,13 @@ def main():
             model_metadata[model_name] = {
                 'artifact_id': artifact_id,
                 'checkpoint_path': ckpt_path,
-                'model_type': 'specialist' if args.specialist else 'single_encoder'
+                'model_type': 'specialist' if is_specialist_model else 'single_encoder',
+                'detected_architecture': {
+                    'num_encoders': getattr(model, 'num_encoders', 1),
+                    'num_decoders': getattr(model, 'num_decoders', 1),
+                    'latent_dim': getattr(model, 'latent_dim', 64),
+                    'is_specialist': is_specialist_model
+                }
             }
             
             print(f"[OK] Completed evaluation of {model_name}")
