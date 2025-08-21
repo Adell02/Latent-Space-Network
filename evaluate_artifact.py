@@ -573,9 +573,41 @@ def main():
         training_keys = data_settings.get('training_keys', [data_settings.get('key')])
         if isinstance(training_keys, str):
             training_keys = [training_keys]
-        sample_key = training_keys[0]
-        _, _, _, in_seqs, out_seqs = generate_and_process_tasks(sample_key, 1)
-        if in_seqs and out_seqs:
+        
+        # Try to find a working key for reconstruction
+        working_key = None
+        in_seqs = None
+        out_seqs = None
+        
+        # First try the first training key
+        if training_keys:
+            try:
+                sample_key = training_keys[0]
+                print(f"  [INFO] Attempting reconstruction with key: {sample_key}")
+                _, _, _, in_seqs, out_seqs = generate_and_process_tasks(sample_key, 1)
+                if in_seqs and out_seqs:
+                    working_key = sample_key
+                    print(f"  [OK] Successfully generated reconstruction data for key: {sample_key}")
+            except Exception as e:
+                print(f"  [WARNING] Failed to generate data for key {sample_key}: {e}")
+        
+        # If first key failed, try to find a working key from available generators
+        if not working_key:
+            try:
+                from re_arc.main import get_generators
+                available_generators = get_generators()
+                if available_generators:
+                    # Try the first available generator
+                    fallback_key = list(available_generators.keys())[0]
+                    print(f"  [INFO] Trying fallback key: {fallback_key}")
+                    _, _, _, in_seqs, out_seqs = generate_and_process_tasks(fallback_key, 1)
+                    if in_seqs and out_seqs:
+                        working_key = fallback_key
+                        print(f"  [OK] Successfully generated reconstruction data with fallback key: {fallback_key}")
+            except Exception as e:
+                print(f"  [WARNING] Fallback key generation failed: {e}")
+        
+        if in_seqs and out_seqs and working_key:
             x = torch.tensor(in_seqs[0]).float().unsqueeze(0).to(device)
             y = torch.tensor(out_seqs[0]).float().unsqueeze(0).to(device)
             with torch.no_grad():
@@ -600,9 +632,15 @@ def main():
             recon_grid, recon_shape = extract_grid_from_sequence(recon_seq)
             import matplotlib.pyplot as plt
             fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-            axes[0].imshow(input_grid, cmap='viridis', interpolation='nearest'); axes[0].set_title(f'Input\n{input_shape[0]}×{input_shape[1]}'); axes[0].axis('off')
-            axes[1].imshow(target_grid, cmap='viridis', interpolation='nearest'); axes[1].set_title(f'Target\n{target_shape[0]}×{target_shape[1]}'); axes[1].axis('off')
-            axes[2].imshow(recon_grid, cmap='viridis', interpolation='nearest'); axes[2].set_title(f'Reconstruction\n{recon_shape[0]}×{recon_shape[1]}'); axes[2].axis('off')
+            axes[0].imshow(input_grid, cmap='viridis', interpolation='nearest')
+            axes[0].set_title(f'Input\n{input_shape[0]}×{input_shape[1]}')
+            axes[0].axis('off')
+            axes[1].imshow(target_grid, cmap='viridis', interpolation='nearest')
+            axes[1].set_title(f'Target\n{target_shape[0]}×{target_shape[1]}')
+            axes[1].axis('off')
+            axes[2].imshow(recon_grid, cmap='viridis', interpolation='nearest')
+            axes[2].set_title(f'Reconstruction\n{recon_shape[0]}×{recon_shape[1]}')
+            axes[2].axis('off')
             plt.tight_layout()
             out_path = os.path.join(out_dir, 'single_reconstruction.png')
             plt.savefig(out_path, dpi=150, bbox_inches='tight')
@@ -617,9 +655,12 @@ def main():
                 except Exception as e:
                     print(f"[WARNING] Failed to upload reconstruction to WandB: {e}")
         else:
-            print(f"[INFO] Could not generate a training sample for reconstruction")
+            print(f"[INFO] Could not generate reconstruction data - skipping reconstruction figure")
     except Exception as e:
         print(f"[WARNING] Section (c) failed: {e}")
+        print(f"  [DEBUG] Error details: {str(e)}")
+        import traceback
+        traceback.print_exc()
 
     print(f"\n[OK] Artifact evaluation complete. Outputs in: {out_dir}")
     
