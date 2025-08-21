@@ -11,7 +11,7 @@
   "training_settings": {
       "data_source": "synthetic",
       "use_ood_for_training": false,
-      "num_epochs": 20,
+      "num_epochs": 40,
       "batch_size": 64,
       "gradient_accumulation_steps": 1,
       "learning_rate": 0.0004,
@@ -20,7 +20,7 @@
       "use_mixed_precision": true,
       "save_checkpoint_interval": 1,
       "infinite_dataloader": true,
-      "batches_per_epoch": 40,
+      "batches_per_epoch": 20,
       "return_task_keys": true,
       "enable_training_latent_tsne_plot": true,
       "cross_pair_loss": {
@@ -44,7 +44,7 @@
       "_eval_keys_comment": "Set to 'all' to use all available keys (limited by n_max_eval_keys), or provide a list of specific keys",
       "eval_n_samples": 5,
       "eval_n_queries": 10,
-      "eval_epoch": 20,
+      "eval_epoch": 40,
       "visualize_n_values": 1,
       "enable_evaluation_latent_tsne_plot": true,
       "_comment_trajectory_decoder": "trajectory_decoder_type: 'shared' uses shared decoder for all reconstructions (good for PoE analysis), 'independent' uses each encoder's independent decoder (good for specialization analysis)",
