@@ -125,6 +125,15 @@ def _generate_unified_evaluation_dataset(settings, n_samples: int = 5, n_queries
     eval_settings = settings.get_evaluation_settings()
     keys = eval_settings.get('eval_keys', ['00d62c1b'])
     
+    # Use config file settings if available
+    if hasattr(settings, 'evaluation_config'):
+        config = settings.evaluation_config
+        if 'evaluation_settings' in config:
+            eval_config = config['evaluation_settings']
+            keys = eval_config.get('eval_keys', keys)
+            n_samples = eval_config.get('eval_n_samples', n_samples)
+            n_queries = eval_config.get('eval_n_queries', n_queries)
+    
     # Resolve "all" using helper
     try:
         keys = get_evaluation_keys_with_all_support(keys, eval_settings.get('n_max_eval_keys', 10))
@@ -355,6 +364,42 @@ def _save_json(obj, path):
     print(f"[OK] Saved: {path}")
 
 
+def _load_evaluation_config(config_path: str) -> Dict[str, Any]:
+    """Load and validate evaluation configuration file"""
+    try:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        # Validate required sections
+        required_sections = ['evaluation_settings', 'data_settings', 'wandb_settings']
+        for section in required_sections:
+            if section not in config:
+                print(f"[WARNING] Missing required section '{section}' in config")
+        
+        # Set defaults for missing values
+        if 'evaluation_settings' not in config:
+            config['evaluation_settings'] = {}
+        if 'data_settings' not in config:
+            config['data_settings'] = {}
+        if 'wandb_settings' not in config:
+            config['wandb_settings'] = {}
+        
+        # Set defaults
+        config['evaluation_settings'].setdefault('eval_keys', ['00d62c1b'])
+        config['evaluation_settings'].setdefault('eval_n_samples', 5)
+        config['evaluation_settings'].setdefault('eval_n_queries', 10)
+        config['evaluation_settings'].setdefault('eval_seed', 42)
+        config['wandb_settings'].setdefault('project', 'evaluation_lpn')
+        config['wandb_settings'].setdefault('entity', 'ga624-imperial-college-london')
+        
+        print(f"[OK] Loaded and validated evaluation config: {config_path}")
+        return config
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to load evaluation config: {e}")
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser(description='Evaluate multiple WandB artifact models on unified dataset')
     parser.add_argument('--artifacts', nargs='+', required=True, 
@@ -413,6 +458,23 @@ def main():
     settings_path = _resolve_settings_path(args.specialist, args.config)
     print(f"[OK] Using settings: {settings_path}")
     settings = _init_settings(settings_path)
+    
+    # Load evaluation config if provided
+    evaluation_config = None
+    if args.config and os.path.exists(args.config):
+        evaluation_config = _load_evaluation_config(args.config)
+        if evaluation_config:
+            # Attach config to settings for use in functions
+            settings.evaluation_config = evaluation_config
+            # Override command line args with config values
+            if 'evaluation_settings' in evaluation_config:
+                eval_config = evaluation_config['evaluation_settings']
+                args.n_samples = eval_config.get('eval_n_samples', args.n_samples)
+                args.n_queries = eval_config.get('eval_n_queries', args.n_queries)
+            if 'wandb_settings' in evaluation_config:
+                wandb_config = evaluation_config['wandb_settings']
+                args.wandb_project = wandb_config.get('project', args.wandb_project)
+                args.wandb_entity = wandb_config.get('entity', args.wandb_entity)
 
     # Create output directory
     if args.run_dir:

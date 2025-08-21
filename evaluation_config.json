@@ -1,0 +1,84 @@
+{
+  "evaluation_settings": {
+    "eval_keys": ["00d62c1b", "1f97cabd", "3b609ea5", "5c1387a1", "7fddc938"],
+    "n_max_eval_keys": 10,
+    "eval_n_samples": 5,
+    "eval_n_queries": 10,
+    "eval_seed": 42,
+    "enable_trajectory_plots": true,
+    "n_max_trajectory_plots": 3,
+    "enable_latent_tsne": true,
+    "enable_distance_metrics": true
+  },
+  "data_settings": {
+    "training_keys": ["00d62c1b", "1f97cabd", "3b609ea5"],
+    "n_max_keys": 5,
+    "eval_seed": 42,
+    "batch_size": 16,
+    "shuffle": false
+  },
+  "model_settings": {
+    "latent_dim": 64,
+    "encoder_hidden_dim": 150,
+    "decoder_hidden_dim": 150,
+    "num_encoders": 2,
+    "encoder_layers": 4,
+    "decoder_layers": 4
+  },
+  "optimization_settings": {
+    "num_steps": 100,
+    "learning_rate": 0.01,
+    "optimizer": "adam",
+    "use_independent_decoder": false,
+    "encoder_idx": null
+  },
+  "visualization_settings": {
+    "tsne_perplexity": 30,
+    "tsne_random_state": 42,
+    "plot_dpi": 300,
+    "enable_comparative_plots": true,
+    "enable_per_model_plots": true
+  },
+  "wandb_settings": {
+    "project": "evaluation_lpn",
+    "entity": "ga624-imperial-college-london",
+    "log_comparative_metrics": true,
+    "log_per_model_metrics": true,
+    "log_visualizations": true,
+    "log_distance_metrics": true
+  },
+  "output_settings": {
+    "save_format": "json",
+    "save_visualizations": true,
+    "save_metrics": true,
+    "save_latent_data": false,
+    "compression": false
+  },
+  "comparison_settings": {
+    "metrics_to_compare": [
+      "shape_accuracy",
+      "grid_accuracy", 
+      "exact_accuracy",
+      "shape_loss",
+      "grid_loss",
+      "kl_loss"
+    ],
+    "ranking_method": "exact_accuracy",
+    "enable_statistical_tests": true,
+    "confidence_level": 0.95
+  },
+  "dataset_settings": {
+    "unified_dataset": true,
+    "fixed_seed": true,
+    "cache_dataset": true,
+    "validate_dataset": true,
+    "max_dataset_size": 1000
+  },
+  "performance_settings": {
+    "batch_processing": true,
+    "parallel_evaluation": false,
+    "memory_optimization": true,
+    "progress_tracking": true,
+    "error_handling": "continue"
+  }
+}
