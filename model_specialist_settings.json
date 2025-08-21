@@ -21,7 +21,7 @@
         "use_mixed_precision": true,
         "save_checkpoint_interval": 1,
         "infinite_dataloader": true,
-        "batches_per_epoch": 40,
+        "batches_per_epoch": 20,
         "return_task_keys": true,
         "enable_training_latent_tsne_plot": true,
         "cross_pair_loss": {
@@ -43,7 +43,7 @@
         ],
         "_eval_keys_comment": "Set to 'all' to use all available keys (limited by n_max_eval_keys), or provide a list of specific keys",
         "eval_n_samples": 5,
-        "eval_n_queries": 5,
+        "eval_n_queries": 10,
         "eval_epoch": "final_phase_b",
         "visualize_n_values": 1,
         "enable_evaluation_latent_tsne_plot": true,
@@ -76,7 +76,7 @@
     },
     "model_architecture": {
         "num_encoders": 2,
-        "encoder_layers": 2,
+        "encoder_layers": 4,
         "decoder_layers": 3,
         "encoder_heads": 6,
         "decoder_heads": 6,
@@ -181,7 +181,7 @@
             }
         },
         "phase_b": {
-            "epochs": 10,
+            "epochs": 15,
             "description": "Decoder training phase",
             "enhanced_training": {
                 "use_cyclical_beta": true,
