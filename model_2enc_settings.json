@@ -1,0 +1,172 @@
+{
+    "data_settings": {
+        "training_keys": "all",
+        "n_max_keys": 20,
+        "training_seed": 42,
+        "eval_seed": 1,
+        "n": 1,
+        "run_base_dir": "runs_re_arc",
+        "split_across_encoders": true
+    },
+    "training_settings": {
+        "data_source": "synthetic",
+        "use_ood_for_training": false,
+        "num_epochs": 10,
+        "batch_size": 32,
+        "gradient_accumulation_steps": 1,
+        "learning_rate": 0.0004,
+        "optimizer_weight_decay": 0.0,
+        "beta": 0.001,
+        "beta_warmup_epochs": 3,
+        "use_mixed_precision": true,
+        "save_checkpoint_interval": 1,
+        "infinite_dataloader": true,
+        "batches_per_epoch": 20,
+        "return_task_keys": true,
+        "enable_training_latent_tsne_plot": true,
+        "cross_pair_loss": {
+            "enabled": true,
+            "description": "Cross-pair reconstruction loss for generalization"
+        }
+    },
+    "evaluation_settings": {
+        "data_source": "ood_original_arc",
+        "use_ood_for_evaluation": true,
+        "eval_keys": "all",
+        "n_max_eval_keys": 20,
+        "n_max_trajectory_plots": 5,
+        "other_eval_keys": [
+            "00d62c1b",
+            "1cf80156",
+            "25d8a9c8",
+            "0a938d79"
+        ],
+        "_eval_keys_comment": "Set to 'all' to use all available keys (limited by n_max_eval_keys), or provide a list of specific keys",
+        "eval_n_samples": 5,
+        "eval_n_queries": 10,
+        "eval_epoch": "final_phase_b",
+        "visualize_n_values": 1,
+        "enable_evaluation_latent_tsne_plot": true,
+        "_comment_trajectory_decoder": "trajectory_decoder_type: 'shared' uses shared decoder for all reconstructions (good for PoE analysis), 'independent' uses each encoder's independent decoder (good for specialization analysis)",
+        "trajectory_decoder_type": "independent"
+    },
+    "latent_optimization": {
+        "training": {
+            "enabled": true,
+            "num_steps": 0,
+            "learning_rate": 0.1
+        },
+        "inference": {
+            "enabled": true,
+            "num_steps": 10,
+            "learning_rate": 0.1
+        },
+        "method": "gradient",
+        "evolutionary": {
+            "population_size": 25,
+            "num_generations": 100,
+            "mutation_std": 0.5
+        },
+        "voronoi": {
+            "population_size": 10,
+            "num_generations": 15,
+            "diversity_weight": 0.5,
+            "mutation_std": 0.1
+        }
+    },
+    "model_architecture": {
+        "num_encoders": 4,
+        "encoder_layers": 4,
+        "decoder_layers": 3,
+        "encoder_heads": 6,
+        "decoder_heads": 6,
+        "encoder_hidden_dim": 150,
+        "decoder_hidden_dim": 150,
+        "latent_dim": 64,
+        "dropout": 1e-6,
+        "decoder_input_dropout": 0,
+        "max_length": 902,
+        "encoder_max_length": 1805,
+        "decoder_max_length": 902,
+        "use_gradient_checkpointing": true,
+        "use_next_position_embeddings": true,
+        "vq_vae": {
+            "enabled": false,
+            "num_embeddings": 128,
+            "embedding_dim": 16,
+            "commitment_cost": 0.25,
+            "decay": 0.99,
+            "epsilon": 1e-05,
+            "use_ema": true,
+            "restart_unused_codes": true,
+            "restart_threshold": 0.5,
+            "split_batch_size": null
+        }
+    },
+    "repulsion_loss_settings": {
+        "enabled": false,
+        "lambda": 1e-4,
+        "schedule": {
+            "type": "none",
+            "start": 0.01,
+            "end": 0.01,
+            "warmup_epochs": 0
+        },
+        "margin": 6,
+        "logvar_min": -8.0
+    },
+    "enhanced_training": {
+        "use_cyclical_beta": true,
+        "beta_cycle_length": 4,
+        "use_free_bits": true,
+        "free_bits_delta": 0.07,
+        "use_dynamic_lambda": false,
+        "lambda_high_multiplier": 2.0,
+        "use_contrastive_margin": false,
+        "margin_tau": 1.0,
+        "debug_kl_metrics": false
+    },
+    "wandb_settings": {
+        "enabled": true,
+        "entity": "ga624-imperial-college-london",
+        "api_key": "e2853fdc991b057f1cebf7df2a747ecca6fdaf6c",
+        "project_name": "LPN_specialist_paper",
+        "log_interval": 1,
+        "log_trajectory_plots": true,
+        "trajectory_max_samples": 10,
+        "eval_log_interval": 3,
+        "log_standalone_trajectory_plots": false,
+        "log_main_reconstruction_plots": false
+    },
+    "specialist_training": {
+        "phase_a": {
+            "epochs": 20,
+            "description": "Encoder pre-training phase",
+            "anti_batch_size": 0,
+            "anti_batch_description": "Proportion (0-1) of anti-samples (from other encoders) mixed into each encoder's training batch to encourage specialization",
+            "anti_batch_lambda": 0.1,
+            "anti_batch_lambda_description": "Weight for KL regularization on anti-samples (should be ~BETA)",
+            "beta_warmup_epochs": 3,
+            "beta_warmup_description": "Epochs to warm up beta from 0 to target value to prevent posterior collapse",
+            "cross_pair_loss": {
+                "enabled": true,
+                "num_pairs": 4,
+                "description": "Cross-pair reconstruction loss for generalization"
+            }
+        },
+        "phase_b": {
+            "epochs": 15,
+            "description": "Decoder training phase",
+            "enhanced_training": {
+                "use_cyclical_beta": true,
+                "beta_cycle_length": 4,
+                "use_free_bits": true,
+                "free_bits_delta": 0.05,
+                "debug_kl_metrics": false
+            }
+        },
+        "evaluation_between_phases": true,
+        "save_phase_checkpoints": true,
+        "phases_to_run": ["A", "B"]
+    }
+}

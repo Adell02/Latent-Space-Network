@@ -70,12 +70,23 @@ def _download_artifact(artifact_id: str, dest_dir: str) -> str:
 
 
 def _find_checkpoint_path(artifact_dir: str) -> str:
-    # Prefer checkpoint_epoch*.pt, else final_model.pt
+    # Debug: List all files in artifact directory
+    print(f"[DEBUG] Searching for checkpoint files in: {artifact_dir}")
+    all_files = []
+    for root, dirs, files in os.walk(artifact_dir):
+        for f in files:
+            full_path = os.path.join(root, f)
+            rel_path = os.path.relpath(full_path, artifact_dir)
+            all_files.append(rel_path)
+            print(f"[DEBUG] Found file: {rel_path}")
+    
+    # Prefer checkpoint_epoch*.pt, else final_model.pt, else any .pt file
     candidates = []
     for root, _, files in os.walk(artifact_dir):
         for f in files:
             if f.startswith('checkpoint_epoch') and f.endswith('.pt'):
                 candidates.append(os.path.join(root, f))
+    
     if candidates:
         # Pick the highest epoch
         def _epoch_from_name(p):
@@ -89,13 +100,38 @@ def _find_checkpoint_path(artifact_dir: str) -> str:
         best = max(candidates, key=_epoch_from_name)
         print(f"[OK] Selected checkpoint: {best}")
         return best
-    # Fallback
+    
+    # Fallback to final_model.pt
     for root, _, files in os.walk(artifact_dir):
         for f in files:
             if f == 'final_model.pt':
                 p = os.path.join(root, f)
                 print(f"[OK] Selected final model: {p}")
                 return p
+    
+    # Last resort: look for any checkpoint file (.pt, .ckpt, .pth, etc.)
+    checkpoint_files = []
+    for root, _, files in os.walk(artifact_dir):
+        for f in files:
+            if f.endswith(('.pt', '.ckpt', '.pth', '.pkl')):
+                checkpoint_files.append(os.path.join(root, f))
+    
+    if checkpoint_files:
+        # Prefer files with 'model' in the name
+        model_files = [f for f in checkpoint_files if 'model' in os.path.basename(f).lower()]
+        if model_files:
+            selected = model_files[0]
+            print(f"[OK] Selected model file (fallback): {selected}")
+            return selected
+        else:
+            selected = checkpoint_files[0]
+            print(f"[OK] Selected checkpoint file (fallback): {selected}")
+            return selected
+    
+    # If we get here, no checkpoint files found
+    print(f"[ERROR] No checkpoint files found. Available files:")
+    for f in all_files:
+        print(f"  - {f}")
     raise FileNotFoundError(f"No checkpoint file found in artifact at {artifact_dir}")
 
 
@@ -105,7 +141,41 @@ def _load_model_from_checkpoint(checkpoint_path: str, device: torch.device):
     print(f"[OK] Loading state dict from {checkpoint_path}")
     ckpt = torch.load(checkpoint_path, map_location=device)
     state_dict = ckpt['model_state_dict'] if isinstance(ckpt, dict) and 'model_state_dict' in ckpt else ckpt
-    model.load_state_dict(state_dict)
+    
+    # Try strict loading first
+    try:
+        model.load_state_dict(state_dict, strict=True)
+        print(f"[OK] Model loaded successfully with strict=True")
+    except RuntimeError as e:
+        print(f"[WARNING] Strict loading failed: {e}")
+        print(f"[INFO] Attempting flexible loading (strict=False)...")
+        
+        # Try flexible loading
+        try:
+            missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+            print(f"[OK] Model loaded successfully with strict=False")
+            if missing_keys:
+                print(f"[WARNING] Missing keys: {len(missing_keys)} keys")
+                if len(missing_keys) <= 10:
+                    for key in missing_keys:
+                        print(f"  - {key}")
+                else:
+                    print(f"  - First 10: {missing_keys[:10]}")
+                    print(f"  - ... and {len(missing_keys) - 10} more")
+            
+            if unexpected_keys:
+                print(f"[WARNING] Unexpected keys: {len(unexpected_keys)} keys")
+                if len(unexpected_keys) <= 10:
+                    for key in unexpected_keys:
+                        print(f"  - {key}")
+                else:
+                    print(f"  - First 10: {unexpected_keys[:10]}")
+                    print(f"  - ... and {len(unexpected_keys) - 10} more")
+                    
+        except Exception as e2:
+            print(f"[ERROR] Flexible loading also failed: {e2}")
+            raise e2
+    
     model.eval()
     return model
 
