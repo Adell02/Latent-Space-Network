@@ -924,6 +924,24 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
     support_poe_log_vars = []
     support_keys_list = []
     
+    # Support metrics accumulators (pre-/post-optimization)
+    support_counts = {
+        'num_samples': 0,
+    }
+    support_pre = {
+        'shape_correct': 0, 'shape_tokens': 0,
+        'grid_correct': 0, 'grid_tokens': 0,
+        'exact_correct': 0,
+        'shape_loss_sum': 0.0, 'grid_loss_sum': 0.0, 'kl_loss_sum': 0.0,
+    }
+    support_post = {
+        'shape_correct': 0, 'shape_tokens': 0,
+        'grid_correct': 0, 'grid_tokens': 0,
+        'exact_correct': 0,
+        'shape_loss_sum': 0.0, 'grid_loss_sum': 0.0,
+    }
+    support_opt = {'final_loss_sum': 0.0}
+
     for task_key, support_samples in task_samples.items():
         print(f"\nProcessing task '{task_key}' with {len(support_samples)} support samples...")
         
@@ -945,6 +963,8 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
             )
             
             optimized_latents.append(optimized_z)
+            support_opt['final_loss_sum'] += float(final_loss)
+            support_counts['num_samples'] += 1
             # Collect optimized support latent and an associated logvar (encoder logvar if available, else zeros)
             try:
                 latent_dim = getattr(model, 'latent_dim', optimized_z.shape[-1])
@@ -1015,6 +1035,60 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                                         'shape_logits': shape_logits.detach().cpu().numpy(),
                                         'grid_logits': grid_logits.detach().cpu().numpy()
                                     }
+
+                                    # Compute support metrics for pre/post (initial/final)
+                                    try:
+                                        # Targets
+                                        shape_target = target_seq[0, 900:902].long()
+                                        grid_target = target_seq[0, :900].long()
+                                        # Shape loss
+                                        shape_loss_val = F.cross_entropy(shape_logits.reshape(-1, 31), shape_target.reshape(-1)).item()
+                                        # Grid loss over active region only
+                                        rows = int(shape_target[0].item()); cols = int(shape_target[1].item())
+                                        active_pixels = max(0, min(rows * cols, 900))
+                                        if active_pixels > 0:
+                                            grid_loss_val = F.cross_entropy(grid_logits[0, :active_pixels], grid_target[:active_pixels]).item()
+                                        else:
+                                            grid_loss_val = 0.0
+                                        # Accuracies
+                                        shape_correct = int((shape_pred == shape_target).sum().item())
+                                        if shape_correct == 2 and active_pixels > 0:
+                                            grid_pred_2d = grid_pred.view(30, 30)
+                                            grid_target_2d = grid_target.view(30, 30)
+                                            active_pred = grid_pred_2d[:rows, :cols]
+                                            active_target = grid_target_2d[:rows, :cols]
+                                            grid_correct = int((active_pred == active_target).sum().item())
+                                        else:
+                                            grid_correct = 0
+                                        exact_match = int(shape_correct == 2 and grid_correct == active_pixels and active_pixels > 0)
+
+                                        if expected_key == 'initial':
+                                            support_pre['shape_correct'] += shape_correct
+                                            support_pre['shape_tokens'] += 2
+                                            support_pre['grid_correct'] += grid_correct
+                                            support_pre['grid_tokens'] += max(active_pixels, 1)
+                                            support_pre['shape_loss_sum'] += shape_loss_val
+                                            support_pre['grid_loss_sum'] += grid_loss_val
+                                            # KL (pre-opt) if encoder params present
+                                            try:
+                                                if 'encoder_mu' in trajectory and 'encoder_log_var' in trajectory:
+                                                    mu_t = trajectory['encoder_mu'][0]
+                                                    logv_t = trajectory['encoder_log_var'][0]
+                                                    kl = 0.5 * torch.sum(torch.exp(logv_t) + mu_t**2 - 1.0 - logv_t).item()
+                                                    support_pre['kl_loss_sum'] += kl
+                                            except Exception:
+                                                pass
+                                            support_pre['exact_correct'] += exact_match
+                                        elif expected_key == 'final':
+                                            support_post['shape_correct'] += shape_correct
+                                            support_post['shape_tokens'] += 2
+                                            support_post['grid_correct'] += grid_correct
+                                            support_post['grid_tokens'] += max(active_pixels, 1)
+                                            support_post['shape_loss_sum'] += shape_loss_val
+                                            support_post['grid_loss_sum'] += grid_loss_val
+                                            support_post['exact_correct'] += exact_match
+                                    except Exception:
+                                        pass
                                 except Exception as e:
                                     print(f"      Warning: Could not generate {stage} reconstruction: {e}")
                             
@@ -1081,6 +1155,8 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
     total_grid_tokens = 0
     total_exact_correct = 0
     total_samples = 0
+    total_shape_loss_query = 0.0
+    total_grid_loss_query = 0.0
     
     query_reconstructions = []
     
@@ -1147,6 +1223,8 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                 
                 # Calculate metrics
                 shape_correct = (shape_pred == shape_target).sum().item()
+                # Losses
+                shape_loss_val = F.cross_entropy(shape_logits.reshape(-1, 31), shape_target.reshape(-1)).item()
                 
                 # Calculate grid accuracy only over active region (rows × cols)
                 if shape_correct == 2:  # Only if shape is correct
@@ -1160,19 +1238,25 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
                         active_target = grid_target_2d[:rows, :cols]
                         grid_correct = (active_pred == active_target).sum().item()
                         active_grid_tokens = active_pixels
+                        grid_loss_val = F.cross_entropy(grid_logits[0, :active_pixels], grid_target[:active_pixels]).item()
                     else:
                         grid_correct = 0
                         active_grid_tokens = 1  # Avoid division by zero
+                        grid_loss_val = 0.0
                 else:
                     # If shape is wrong, grid accuracy over active region is meaningless
                     # But still compute it for debugging
                     grid_correct = (grid_pred == grid_target).sum().item()
                     active_grid_tokens = 900  # Fall back to full grid
+                    # We won't use full-grid CE to avoid inconsistency
+                    grid_loss_val = 0.0
                 
                 total_shape_correct += shape_correct
                 total_shape_tokens += 2  # Shape has 2 tokens
                 total_grid_correct += grid_correct
                 total_grid_tokens += active_grid_tokens
+                total_shape_loss_query += shape_loss_val
+                total_grid_loss_query += grid_loss_val
                 
                 # Check exact match (shape correct AND all active grid pixels correct)
                 if shape_correct == 2:
@@ -1510,6 +1594,44 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
     except Exception as e:
         print(f"  [WARNING] Failed to collect comprehensive evaluation latents: {e}. Using PoE-only fallback.")
     
+    # Prepare split metrics for support/query
+    support_metrics = {}
+    if support_counts['num_samples'] > 0:
+        pre_shape_acc = support_pre['shape_correct'] / max(1, support_pre['shape_tokens'])
+        pre_grid_acc = support_pre['grid_correct'] / max(1, support_pre['grid_tokens'])
+        pre_exact = support_pre['exact_correct'] / max(1, support_counts['num_samples'])
+        post_shape_acc = support_post['shape_correct'] / max(1, support_post['shape_tokens'])
+        post_grid_acc = support_post['grid_correct'] / max(1, support_post['grid_tokens'])
+        post_exact = support_post['exact_correct'] / max(1, support_counts['num_samples'])
+        support_metrics = {
+            'num_samples': support_counts['num_samples'],
+            'pre_opt': {
+                'shape_accuracy': pre_shape_acc,
+                'grid_accuracy': pre_grid_acc,
+                'exact_accuracy': pre_exact,
+                'shape_loss': support_pre['shape_loss_sum'] / max(1, support_counts['num_samples']),
+                'grid_loss': support_pre['grid_loss_sum'] / max(1, support_counts['num_samples']),
+                'kl_loss': support_pre['kl_loss_sum'] / max(1, support_counts['num_samples']),
+            },
+            'post_opt': {
+                'shape_accuracy': post_shape_acc,
+                'grid_accuracy': post_grid_acc,
+                'exact_accuracy': post_exact,
+                'shape_loss': support_post['shape_loss_sum'] / max(1, support_counts['num_samples']),
+                'grid_loss': support_post['grid_loss_sum'] / max(1, support_counts['num_samples']),
+                'final_opt_loss': support_opt['final_loss_sum'] / max(1, support_counts['num_samples']),
+            }
+        }
+
+    query_metrics = {
+        'num_samples': total_samples,
+        'shape_accuracy': shape_accuracy,
+        'grid_accuracy': grid_accuracy,
+        'exact_accuracy': exact_accuracy,
+        'shape_loss': total_shape_loss_query / max(1, total_samples),
+        'grid_loss': total_grid_loss_query / max(1, total_samples)
+    }
+
     results = {
         'shape_accuracy': shape_accuracy,
         'grid_accuracy': grid_accuracy,
@@ -1519,7 +1641,9 @@ def evaluate_model_original_bonnet_approach(model, samples_dataloader, queries_d
         'latent_data': evaluation_latent_data,
         'evaluation_latent_data': evaluation_latent_data,  # Add for plotting compatibility
         'trajectory_info': trajectory_info,  # Add trajectory information
-        'evaluation_method': 'original_bonnet_approach'
+        'evaluation_method': 'original_bonnet_approach',
+        'support_metrics': support_metrics,
+        'query_metrics': query_metrics
     }
     
     return results

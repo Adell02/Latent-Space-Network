@@ -9,7 +9,7 @@ Produces:
   (c) A reconstruction figure
 
 QUICK START:
-  # Regular model evaluation
+  # Regular model evaluation (with WandB logging)
   python evaluate_artifact.py --artifact ga624-imperial-college-london/LPN_specialist_paper/model:latest
   
   # Specialist model evaluation (uses model_specialist_settings.json)
@@ -17,6 +17,12 @@ QUICK START:
   
   # Custom settings and output directory
   python evaluate_artifact.py --artifact ga624-imperial-college-london/LPN_specialist_paper/model:latest --config my_settings.json --run_dir ./my_outputs
+  
+  # Custom WandB project and entity
+  python evaluate_artifact.py --artifact ga624-imperial-college-london/LPN_specialist_paper/model:latest --wandb_project my_project --wandb_entity my_entity
+  
+  # Disable WandB logging
+  python evaluate_artifact.py --artifact ga624-imperial-college-london/LPN_specialist_paper/model:latest --no_wandb
 
 Usage:
   python evaluate_artifact.py --artifact ENTITY/PROJECT/ARTIFACT:VERSION [--specialist] [--config model_settings.json] [--run_dir out_dir]
@@ -58,6 +64,9 @@ def _download_artifact(artifact_id: str, dest_dir: str) -> str:
     path = art.download(root=dest_dir)
     print(f"[OK] Artifact downloaded to {path}")
     return path
+
+
+
 
 
 def _find_checkpoint_path(artifact_dir: str) -> str:
@@ -158,9 +167,41 @@ def main():
     parser.add_argument('--config', type=str, default=None, help='Path to settings JSON (overrides default)')
     parser.add_argument('--run_dir', type=str, default=None, help='Directory to save outputs')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
+    parser.add_argument('--wandb_entity', type=str, default='ga624-imperial-college-london', help='WandB entity name')
+    parser.add_argument('--wandb_project', type=str, default='evaluation_lpn', help='WandB project name')
+    parser.add_argument('--no_wandb', action='store_true', help='Disable WandB logging')
     args = parser.parse_args()
 
     device = torch.device(args.device)
+
+    # Initialize WandB
+    wandb_logger = None
+    if not args.no_wandb:
+        try:
+            import wandb
+            # Create unique run name with timestamp
+            import datetime
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            run_name = f"checkpoint_{timestamp}"
+            
+            # Initialize WandB run
+            wandb.init(
+                entity=args.wandb_entity,
+                project=args.wandb_project,
+                name=run_name,
+                config={
+                    "artifact_id": args.artifact,
+                    "is_specialist": args.specialist,
+                    "config_file": args.config,
+                    "device": str(device),
+                    "evaluation_timestamp": timestamp
+                }
+            )
+            wandb_logger = wandb
+            print(f"[OK] WandB run initialized: {args.wandb_entity}/{args.wandb_project}/{run_name}")
+        except Exception as e:
+            print(f"[WARNING] Failed to initialize WandB: {e}")
+            wandb_logger = None
 
     # Initialize settings
     settings_path = _resolve_settings_path(args.specialist, args.config)
@@ -176,10 +217,55 @@ def main():
         out_dir = create_run_directory('artifact_eval')
 
     # Download artifact and load model
+    # Note: We need to initialize WandB first to download artifacts, even if --no_wandb is used
+    # The artifact download will be logged to the temporary run, then we'll finish it
+    temp_wandb_run = None
+    if not args.no_wandb:
+        # Use the main wandb_logger
+        temp_wandb_run = wandb_logger
+    else:
+        # Create a temporary WandB run just for artifact download
+        try:
+            import wandb
+            import datetime
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            temp_run_name = f"temp_download_{timestamp}"
+            temp_wandb_run = wandb.init(
+                entity=args.wandb_entity,
+                project=args.wandb_project,
+                name=temp_run_name,
+                config={"purpose": "artifact_download_only"},
+                mode="disabled"  # Don't actually log anything
+            )
+            print(f"[OK] Created temporary WandB run for artifact download: {temp_run_name}")
+        except Exception as e:
+            print(f"[WARNING] Failed to create temporary WandB run: {e}")
+            temp_wandb_run = None
+    
     with tempfile.TemporaryDirectory() as tmpdir:
-        art_dir = _download_artifact(args.artifact, tmpdir)
+        if temp_wandb_run:
+            # Download using WandB
+            art_dir = _download_artifact(args.artifact, tmpdir)
+        else:
+            # Fallback: try to download without WandB (may fail)
+            print(f"[WARNING] Attempting artifact download without WandB (may fail)")
+            try:
+                art_dir = _download_artifact(args.artifact, tmpdir)
+            except Exception as e:
+                print(f"[ERROR] Artifact download failed: {e}")
+                print(f"[INFO] Please ensure WandB is available or provide the model file manually")
+                return
+        
         ckpt_path = _find_checkpoint_path(art_dir)
         model = _load_model_from_checkpoint(ckpt_path, device)
+    
+    # Clean up temporary WandB run if it was created
+    if temp_wandb_run and args.no_wandb and temp_wandb_run != wandb_logger:
+        try:
+            temp_wandb_run.finish()
+            print(f"[OK] Cleaned up temporary WandB run")
+        except Exception as e:
+            print(f"[WARNING] Failed to clean up temporary WandB run: {e}")
 
     # (a) One-epoch training latent plot + distances
     try:
@@ -219,6 +305,23 @@ def main():
             dist_metrics = _compute_distance_metrics(all_latents, key_list)
             _save_json(dist_metrics, os.path.join(out_dir, 'training_latent_distance_metrics.json'))
 
+            # Log training latent distance metrics to WandB
+            if wandb_logger:
+                try:
+                    # Log key distance metrics
+                    wandb_logger.log({
+                        "training_latent_distances/within_task_mean": dist_metrics.get('within_task_mean', 0.0),
+                        "training_latent_distances/within_task_std": dist_metrics.get('within_task_std', 0.0),
+                        "training_latent_distances/between_task_mean": dist_metrics.get('between_task_mean', 0.0),
+                        "training_latent_distances/between_task_std": dist_metrics.get('between_task_std', 0.0),
+                        "training_latent_distances/separation_ratio": dist_metrics.get('separation_ratio', 0.0),
+                        "training_latent_distances/num_tasks": dist_metrics.get('num_tasks', 0),
+                        "training_latent_distances/total_samples": dist_metrics.get('total_samples', 0)
+                    })
+                    print(f"[OK] Logged training latent distance metrics to WandB")
+                except Exception as e:
+                    print(f"[WARNING] Failed to log training metrics to WandB: {e}")
+
             # Plot t-SNE of training latents
             try:
                 import matplotlib.pyplot as plt
@@ -233,6 +336,14 @@ def main():
                 plt.title('Training Latent Space (one epoch)')
                 plt.savefig(os.path.join(out_dir, 'training_latent_space_epoch.png'), dpi=300, bbox_inches='tight')
                 plt.close()
+                
+                # Upload training latent space plot to WandB
+                if wandb_logger:
+                    try:
+                        wandb_logger.log({"training_latent_space": wandb.Image(os.path.join(out_dir, 'training_latent_space_epoch.png'))})
+                        print(f"[OK] Uploaded training latent space plot to WandB")
+                    except Exception as e:
+                        print(f"[WARNING] Failed to upload training plot to WandB: {e}")
             except Exception as e:
                 print(f"[WARNING] Could not plot training latent t-SNE: {e}")
         else:
@@ -260,6 +371,72 @@ def main():
                                  encoder_idx=None, use_independent_decoder=False)
         # Save raw results
         _save_json(eval_results.get('aggregated_metrics', {}), os.path.join(out_dir, 'eval_aggregated_metrics.json'))
+        
+        # Log evaluation metrics to WandB
+        if wandb_logger and 'aggregated_metrics' in eval_results:
+            try:
+                agg_metrics = eval_results['aggregated_metrics']
+                avg_metrics = agg_metrics.get('average_metrics', {})
+                
+                # Log key evaluation metrics
+                wandb_logger.log({
+                    "evaluation/shape_accuracy": avg_metrics.get('avg_shape_accuracy', 0.0),
+                    "evaluation/grid_accuracy": avg_metrics.get('avg_grid_accuracy', 0.0),
+                    "evaluation/sample_exact_accuracy": avg_metrics.get('avg_sample_exact_accuracy', 0.0),
+                    "evaluation/support_loss": avg_metrics.get('avg_support_loss', 0.0),
+                    "evaluation/query_loss": avg_metrics.get('avg_query_loss', 0.0),
+                    "evaluation/total_keys": agg_metrics.get('total_keys', 0),
+                    "evaluation/successful_evaluations": agg_metrics.get('successful_evaluations', 0),
+                    "evaluation/failed_evaluations": agg_metrics.get('failed_evaluations', 0)
+                })
+                print(f"[OK] Logged evaluation metrics to WandB")
+            except Exception as e:
+                print(f"[WARNING] Failed to log evaluation metrics to WandB: {e}")
+
+        # Split logging for support and query with consistent grouping
+        if wandb_logger:
+            try:
+                # Determine grouping: enc_{i} or poe
+                eval_md = eval_results.get('evaluation_metadata', {})
+                enc_idx_used = eval_md.get('encoder_idx', None)
+                group = f"enc_{enc_idx_used}" if enc_idx_used is not None else "poe"
+
+                # Support metrics
+                support_metrics = eval_results.get('support_metrics', {})
+                if support_metrics:
+                    num_samples_sup = int(support_metrics.get('num_samples', 0))
+                    pre = support_metrics.get('pre_opt', {})
+                    post = support_metrics.get('post_opt', {})
+                    wandb_logger.log({
+                        f"support/{group}/num_samples": num_samples_sup,
+                        f"support/{group}/pre-opt/shape_accuracy": float(pre.get('shape_accuracy', 0.0)),
+                        f"support/{group}/pre-opt/grid_accuracy": float(pre.get('grid_accuracy', 0.0)),
+                        f"support/{group}/pre-opt/exact_accuracy": float(pre.get('exact_accuracy', 0.0)),
+                        f"support/{group}/pre-opt/shape_loss": float(pre.get('shape_loss', 0.0)),
+                        f"support/{group}/pre-opt/grid_loss": float(pre.get('grid_loss', 0.0)),
+                        f"support/{group}/pre-opt/kl_loss": float(pre.get('kl_loss', 0.0)),
+                        f"support/{group}/post-opt/shape_accuracy": float(post.get('shape_accuracy', 0.0)),
+                        f"support/{group}/post-opt/grid_accuracy": float(post.get('grid_accuracy', 0.0)),
+                        f"support/{group}/post-opt/exact_accuracy": float(post.get('exact_accuracy', 0.0)),
+                        f"support/{group}/post-opt/shape_loss": float(post.get('shape_loss', 0.0)),
+                        f"support/{group}/post-opt/grid_loss": float(post.get('grid_loss', 0.0)),
+                        f"support/{group}/post-opt/final_opt_loss": float(post.get('final_opt_loss', 0.0)),
+                    })
+
+                # Query metrics
+                query_metrics = eval_results.get('query_metrics', {})
+                if query_metrics:
+                    wandb_logger.log({
+                        f"query/{group}/num_samples": int(query_metrics.get('num_samples', 0)),
+                        f"query/{group}/shape_accuracy": float(query_metrics.get('shape_accuracy', 0.0)),
+                        f"query/{group}/grid_accuracy": float(query_metrics.get('grid_accuracy', 0.0)),
+                        f"query/{group}/exact_accuracy": float(query_metrics.get('exact_accuracy', 0.0)),
+                        f"query/{group}/shape_loss": float(query_metrics.get('shape_loss', 0.0)),
+                        f"query/{group}/grid_loss": float(query_metrics.get('grid_loss', 0.0)),
+                    })
+                print(f"[OK] Logged split support/query metrics to WandB")
+            except Exception as e:
+                print(f"[WARNING] Failed split metrics logging: {e}")
 
         # Compute before (encoder means) vs after (optimized) distance metrics for support
         try:
@@ -312,6 +489,34 @@ def main():
                 pre_metrics = _compute_distance_metrics(pre_latents, pre_keys) if len(pre_latents) > 0 else {}
                 post_metrics = _compute_distance_metrics(post_latents, post_keys) if len(post_latents) > 0 else {}
                 _save_json({'pre_optimization': pre_metrics, 'post_optimization': post_metrics}, os.path.join(out_dir, 'support_distance_metrics_pre_post.json'))
+
+                # Log support distance metrics to WandB with consistent grouping
+                if wandb_logger:
+                    try:
+                        eval_md = eval_results.get('evaluation_metadata', {})
+                        enc_idx_used = eval_md.get('encoder_idx', None)
+                        group = f"enc_{enc_idx_used}" if enc_idx_used is not None else "poe"
+                        # Log pre-optimization metrics
+                        if pre_metrics:
+                            wandb_logger.log({
+                                f"support/{group}/pre-opt/latent_distances/within_task_mean": pre_metrics.get('within_task_mean', 0.0),
+                                f"support/{group}/pre-opt/latent_distances/within_task_std": pre_metrics.get('within_task_std', 0.0),
+                                f"support/{group}/pre-opt/latent_distances/between_task_mean": pre_metrics.get('between_task_mean', 0.0),
+                                f"support/{group}/pre-opt/latent_distances/between_task_std": pre_metrics.get('between_task_std', 0.0),
+                                f"support/{group}/pre-opt/latent_distances/separation_ratio": pre_metrics.get('separation_ratio', 0.0)
+                            })
+                        # Log post-optimization metrics
+                        if post_metrics:
+                            wandb_logger.log({
+                                f"support/{group}/post-opt/latent_distances/within_task_mean": post_metrics.get('within_task_mean', 0.0),
+                                f"support/{group}/post-opt/latent_distances/within_task_std": post_metrics.get('within_task_std', 0.0),
+                                f"support/{group}/post-opt/latent_distances/between_task_mean": post_metrics.get('between_task_mean', 0.0),
+                                f"support/{group}/post-opt/latent_distances/between_task_std": post_metrics.get('between_task_std', 0.0),
+                                f"support/{group}/post-opt/latent_distances/separation_ratio": post_metrics.get('separation_ratio', 0.0)
+                            })
+                        print(f"[OK] Logged support distance metrics to WandB")
+                    except Exception as e:
+                        print(f"[WARNING] Failed to log support distance metrics to WandB: {e}")
         except Exception as e:
             print(f"[WARNING] Could not compute pre/post distance metrics: {e}")
 
@@ -325,6 +530,35 @@ def main():
                 wandb_logger=None,
                 use_task_optimization=False
             )
+            # Compute and log query latent distances (poe or per-encoder)
+            if wandb_logger:
+                try:
+                    from utils.latent_metrics import compute_task_distance_metrics
+                    eval_md = eval_results.get('evaluation_metadata', {})
+                    enc_idx_used = eval_md.get('encoder_idx', None)
+                    group = f"enc_{enc_idx_used}" if enc_idx_used is not None else "poe"
+                    q = eval_results.get('evaluation_latent_data', {}).get('query', {})
+                    # Prefer poe, fallback to any available encoder_* key
+                    if 'poe' in q:
+                        q_latents = np.array(q['poe'].get('latent_zs', []))
+                        q_keys = list(q['poe'].get('keys', []))
+                    else:
+                        # pick first encoder_* entry
+                        enc_keys = [k for k in q.keys() if k.startswith('encoder_')]
+                        q_latents = np.array(q[enc_keys[0]].get('latent_zs', [])) if enc_keys else np.zeros((0, getattr(model, 'latent_dim', 64)))
+                        q_keys = list(q[enc_keys[0]].get('keys', [])) if enc_keys else []
+                    if q_latents.size > 0 and len(q_keys) == len(q_latents):
+                        q_metrics = compute_task_distance_metrics(latent_data=q_latents, task_keys=q_keys, encoder_indices=None, distance_metric='cosine', normalize=True)
+                        wandb_logger.log({
+                            f"query/{group}/latent_distances/within_task_mean": q_metrics.get('within_task_mean', 0.0),
+                            f"query/{group}/latent_distances/within_task_std": q_metrics.get('within_task_std', 0.0),
+                            f"query/{group}/latent_distances/between_task_mean": q_metrics.get('between_task_mean', 0.0),
+                            f"query/{group}/latent_distances/between_task_std": q_metrics.get('between_task_std', 0.0),
+                            f"query/{group}/latent_distances/separation_ratio": q_metrics.get('separation_ratio', 0.0)
+                        })
+                        print(f"[OK] Logged query latent distance metrics to WandB")
+                except Exception as e:
+                    print(f"[WARNING] Failed to log query distances: {e}")
         except Exception as e:
             print(f"[WARNING] Could not create evaluation latent space plot: {e}")
 
@@ -374,12 +608,28 @@ def main():
             plt.savefig(out_path, dpi=150, bbox_inches='tight')
             plt.close()
             print(f"[OK] Saved reconstruction: {out_path}")
+            
+            # Upload reconstruction figure to WandB
+            if wandb_logger:
+                try:
+                    wandb_logger.log({"reconstruction_figure": wandb.Image(out_path)})
+                    print(f"[OK] Uploaded reconstruction figure to WandB")
+                except Exception as e:
+                    print(f"[WARNING] Failed to upload reconstruction to WandB: {e}")
         else:
             print(f"[INFO] Could not generate a training sample for reconstruction")
     except Exception as e:
         print(f"[WARNING] Section (c) failed: {e}")
 
     print(f"\n[OK] Artifact evaluation complete. Outputs in: {out_dir}")
+    
+    # Finish WandB run
+    if wandb_logger:
+        try:
+            wandb_logger.finish()
+            print(f"[OK] WandB run completed successfully")
+        except Exception as e:
+            print(f"[WARNING] Failed to finish WandB run: {e}")
 
 
 if __name__ == '__main__':
