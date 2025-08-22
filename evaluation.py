@@ -131,6 +131,7 @@ def collect_unified_evaluation_latents(model, dataloader, device, is_multi_encod
     # Get the data samples once (shared across all encoders)
     input_samples = []
     output_samples = []
+    sample_keys = []  # Track the keys for each sample
     
     with torch.no_grad():
         sample_count = 0
@@ -148,6 +149,14 @@ def collect_unified_evaluation_latents(model, dataloader, device, is_multi_encod
             batch_size = min(batch_input.size(0), max_samples - sample_count)
             input_samples.append(batch_input[:batch_size])
             output_samples.append(batch_target[:batch_size])
+            
+            # Track keys for each sample
+            if batch_keys is not None:
+                sample_keys.extend([batch_keys[i].item() for i in range(batch_size)])
+            else:
+                # If no keys provided, use sample indices
+                sample_keys.extend([f"sample_{sample_count + i}" for i in range(batch_size)])
+            
             sample_count += batch_size
     
     if not input_samples:
@@ -165,7 +174,8 @@ def collect_unified_evaluation_latents(model, dataloader, device, is_multi_encod
         'input_samples': all_inputs.cpu().numpy(),
         'output_samples': all_outputs.cpu().numpy(),
         'num_samples': len(all_inputs),
-        'latent_type': 'reparameterized'
+        'latent_type': 'reparameterized',
+        'keys': sample_keys  # Include the task keys for each sample
     }
     
     encoder_latent_data = {}
@@ -861,10 +871,44 @@ def main_test(model, keys, run_dir, n_samples, n_queries, seed, device='cuda',
     results['task_latent_data'] = {'task_latents': all_task_latent_data}
     results['task_trajectories'] = all_task_trajectories
     
-    # Store evaluation_latent_data at top level
-    first_key = list(results['key_results'].keys())[0]
-    if 'evaluation_latent_data' in results['key_results'][first_key]:
-        results['evaluation_latent_data'] = results['key_results'][first_key]['evaluation_latent_data']
+    # Store evaluation_latent_data at top level - accumulate from all keys
+    all_evaluation_latent_data = {}
+    all_task_keys = []
+    
+    for key, key_results in results['key_results'].items():
+        if 'evaluation_latent_data' in key_results and key_results['evaluation_latent_data']:
+            # The structure is: evaluation_latent_data['support'/'query'][encoder_key]
+            eval_data = key_results['evaluation_latent_data']
+            
+            for data_type in ['support', 'query']:
+                if data_type in eval_data:
+                    if data_type not in all_evaluation_latent_data:
+                        all_evaluation_latent_data[data_type] = {
+                            'latent_zs': [],
+                            'keys': []
+                        }
+                    
+                    type_data = eval_data[data_type]
+                    
+                    # Accumulate latent data from all encoders for this data type
+                    for encoder_key, encoder_data in type_data.items():
+                        if isinstance(encoder_data, dict) and 'latent_zs' in encoder_data:
+                            latent_zs = encoder_data['latent_zs']
+                            
+                            # Extend the accumulated lists
+                            all_evaluation_latent_data[data_type]['latent_zs'].extend(latent_zs)
+                            
+                            # Add the task key for each sample (not the encoder keys)
+                            all_evaluation_latent_data[data_type]['keys'].extend([key] * len(latent_zs))
+            
+            # Collect task keys for metadata
+            all_task_keys.append(key)
+    
+    if all_evaluation_latent_data:
+        results['evaluation_latent_data'] = all_evaluation_latent_data
+        # Add task keys to evaluation metadata
+        if 'evaluation_metadata' in results:
+            results['evaluation_metadata']['task_keys'] = all_task_keys
     
     return results
 

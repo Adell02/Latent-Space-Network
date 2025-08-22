@@ -1,0 +1,32 @@
+{
+  "model_architecture": {
+    "num_encoders": 1,
+    "encoder_layers": 8,
+    "decoder_layers": 3,
+    "encoder_heads": 6,
+    "decoder_heads": 6,
+    "encoder_hidden_dim": 150,
+    "decoder_hidden_dim": 150,
+    "latent_dim": 64,
+    "dropout": 1e-6,
+    "decoder_input_dropout": 0,
+    "max_length": 902,
+    "encoder_max_length": 1805,
+    "decoder_max_length": 902,
+    "use_gradient_checkpointing": true,
+    "use_next_position_embeddings": true
+  },
+  "latent_optimization": {
+    "training": {
+      "enabled": true,
+      "num_steps": 0,
+      "learning_rate": 0.1
+    },
+    "inference": {
+      "enabled": true,
+      "num_steps": 10,
+      "learning_rate": 0.1
+    },
+    "method": "gradient"
+  }
+}

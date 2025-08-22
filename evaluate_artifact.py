@@ -15,7 +15,10 @@ QUICK START:
   # Specialist model evaluation (uses model_specialist_settings.json)
   python evaluate_artifact.py --artifact ga624-imperial-college-london/LPN_specialist_paper/model:latest --specialist
   
-  # Custom settings and output directory
+  # Separate data and model configs (recommended)
+  python evaluate_artifact.py --artifact ga624-imperial-college-london/LPN_specialist_paper/model:latest --config_data data_evaluation_settings.json --config_model model_evaluation_settings.json
+  
+  # Legacy single config file
   python evaluate_artifact.py --artifact ga624-imperial-college-london/LPN_specialist_paper/model:latest --config my_settings.json --run_dir ./my_outputs
   
   # Custom WandB project and entity
@@ -25,12 +28,24 @@ QUICK START:
   python evaluate_artifact.py --artifact ga624-imperial-college-london/LPN_specialist_paper/model:latest --no_wandb
 
 Usage:
-  python evaluate_artifact.py --artifact ENTITY/PROJECT/ARTIFACT:VERSION [--specialist] [--config model_settings.json] [--run_dir out_dir]
+  python evaluate_artifact.py --artifact ENTITY/PROJECT/ARTIFACT:VERSION [--specialist] [--config_data DATA_CONFIG.json] [--config_model MODEL_CONFIG.json] [--config LEGACY_CONFIG.json] [--run_dir out_dir]
 
 Notes:
-  - The script relies on settings JSON (model_settings.json or model_specialist_settings.json) to initialize
-    the model architecture and data/evaluation settings. Use --config to override.
+  - The script now supports separate configuration files for data/evaluation settings and model architecture.
+  - Use --config_data for data, evaluation, and training settings.
+  - Use --config_model for model architecture and latent optimization settings.
+  - Legacy --config flag is still supported for backward compatibility.
   - The artifact is expected to contain one of: checkpoint_epoch*.pt or final_model.pt
+
+
+COMMAND:
+ - 1ENC: python evaluate_artifact.py --artifact ga624-imperial-college-london/LPN_specialist_paper/LPN_specialist_paper_20250821_101933_main_20250821_101933_checkpoint_epoch_20:v0 --config_model model_1ENC_evaluation_settings.json --config_data data_evaluation_1ENC_settings.json
+
+ - 2ENC: python evaluate_artifact.py --artifact ga624-imperial-college-london/LPN_specialist_paper/final_specialist_model:v7 --config_model model_2ENC_evaluation_settings.json --config_data data_evaluation_2ENC_settings.json --specialist
+
+        python evaluate_artifact.py --artifact ga624-imperial-college-london/LPN_specialist_paper/final_specialist_model:v8 --config_model model_2ENC_evaluation_settings.json --config_data data_evaluation_2ENC_settings.json --specialist
+
+ - 4ENC: 
 """
 
 import os
@@ -47,13 +62,38 @@ def _init_settings(config_path: str):
     return init_settings(config_path)
 
 
-def _resolve_settings_path(is_specialist: bool, config_override: str = None) -> str:
+def _resolve_settings_path(is_specialist: bool, config_override: str = None, config_data: str = None, config_model: str = None) -> tuple:
+    """
+    Resolve settings paths for data and model configurations.
+    Returns (data_config_path, model_config_path) tuple.
+    """
+    # If both data and model configs are provided, use them
+    if config_data and config_model:
+        if not os.path.exists(config_data):
+            raise FileNotFoundError(f"Data config file not found: {config_data}")
+        if not os.path.exists(config_model):
+            raise FileNotFoundError(f"Model config file not found: {config_model}")
+        return config_data, config_model
+    
+    # If only one config is provided, use it for both (fallback)
+    if config_data and not config_model:
+        if not os.path.exists(config_data):
+            raise FileNotFoundError(f"Data config file not found: {config_data}")
+        return config_data, config_data
+    elif config_model and not config_data:
+        if not os.path.exists(config_model):
+            raise FileNotFoundError(f"Model config file not found: {config_model}")
+        return config_model, config_model
+    
+    # If config_override is provided, use it for both
     if config_override and os.path.exists(config_override):
-        return config_override
+        return config_override, config_override
+    
+    # Default fallback
     default = 'model_specialist_settings.json' if is_specialist else 'model_settings.json'
     if not os.path.exists(default):
-        raise FileNotFoundError(f"Settings file not found: {default}. Use --config to provide a path.")
-    return default
+        raise FileNotFoundError(f"Settings file not found: {default}. Use --config_data and --config_model to provide separate paths.")
+    return default, default
 
 
 def _download_artifact(artifact_id: str, dest_dir: str) -> str:
@@ -184,6 +224,7 @@ def _generate_one_epoch_training_dataset(settings, total_samples: int):
     from re_arc.main import generate_and_process_tasks
     data_settings = settings.get_data_settings()
     training_keys = data_settings.get('training_keys', [data_settings.get('key')])
+    
     # Resolve 'all'
     if isinstance(training_keys, str) and training_keys.lower() == 'all':
         tasks_dir = os.path.join(os.path.dirname(__file__), 're_arc', 're_arc', 'tasks')
@@ -197,24 +238,49 @@ def _generate_one_epoch_training_dataset(settings, total_samples: int):
             except Exception:
                 pass
         training_keys = all_keys
-    # Distribute samples roughly evenly across keys
-    per_key = max(1, total_samples // max(1, len(training_keys)))
+    
+    print(f"[DEBUG] Training keys resolved: {len(training_keys)} keys")
+    print(f"[DEBUG] First few keys: {training_keys[:5]}")
+    
+    # Ensure we get samples from ALL keys by calculating minimum samples per key
+    min_samples_per_key = max(1, total_samples // len(training_keys))
+    print(f"[DEBUG] Minimum samples per key: {min_samples_per_key}")
+    
     inputs, outputs, keys = [], [], []
+    successful_keys = 0
+    
     for key in training_keys:
         try:
-            _, _, _, in_seqs, out_seqs = generate_and_process_tasks(key, per_key)
+            # Generate at least min_samples_per_key samples for each key
+            samples_to_generate = min_samples_per_key
+            _, _, _, in_seqs, out_seqs = generate_and_process_tasks(key, samples_to_generate)
+            
             if not in_seqs or not out_seqs:
+                print(f"[WARNING] No data generated for key {key}")
                 continue
+                
+            # Add all generated samples for this key
             inputs.extend(in_seqs)
             outputs.extend(out_seqs)
             keys.extend([key] * len(in_seqs))
+            successful_keys += 1
+            
+            print(f"[DEBUG] Key {key}: generated {len(in_seqs)} samples")
+            
         except Exception as e:
             print(f"[WARNING] Could not generate training samples for key {key}: {e}")
-    # Trim to requested total
+    
+    print(f"[DEBUG] Successfully generated samples from {successful_keys}/{len(training_keys)} keys")
+    print(f"[DEBUG] Total samples: {len(inputs)}")
+    print(f"[DEBUG] Unique keys in output: {len(set(keys))}")
+    
+    # Trim to requested total if we have more than needed
     if len(inputs) > total_samples:
+        print(f"[DEBUG] Trimming from {len(inputs)} to {total_samples} samples")
         inputs = inputs[:total_samples]
         outputs = outputs[:total_samples]
         keys = keys[:total_samples]
+    
     return inputs, outputs, keys
 
 
@@ -234,12 +300,16 @@ def main():
     parser = argparse.ArgumentParser(description='Evaluate a WandB artifact model')
     parser.add_argument('--artifact', required=True, help='WandB artifact id, e.g., entity/project/artifact:version')
     parser.add_argument('--specialist', action='store_true', help='Use specialist settings and multi-encoder visualizations')
-    parser.add_argument('--config', type=str, default=None, help='Path to settings JSON (overrides default)')
+    parser.add_argument('--config', type=str, default=None, help='Path to settings JSON (overrides default, legacy support)')
+    parser.add_argument('--config_data', type=str, default=None, help='Path to data/evaluation settings JSON')
+    parser.add_argument('--config_model', type=str, default=None, help='Path to model architecture settings JSON')
     parser.add_argument('--run_dir', type=str, default=None, help='Directory to save outputs')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--wandb_entity', type=str, default='ga624-imperial-college-london', help='WandB entity name')
     parser.add_argument('--wandb_project', type=str, default='evaluation_lpn', help='WandB project name')
     parser.add_argument('--no_wandb', action='store_true', help='Disable WandB logging')
+    parser.add_argument('--unified_training_dataset', type=str, default=None, help='Path to unified training dataset pickle file')
+    parser.add_argument('--unified_evaluation_dataset', type=str, default=None, help='Path to unified evaluation dataset pickle file')
     args = parser.parse_args()
 
     device = torch.device(args.device)
@@ -274,9 +344,22 @@ def main():
             wandb_logger = None
 
     # Initialize settings
-    settings_path = _resolve_settings_path(args.specialist, args.config)
-    print(f"[OK] Using settings: {settings_path}")
-    settings = _init_settings(settings_path)
+    data_config_path, model_config_path = _resolve_settings_path(
+        args.specialist, args.config, args.config_data, args.config_model
+    )
+    
+    print(f"[OK] Using data config: {data_config_path}")
+    print(f"[OK] Using model config: {model_config_path}")
+    
+    # For now, use the data config as the primary config
+    # The model config will be merged later when needed
+    settings = _init_settings(data_config_path)
+    print(f"[OK] Initialized settings with data configuration")
+    
+    # Store the model config path for later use if needed
+    if data_config_path != model_config_path:
+        print(f"[INFO] Model config available at: {model_config_path}")
+        print(f"[INFO] Note: Model architecture settings may need to be manually verified")
 
     # Create output directory
     if args.run_dir:
@@ -342,36 +425,215 @@ def main():
         train_settings = settings.get_training_settings()
         batches_per_epoch = int(train_settings.get('batches_per_epoch', 10))
         batch_size = int(train_settings.get('batch_size', 16))
-        total_samples = max(1, batches_per_epoch * batch_size)
-        print(f"[A] Collecting one-epoch training samples: {batches_per_epoch} x {batch_size} = {total_samples}")
-        in_seqs, out_seqs, key_list = _generate_one_epoch_training_dataset(settings, total_samples)
+        
+        # Check if unified training dataset is provided
+        if args.unified_training_dataset and os.path.exists(args.unified_training_dataset):
+            print(f"[A] Using unified training dataset from: {args.unified_training_dataset}")
+            import pickle
+            with open(args.unified_training_dataset, 'rb') as f:
+                unified_training_data = pickle.load(f)
+            
+            # Convert unified data to sequences
+            in_seqs, out_seqs, key_list = [], [], []
+            for key, data in unified_training_data.items():
+                in_seqs.extend(data['inputs'])
+                out_seqs.extend(data['outputs'])
+                key_list.extend([key] * len(data['inputs']))
+            
+            print(f"[A] Loaded {len(in_seqs)} training samples from unified dataset")
+        else:
+            # For multi-encoder models, we need samples for each encoder + PoE
+            if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
+                num_encoders = getattr(model, 'num_encoders', 4)
+                # Total samples needed: batches × batch_size × (encoders + PoE)
+                total_samples = max(1, batches_per_epoch * batch_size * (num_encoders + 1))
+                print(f"[A] Multi-encoder model: collecting {batches_per_epoch} x {batch_size} x ({num_encoders} + 1) = {total_samples} samples")
+            else:
+                total_samples = max(1, batches_per_epoch * batch_size)
+                print(f"[A] Single encoder: collecting {batches_per_epoch} x {batch_size} = {total_samples} samples")
+            
+            in_seqs, out_seqs, key_list = _generate_one_epoch_training_dataset(settings, total_samples)
+        print(f"[A] Generated {len(in_seqs)} training samples from {len(set(key_list))} unique keys")
 
         from utils.model_utils import prepare_dataloader
         dl = prepare_dataloader(in_seqs, out_seqs, batch_size=min(64, max(4, batch_size)), shuffle=False)
 
-        # Collect latents (means) and keys
-        model.eval()
-        all_latents = []
-        all_keys = []
-        with torch.no_grad():
-            for batch in dl:
-                x, y = batch[:2]
-                x = x.to(device)
-                y = y.to(device)
+        # Collect latents using the SAME method as train_specialist.py
+        # This ensures consistency between training and evaluation latent space visualizations
+        print(f"[INFO] Collecting training latents using train_specialist.py method...")
+        
+        # Check if we have stored optimized latents from training (like train_specialist.py)
+        if hasattr(model, 'epoch_optimized_latents') and model.epoch_optimized_latents:
+            print(f"[INFO] Using stored optimized latents from training: {len(model.epoch_optimized_latents['latents'])} samples")
+            all_latents = model.epoch_optimized_latents['latents']
+            all_keys = model.epoch_optimized_latents['keys']
+            # Note: We don't have encoder indices in evaluation, so we'll use the stored ones if available
+            encoder_indices = model.epoch_optimized_latents.get('encoder_indices', [])
+        else:
+            print(f"[INFO] No stored optimized latents found, collecting fresh latents with optimization...")
+            
+            # Use the SAME latent collection method as train_specialist.py
+            from utils.latent_functions import get_optimized_z
+            
+            # Get latent optimization settings from model settings
+            try:
+                from utils.settings_manager import settings
+                latent_opt_settings = settings.get_latent_optimization()
+                training_opt_steps = latent_opt_settings.get('training', {}).get('num_steps', 0)
+                training_opt_lr = latent_opt_settings.get('training', {}).get('learning_rate', 0.1)
+                print(f"[INFO] Using latent optimization: {training_opt_steps} steps, LR={training_opt_lr}")
+            except Exception as e:
+                print(f"[WARNING] Could not load latent optimization settings: {e}")
+                training_opt_steps = 0
+                training_opt_lr = 0.1
+            
+            all_latents = []
+            all_keys = []
+            encoder_indices = []
+            
+            model.eval()
+            with torch.no_grad():
                 if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
-                    mu, log_var = model(x, y)[1:3]
+                    # For multi-encoder models, we need to process samples for each encoder + PoE
+                    # The key_list now contains samples × (encoders + PoE), so we need to distribute them properly
+                    num_encoders = model.num_encoders
+                    samples_per_encoder = len(key_list) // (num_encoders + 1)  # +1 for PoE
+                    print(f"[DEBUG] Multi-encoder: {len(key_list)} total samples, {samples_per_encoder} per encoder+PoE")
+                    
+                    # Process samples in chunks for each encoder + PoE
+                    for enc_idx in range(-1, num_encoders):  # -1 represents PoE, 0-3 are encoders
+                        if enc_idx == -1:
+                            # PoE
+                            start_idx = 0
+                            end_idx = samples_per_encoder
+                            encoder_name = "PoE"
+                            use_independent_decoder = False
+                        else:
+                            # Individual encoder
+                            start_idx = (enc_idx + 1) * samples_per_encoder
+                            end_idx = (enc_idx + 2) * samples_per_encoder
+                            encoder_name = f"Encoder {enc_idx}"
+                            use_independent_decoder = True
+                        
+                        # Get the samples for this encoder
+                        encoder_samples = list(zip(in_seqs[start_idx:end_idx], out_seqs[start_idx:end_idx]))
+                        encoder_keys = key_list[start_idx:end_idx]
+                        
+                        print(f"[DEBUG] Processing {encoder_name}: samples {start_idx}-{end_idx}, keys: {encoder_keys[:5]}...")
+                        
+                        # Process in batches
+                        batch_size_actual = min(32, len(encoder_samples))
+                        for batch_start in range(0, len(encoder_samples), batch_size_actual):
+                            batch_end = min(batch_start + batch_size_actual, len(encoder_samples))
+                            batch_samples = encoder_samples[batch_start:batch_end]
+                            batch_keys = encoder_keys[batch_start:batch_end]
+                            
+                            # Prepare batch tensors
+                            x = torch.tensor([sample[0] for sample in batch_samples]).float().to(device)
+                            y = torch.tensor([sample[1] for sample in batch_samples]).float().to(device)
+                            
+                            try:
+                                if enc_idx == -1:
+                                    # PoE
+                                    z_opt, _ = get_optimized_z(
+                                        model, x, y,
+                                        num_steps=training_opt_steps,
+                                        lr=training_opt_lr,
+                                        context='training',
+                                        encoder_idx=None,
+                                        use_independent_decoder=False
+                                    )
+                                    all_latents.append(z_opt.detach().cpu().numpy())
+                                    all_keys.extend(batch_keys)
+                                    encoder_indices.extend([None] * len(batch_keys))
+                                    print(f"[DEBUG] Collected PoE optimized latent, batch {batch_start//batch_size_actual}, keys: {batch_keys}")
+                                else:
+                                    # Individual encoder
+                                    z_opt, _ = get_optimized_z(
+                                        model, x, y,
+                                        num_steps=training_opt_steps,
+                                        lr=training_opt_lr,
+                                        context='training',
+                                        encoder_idx=enc_idx,
+                                        use_independent_decoder=True
+                                    )
+                                    all_latents.append(z_opt.detach().cpu().numpy())
+                                    all_keys.extend(batch_keys)
+                                    encoder_indices.extend([enc_idx] * len(batch_keys))
+                                    print(f"[DEBUG] Collected {encoder_name} optimized latent, batch {batch_start//batch_size_actual}, keys: {batch_keys}")
+                            except Exception as e:
+                                print(f"[WARNING] Failed to get {encoder_name} optimized latent: {e}")
                 else:
-                    mu, log_var,_ = model.encoder(x, y)
-                z = model.reparameterize(mu, log_var)
-                all_latents.append(z.detach().cpu().numpy())
+                    # Single encoder model - use original logic
+                    max_batches = max(20, len(set(key_list)) // 2)
+                    print(f"[DEBUG] Single encoder: processing up to {max_batches} batches")
+                    
+                    for batch_idx, batch in enumerate(dl):
+                        if batch_idx >= max_batches:
+                            break
+                            
+                        x, y = batch[:2]
+                        x = x.to(device)
+                        y = y.to(device)
+                        
+                        try:
+                            z_opt, _ = get_optimized_z(
+                                model, x, y,
+                                num_steps=training_opt_steps,
+                                lr=training_opt_lr,
+                                context='training'
+                            )
+                            all_latents.append(z_opt.detach().cpu().numpy())
+                            # Calculate the correct batch indices based on batch_idx and batch_size
+                            batch_size_actual = x.size(0)
+                            start_idx = batch_idx * batch_size_actual
+                            end_idx = start_idx + batch_size_actual
+                            batch_keys = key_list[start_idx:end_idx]
+                            all_keys.extend(batch_keys)
+                            encoder_indices.extend([0] * x.size(0))  # Single encoder = 0
+                        except Exception as e:
+                            print(f"[WARNING] Failed to get single encoder optimized latent: {e}")
+                    else:
+                        # Single encoder model
+                        try:
+                            z_opt, _ = get_optimized_z(
+                                model, x, y,
+                                num_steps=training_opt_steps,
+                                lr=training_opt_lr,
+                                context='training'
+                            )
+                            all_latents.append(z_opt.detach().cpu().numpy())
+                            # Calculate the correct batch indices based on batch_idx and batch_size
+                            batch_size_actual = x.size(0)
+                            start_idx = batch_idx * batch_size_actual
+                            end_idx = start_idx + batch_size_actual
+                            batch_keys = key_list[start_idx:end_idx]
+                            all_keys.extend(batch_keys)
+                            encoder_indices.extend([0] * x.size(0))  # Single encoder = 0
+                        except Exception as e:
+                            print(f"[WARNING] Failed to get single encoder optimized latent: {e}")
+            
+            print(f"[INFO] Collected {len(all_latents)} optimized latents using train_specialist.py method")
+            print(f"[DEBUG] Key distribution: {len(set(all_keys))} unique keys out of {len(all_keys)} total keys")
+            print(f"[DEBUG] First 20 keys: {all_keys[:20]}")
+            print(f"[DEBUG] Encoder indices: {len(encoder_indices)} indices, unique: {set(encoder_indices)}")
         if all_latents:
             all_latents = np.concatenate(all_latents, axis=0)
-            # Align keys length if needed
-            if len(key_list) != len(all_latents):
-                if len(key_list) > len(all_latents):
-                    key_list = key_list[:len(all_latents)]
-                else:
-                    key_list = key_list + [key_list[-1]] * (len(all_latents) - len(key_list))
+            print(f"[A] Collected {len(all_latents)} total latents")
+            
+            # For multi-encoder models, all_keys already contains the correct number of keys
+            # For single-encoder models, align keys length if needed
+            if not (hasattr(model, 'is_multi_encoder') and model.is_multi_encoder):
+                if len(key_list) != len(all_latents):
+                    if len(key_list) > len(all_latents):
+                        key_list = key_list[:len(all_latents)]
+                    else:
+                        key_list = key_list + [key_list[-1]] * (len(all_latents) - len(key_list))
+            else:
+                # Use all_keys for multi-encoder models
+                key_list = all_keys
+                print(f"[A] Multi-encoder model: using {len(key_list)} keys for {len(all_latents)} latents")
+            
             dist_metrics = _compute_distance_metrics(all_latents, key_list)
             _save_json(dist_metrics, os.path.join(out_dir, 'training_latent_distance_metrics.json'))
 
@@ -396,18 +658,111 @@ def main():
             try:
                 import matplotlib.pyplot as plt
                 from sklearn.manifold import TSNE
-                tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, max(5, len(all_latents)//4)))
-                coords = tsne.fit_transform(all_latents)
-                plt.figure(figsize=(12, 10))
-                uniq = sorted(list(set(key_list)))
-                colors = {k: plt.cm.tab20(i % 20) for i, k in enumerate(uniq)}
-                for (xv, yv), k in zip(coords, key_list):
-                    plt.scatter(xv, yv, c=[colors[k]], s=20, alpha=0.7, edgecolors='k', linewidths=0.2)
-                plt.title('Training Latent Space (one epoch)')
-                plt.savefig(os.path.join(out_dir, 'training_latent_space_epoch.png'), dpi=300, bbox_inches='tight')
-                plt.close()
                 
-                # Upload training latent space plot to WandB
+                if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
+                    # Specialist model: create t-SNE plots using the SAME method as train_specialist.py
+                    # This ensures consistency with training visualizations
+                    
+                    # Check if we have encoder indices (from stored optimized latents or fresh collection)
+                    if 'encoder_indices' in locals() and encoder_indices:
+                        print(f"[INFO] Creating t-SNE plots with encoder indices: {len(encoder_indices)} samples")
+                        
+                        # Create t-SNE of all optimized latents (encoders + PoE)
+                        tsne_combined = TSNE(n_components=2, random_state=42, perplexity=min(30, max(2, min(10, len(all_latents) - 1))))
+                        coords_combined = tsne_combined.fit_transform(all_latents)
+                        
+                        # Create visualization matching train_specialist.py style
+                        unique_keys = sorted(list(set(all_keys)))
+                        unique_encoders = sorted(list(set([idx for idx in encoder_indices if idx is not None])))
+                        
+                        # Create color map for keys (same as train_specialist.py)
+                        if len(unique_keys) <= 400:
+                            colors1 = plt.cm.tab20(np.linspace(0, 1, 20))
+                            colors2 = plt.cm.Set3(np.linspace(0, 1, 12))
+                            colors3 = plt.cm.Pastel1(np.linspace(0, 1, 9))
+                            colors4 = plt.cm.Paired(np.linspace(0, 1, 12))
+                            all_colors = np.vstack([colors1, colors2, colors3, colors4])
+                            while len(all_colors) < len(unique_keys):
+                                all_colors = np.vstack([all_colors, all_colors])
+                            key_colors = {k: all_colors[i % len(all_colors)] for i, k in enumerate(unique_keys)}
+                        else:
+                            key_colors = {k: plt.cm.viridis(i / len(unique_keys)) for i, k in enumerate(unique_keys)}
+                        
+                        # Encoder markers (same as train_specialist.py)
+                        encoder_markers = ['o', 's', '^', 'v', 'D', 'p', '*', 'h', 'H', '+']
+                        
+                        plt.figure(figsize=(16, 12))
+                        
+                        # Plot by key (colored) and encoder (markers) - EXACTLY like train_specialist.py
+                        for coord, key, enc_idx in zip(coords_combined, all_keys, encoder_indices):
+                            color = key_colors.get(key, 'gray')
+                            if enc_idx is not None and len(unique_encoders) > 1:
+                                marker = encoder_markers[enc_idx % len(encoder_markers)]
+                            else:
+                                marker = 'o'
+                            
+                            plt.scatter(coord[0], coord[1], color=color, s=80, alpha=0.7,
+                                        marker=marker, edgecolors='k', linewidths=0.5)
+                        
+                        # Create legend matching train_specialist.py style
+                        legend_elements = []
+                        keys_to_show = unique_keys[:20]  # Show only first 20 keys
+                        for key in keys_to_show:
+                            color = key_colors[key]
+                            legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=color,
+                                                           markersize=8, label=f'{key[:8]}'))
+                        
+                        if len(unique_keys) > 20:
+                            legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
+                                                           markersize=8, label=f'... and {len(unique_keys)-20} more keys'))
+                        
+                        # Add encoder legend
+                        for enc_idx in unique_encoders:
+                            if enc_idx is not None:
+                                marker = encoder_markers[enc_idx % len(encoder_markers)]
+                                legend_elements.append(plt.Line2D([0], [0], marker=marker, color='k', linestyle='',
+                                                               markersize=8, label=f'Encoder {enc_idx}'))
+                        
+                        plt.legend(handles=legend_elements, loc='upper right', fontsize=8, ncol=2)
+                        plt.title(f'Training Latent Space - Epoch 1\n(Optimized latents using train_specialist.py method - Colored by Key, Markers by Encoder)', fontsize=12)
+                        plt.xlabel('t-SNE Dimension 1')
+                        plt.ylabel('t-SNE Dimension 2')
+                        
+                        # Save combined plot
+                        plt.savefig(os.path.join(out_dir, 'training_latent_space_epoch.png'), dpi=300, bbox_inches='tight')
+                        plt.close()
+                        
+                        print(f"[OK] Created training latent space plot matching train_specialist.py style")
+                        
+                    else:
+                        print(f"[WARNING] No encoder indices available, falling back to simple plotting")
+                        # Fallback to simple plotting
+                        tsne_combined = TSNE(n_components=2, random_state=42, perplexity=min(30, max(2, min(10, len(all_latents) - 1))))
+                        coords_combined = tsne_combined.fit_transform(all_latents)
+                        
+                        plt.figure(figsize=(12, 10))
+                        uniq = sorted(list(set(all_keys)))
+                        colors = {k: plt.cm.tab20(i % 20) for i, k in enumerate(uniq)}
+                        for (xv, yv), k in zip(coords_combined, all_keys):
+                            plt.scatter(xv, yv, c=[colors[k]], s=20, alpha=0.7, edgecolors='k', linewidths=0.2)
+                        plt.title('Training Latent Space (one epoch) - Fallback Mode')
+                        plt.savefig(os.path.join(out_dir, 'training_latent_space_epoch.png'), dpi=300, bbox_inches='tight')
+                        plt.close()
+                    
+                else:
+                    # Single encoder: plot by task key
+                    tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, max(2, min(10, len(all_latents) - 1))))
+                    coords = tsne.fit_transform(all_latents)
+                    plt.figure(figsize=(12, 10))
+                    uniq = sorted(list(set(all_keys)))
+                    colors = {k: plt.cm.tab20(i % 20) for i, k in enumerate(uniq)}
+                    for (xv, yv), k in zip(coords, all_keys):
+                        plt.scatter(xv, yv, c=[colors[k]], s=20, alpha=0.7, edgecolors='k', linewidths=0.2)
+                    plt.title('Training Latent Space (one epoch)')
+                    plt.savefig(os.path.join(out_dir, 'training_latent_space_epoch.png'), dpi=300, bbox_inches='tight')
+                    plt.close()
+                
+                # Upload combined training latent space plot to WandB (for both cases)
                 if wandb_logger:
                     try:
                         wandb_logger.log({"training_latent_space": wandb.Image(os.path.join(out_dir, 'training_latent_space_epoch.png'))})
@@ -441,6 +796,20 @@ def main():
                                  encoder_idx=None, use_independent_decoder=False)
         # Save raw results
         _save_json(eval_results.get('aggregated_metrics', {}), os.path.join(out_dir, 'eval_aggregated_metrics.json'))
+        
+        # Print summary of aggregated support metrics after optimization
+        agg_metrics = eval_results.get('aggregated_metrics', {})
+        if agg_metrics and 'support_metrics' in agg_metrics:
+            support_agg = agg_metrics['support_metrics']
+            print(f"\n=== AGGREGATED SUPPORT METRICS AFTER OPTIMIZATION (Across All Keys) ===")
+            print(f"  Average Shape Accuracy: {support_agg.get('avg_shape_accuracy', 0.0):.4f}")
+            print(f"  Average Grid Accuracy: {support_agg.get('avg_grid_accuracy', 0.0):.4f}")
+            print(f"  Average Exact Accuracy: {support_agg.get('avg_exact_accuracy', 0.0):.4f}")
+            print(f"  Average Shape Loss: {support_agg.get('avg_shape_loss', 0.0):.4f}")
+            print(f"  Average Grid Loss: {support_agg.get('avg_grid_loss', 0.0):.4f}")
+            print(f"  Average Final Optimization Loss: {support_agg.get('avg_final_opt_loss', 0.0):.4f}")
+            print(f"  Total Support Samples: {support_agg.get('total_samples', 0)}")
+            print(f"==================================================================\n")
         
         # Log evaluation metrics to WandB
         if wandb_logger and 'aggregated_metrics' in eval_results:
@@ -505,6 +874,19 @@ def main():
                         f"query/{group}/grid_loss": float(query_metrics.get('grid_loss', 0.0)),
                     })
                 print(f"[OK] Logged split support/query metrics to WandB")
+                
+                # Print clear summary of support metrics after optimization
+                if support_metrics:
+                    post = support_metrics.get('post_opt', {})
+                    print(f"\n=== SUPPORT METRICS AFTER OPTIMIZATION ===")
+                    print(f"  Shape Accuracy: {post.get('shape_accuracy', 0.0):.4f}")
+                    print(f"  Grid Accuracy: {post.get('grid_accuracy', 0.0):.4f}")
+                    print(f"  Exact Accuracy: {post.get('exact_accuracy', 0.0):.4f}")
+                    print(f"  Shape Loss: {post.get('shape_loss', 0.0):.4f}")
+                    print(f"  Grid Loss: {post.get('grid_loss', 0.0):.4f}")
+                    print(f"  Final Optimization Loss: {post.get('final_opt_loss', 0.0):.4f}")
+                    print(f"  Number of Support Samples: {num_samples_sup}")
+                    print(f"==========================================\n")
             except Exception as e:
                 print(f"[WARNING] Failed split metrics logging: {e}")
 
@@ -631,6 +1013,455 @@ def main():
                     print(f"[WARNING] Failed to log query distances: {e}")
         except Exception as e:
             print(f"[WARNING] Could not create evaluation latent space plot: {e}")
+        
+        # Additional custom evaluation t-SNE: Query vs Support samples
+        try:
+            print(f"[B] Creating custom evaluation t-SNE: Query vs Support samples")
+            from utils.latent_metrics import compute_task_distance_metrics
+            
+            # Get support and query latents from evaluation results
+            eval_latent_data = eval_results.get('evaluation_latent_data', {})
+            support_data = eval_latent_data.get('support', {})
+            query_data = eval_latent_data.get('query', {})
+            
+            # Debug: Check what's in the evaluation data
+            print(f"[DEBUG] Evaluation latent data keys: {list(eval_latent_data.keys())}")
+            print(f"[DEBUG] Support data keys: {list(support_data.keys())}")
+            print(f"[DEBUG] Query data keys: {list(query_data.keys())}")
+            
+            # Debug: Check the structure more deeply
+            if support_data:
+                print(f"[DEBUG] Support data structure: {type(support_data)}")
+                for key, value in support_data.items():
+                    if isinstance(value, (list, np.ndarray)):
+                        print(f"[DEBUG] Support[{key}]: {type(value)} with length {len(value)}")
+                    else:
+                        print(f"[DEBUG] Support[{key}]: {type(value)} = {value}")
+                        
+            if query_data:
+                print(f"[DEBUG] Query data structure: {type(query_data)}")
+                for key, value in query_data.items():
+                    if isinstance(value, (list, np.ndarray)):
+                        print(f"[DEBUG] Query[{key}]: {type(value)} with length {len(value)}")
+                    else:
+                        print(f"[DEBUG] Query[{key}]: {type(value)} = {value}")
+            
+            if hasattr(model, 'is_multi_encoder') and model.is_multi_encoder:
+                # For specialist models, create COMBINED plot with all encoders + PoE
+                print(f"[B] Creating combined evaluation t-SNE with all encoders + PoE")
+                
+                # The new structure has flattened support/query data
+                # Check if we have the new structure or old structure
+                if 'latent_zs' in support_data and 'latent_zs' in query_data:
+                    # New structure: flattened data
+                    print(f"[DEBUG] Using new flattened data structure")
+                    
+                    support_latents = np.array(support_data.get('latent_zs', []))
+                    query_latents = np.array(query_data.get('latent_zs', []))
+                    support_keys = support_data.get('keys', [])
+                    query_keys = query_data.get('keys', [])
+                    
+                    print(f"[DEBUG] Support latents shape: {support_latents.shape if len(support_latents) > 0 else 'empty'}")
+                    print(f"[DEBUG] Query latents shape: {query_latents.shape if len(query_latents) > 0 else 'empty'}")
+                    print(f"[DEBUG] Support keys length: {len(support_keys)}")
+                    print(f"[DEBUG] Query keys length: {len(query_keys)}")
+                    
+                    if len(support_latents) > 0 and len(query_latents) > 0:
+                        # Combine support and query latents
+                        combined_latents = np.vstack([support_latents, query_latents])
+                        
+                        # Create t-SNE
+                        import matplotlib.pyplot as plt
+                        from sklearn.manifold import TSNE
+                        tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, max(2, min(10, len(combined_latents) - 1))))
+                        coords = tsne.fit_transform(combined_latents)
+                        
+                        plt.figure(figsize=(16, 12))
+                        
+                        # SIMPLIFIED EVALUATION ENCODING SCHEME:
+                        # 1. Support latents: Color by KEY, Shape by SAMPLE TYPE (circle for PoE before optimization)
+                        # 2. Query latents: Color by KEY, Shape by SAMPLE TYPE (square for optimized PoE)
+                        
+                        # Get keys from the evaluation results metadata
+                        eval_metadata = eval_results.get('evaluation_metadata', {})
+                        all_keys = eval_metadata.get('task_keys', [])
+                        print(f"[DEBUG] Found {len(all_keys)} keys from evaluation metadata: {all_keys[:10]}...")
+                        
+                        if all_keys:
+                            # Create color mapping for keys
+                            if len(all_keys) <= 400:
+                                colors1 = plt.cm.tab20(np.linspace(0, 1, 20))
+                                colors2 = plt.cm.Set3(np.linspace(0, 1, 12))
+                                colors3 = plt.cm.Pastel1(np.linspace(0, 1, 9))
+                                colors4 = plt.cm.Paired(np.linspace(0, 1, 12))
+                                all_colors = np.vstack([colors1, colors2, colors3, colors4])
+                                while len(all_colors) < len(all_keys):
+                                    all_colors = np.vstack([all_colors, all_colors])
+                                key_colors = {k: all_colors[i % len(all_colors)] for i, k in enumerate(all_keys)}
+                            else:
+                                key_colors = {k: plt.cm.viridis(i / len(all_keys)) for i, k in enumerate(all_keys)}
+                            
+                            # Plot support samples: Color by KEY, Shape by SAMPLE TYPE (circle for PoE before optimization)
+                            sup_coords = coords[:len(support_latents)]
+                            print(f"[DEBUG] Plotting {len(sup_coords)} support samples")
+                            
+                            # Assign keys to support samples based on evaluation order
+                            support_keys_assigned = []
+                            for i in range(len(sup_coords)):
+                                key_idx = i % len(all_keys)
+                                support_keys_assigned.append(all_keys[key_idx])
+                            
+                            for i, coord in enumerate(sup_coords):
+                                # For support samples, use circle marker (PoE before optimization)
+                                marker = 'o'  # Circle for all support samples
+                                
+                                # Get the key for this sample
+                                sample_key = support_keys_assigned[i] if i < len(support_keys_assigned) else 'unknown'
+                                
+                                color = key_colors.get(sample_key, 'gray')
+                                plt.scatter(coord[0], coord[1], color=color, s=60, alpha=0.8,
+                                            marker=marker, edgecolors='k', linewidths=0.5)
+                            
+                            # Plot query samples: Color by KEY, Shape by SAMPLE TYPE (square for optimized PoE)
+                            qry_coords = coords[len(support_latents):]
+                            
+                            # Assign keys to query samples based on evaluation order
+                            query_keys_assigned = []
+                            for i in range(len(qry_coords)):
+                                key_idx = i % len(all_keys)
+                                query_keys_assigned.append(all_keys[key_idx])
+                            
+                            for i, coord in enumerate(qry_coords):
+                                # For query samples, use square marker (optimized PoE)
+                                marker = 's'  # Square for all query samples
+                                
+                                # Get the key for this sample
+                                sample_key = query_keys_assigned[i] if i < len(query_keys_assigned) else 'unknown'
+                                
+                                color = key_colors.get(sample_key, 'gray')
+                                plt.scatter(coord[0], coord[1], color=color, s=80, alpha=0.9,
+                                            marker=marker, edgecolors='k', linewidths=0.5)
+                            
+                            # Create simplified legend: Color by KEY, Shape by SAMPLE TYPE
+                            legend_elements = []
+                            
+                            # Key legend (color) - show first 20 keys
+                            keys_to_show = all_keys[:20]
+                            for key in keys_to_show:
+                                color = key_colors[key]
+                                legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=color,
+                                                               markersize=8, label=f'Key: {key[:8]}'))
+                            
+                            if len(all_keys) > 20:
+                                legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
+                                                               markersize=8, label=f'... and {len(all_keys)-20} more keys'))
+                            
+                            # Sample type legend (shape)
+                            legend_elements.append(plt.Line2D([0], [0], marker='o', color='k', linestyle='', markersize=8, label='Support (PoE before optimization)'))
+                            legend_elements.append(plt.Line2D([0], [0], marker='s', color='k', linestyle='', markersize=8, label='Query (Optimized PoE)'))
+                            
+                            plt.legend(handles=legend_elements, loc='upper right', fontsize=8, ncol=2)
+                            plt.title('Evaluation Latent Space - Support vs Query\n(Color: Key, Shape: Support/Query)', fontsize=12)
+                            plt.xlabel('t-SNE Dimension 1')
+                            plt.ylabel('t-SNE Dimension 2')
+                            plt.tight_layout()
+                            plt.savefig(os.path.join(out_dir, 'eval_latent_space_combined_all_encoders_poe.png'), dpi=300, bbox_inches='tight')
+                            plt.close()
+                            
+                            print(f"[OK] Saved combined evaluation t-SNE: {len(support_latents)} support + {len(query_latents)} query samples across all encoders + PoE")
+                            
+                            # Upload to WandB
+                            if wandb_logger:
+                                try:
+                                    wandb_logger.log({"evaluation_latent_space_combined": wandb.Image(os.path.join(out_dir, 'eval_latent_space_combined_all_encoders_poe.png'))})
+                                    print(f"[OK] Uploaded combined evaluation t-SNE to WandB")
+                                except Exception as e:
+                                    print(f"[WARNING] Failed to upload combined evaluation t-SNE to WandB: {e}")
+                        else:
+                            print(f"[WARNING] No keys found in evaluation metadata")
+                    else:
+                        print(f"[WARNING] No support or query latents found in new structure")
+                else:
+                    # Old structure: separate encoder/poe keys
+                    print(f"[DEBUG] Using old encoder/poe structure")
+                    
+                    # Collect all support and query latents with proper key tracking
+                    all_support_latents = []
+                    all_query_latents = []
+                    all_support_labels = []
+                    all_query_labels = []
+                    all_support_keys = []
+                    all_query_keys = []
+                    
+                    # Collect PoE latents first
+                    if 'poe' in support_data and 'poe' in query_data:
+                        poe_sup = np.array(support_data['poe'].get('latent_zs', []))
+                        poe_qry = np.array(query_data['poe'].get('latent_zs', []))
+                        poe_sup_keys = support_data['poe'].get('keys', [])
+                        poe_qry_keys = query_data['poe'].get('keys', [])
+                        
+                        if len(poe_sup) > 0 and len(poe_qry) > 0:
+                            all_support_latents.append(poe_sup)
+                            all_query_latents.append(poe_qry)
+                            all_support_labels.extend(['PoE'] * len(poe_sup))
+                            all_query_labels.extend(['PoE'] * len(poe_qry))
+                            all_support_keys.extend(poe_sup_keys[:len(poe_sup)])
+                            all_query_keys.extend(poe_qry_keys[:len(poe_qry)])
+                    
+                    # Collect encoder latents
+                    for enc_idx in range(model.num_encoders):
+                        enc_key = f'encoder_{enc_idx}'
+                        if enc_key in support_data and enc_key in query_data:
+                            enc_sup = np.array(support_data[enc_key].get('latent_zs', []))
+                            enc_qry = np.array(query_data[enc_key].get('latent_zs', []))
+                            enc_sup_keys = support_data[enc_key].get('keys', [])
+                            enc_qry_keys = query_data[enc_key].get('keys', [])
+                            
+                            if len(enc_sup) > 0 and len(enc_qry) > 0:
+                                all_support_latents.append(enc_sup)
+                                all_query_latents.append(enc_qry)
+                                all_support_labels.extend([f'Encoder {enc_idx}'] * len(enc_sup))
+                                all_query_labels.extend([f'Encoder {enc_idx}'] * len(enc_qry))
+                                all_support_keys.extend(enc_sup_keys[:len(enc_sup)])
+                                all_query_keys.extend(enc_qry_keys[:len(enc_qry)])
+                    
+                    if all_support_latents and all_query_latents:
+                        # Combine all support and query latents
+                        combined_support = np.vstack(all_support_latents)
+                        combined_query = np.vstack(all_query_latents)
+                        combined_latents = np.vstack([combined_support, combined_query])
+                        
+                        # Create t-SNE
+                        import matplotlib.pyplot as plt
+                        from sklearn.manifold import TSNE
+                        tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, max(2, min(10, len(combined_latents) - 1))))
+                        coords = tsne.fit_transform(combined_latents)
+                        
+                        plt.figure(figsize=(16, 12))
+                        
+                        # SIMPLIFIED EVALUATION ENCODING SCHEME:
+                        # 1. Support latents: Color by KEY, Shape by SAMPLE TYPE (circle for PoE before optimization)
+                        # 2. Query latents: Color by KEY, Shape by SAMPLE TYPE (square for optimized PoE)
+                        
+                        # First, try to get keys from the evaluation results directly
+                        # The evaluation processes different keys sequentially, so we should be able to get them
+                        all_keys = []
+                        
+                        # Try to get keys from the evaluation results metadata
+                        eval_metadata = eval_results.get('evaluation_metadata', {})
+                        if 'task_keys' in eval_metadata:
+                            all_keys = eval_metadata['task_keys']
+                            print(f"[DEBUG] Found keys from evaluation metadata: {all_keys}")
+                        else:
+                            # Fallback: try to get keys from the evaluation results structure
+                            # Look for keys in the evaluation results
+                            for key in eval_results.keys():
+                                if isinstance(eval_results[key], dict) and 'keys' in eval_results[key]:
+                                    all_keys.extend(eval_results[key]['keys'])
+                                    print(f"[DEBUG] Found keys in {key}: {eval_results[key]['keys']}")
+                            
+                            # If still no keys, try to get them from the support/query data
+                            if not all_keys:
+                                for enc_key in support_data.keys():
+                                    if enc_key in support_data and support_data[enc_key].get('keys'):
+                                        all_keys.extend(support_data[enc_key]['keys'])
+                                for enc_key in query_data.keys():
+                                    if enc_key in query_data and query_data[enc_key].get('keys'):
+                                        all_keys.extend(query_data[enc_key]['keys'])
+                        
+                        unique_keys = sorted(list(set(all_keys)))
+                        print(f"[DEBUG] Found {len(unique_keys)} unique keys: {unique_keys[:10]}...")
+                        
+                        if len(unique_keys) <= 400:
+                            colors1 = plt.cm.tab20(np.linspace(0, 1, 20))
+                            colors2 = plt.cm.Set3(np.linspace(0, 1, 12))
+                            colors3 = plt.cm.Pastel1(np.linspace(0, 1, 9))
+                            colors4 = plt.cm.Paired(np.linspace(0, 1, 12))
+                            all_colors = np.vstack([colors1, colors2, colors3, colors4])
+                            while len(all_colors) < len(unique_keys):
+                                all_colors = np.vstack([all_colors, all_colors])
+                            key_colors = {k: all_colors[i % len(all_colors)] for i, k in enumerate(unique_keys)}
+                        else:
+                            key_colors = {k: plt.cm.viridis(i / len(unique_keys)) for i, k in enumerate(unique_keys)}
+                        
+                        # Plot support samples: Color by KEY, Shape by SAMPLE TYPE (circle for PoE before optimization)
+                        sup_coords = coords[:len(combined_support)]
+                        print(f"[DEBUG] Plotting {len(sup_coords)} support samples")
+                        
+                        # Assign keys to support samples based on evaluation order
+                        # Since the evaluation processes keys sequentially, we can assign keys in order
+                        support_keys_assigned = []
+                        if unique_keys:
+                            # Distribute keys across support samples
+                            for i in range(len(sup_coords)):
+                                key_idx = i % len(unique_keys)
+                                support_keys_assigned.append(unique_keys[key_idx])
+                        else:
+                            support_keys_assigned = ['unknown'] * len(sup_coords)
+                        
+                        for i, (coord, label) in enumerate(zip(sup_coords, all_support_labels)):
+                            # For support samples, use circle marker regardless of encoder (all are PoE before optimization)
+                            marker = 'o'  # Circle for all support samples (PoE before optimization)
+                            
+                            # Get the key for this sample
+                            sample_key = support_keys_assigned[i] if i < len(support_keys_assigned) else 'unknown'
+                            
+                            color = key_colors.get(sample_key, 'gray')
+                            plt.scatter(coord[0], coord[1], color=color, s=60, alpha=0.8,
+                                        marker=marker, edgecolors='k', linewidths=0.5)
+                        
+                        # Plot query samples: Color by KEY, Shape by SAMPLE TYPE (square for optimized PoE)
+                        qry_coords = coords[len(combined_support):]
+                        
+                        # Assign keys to query samples based on evaluation order
+                        query_keys_assigned = []
+                        if unique_keys:
+                            # Distribute keys across query samples
+                            for i in range(len(qry_coords)):
+                                key_idx = i % len(unique_keys)
+                                query_keys_assigned.append(unique_keys[key_idx])
+                        else:
+                            query_keys_assigned = ['unknown'] * len(qry_coords)
+                    
+                        for i, (coord, label) in enumerate(zip(qry_coords, all_query_labels)):
+                            # For query samples, use square marker (optimized PoE)
+                            marker = 's'  # Square for all query samples (optimized PoE)
+                            
+                            # Get the key for this sample
+                            sample_key = query_keys_assigned[i] if i < len(query_keys_assigned) else 'unknown'
+                            
+                            color = key_colors.get(sample_key, 'gray')
+                            plt.scatter(coord[0], coord[1], color=color, s=80, alpha=0.9,
+                                        marker=marker, edgecolors='k', linewidths=0.5)
+                        
+                        # Create simplified legend: Color by KEY, Shape by SAMPLE TYPE
+                        legend_elements = []
+                        
+                        # Key legend (color) - show first 20 keys
+                        keys_to_show = unique_keys[:20]
+                        for key in keys_to_show:
+                            color = key_colors[key]
+                            legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=color,
+                                                           markersize=8, label=f'Key: {key[:8]}'))
+                        
+                        if len(unique_keys) > 20:
+                            legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
+                                                           markersize=8, label=f'... and {len(unique_keys)-20} more keys'))
+                        
+                        # Sample type legend (shape)
+                        legend_elements.append(plt.Line2D([0], [0], marker='o', color='k', linestyle='', markersize=8, label='Support (PoE before optimization)'))
+                        legend_elements.append(plt.Line2D([0], [0], marker='s', color='k', linestyle='', markersize=8, label='Query (Optimized PoE)'))
+                        
+                        plt.legend(handles=legend_elements, loc='upper right', fontsize=8, ncol=2)
+                        plt.title('Evaluation Latent Space - Support vs Query\n(Color: Key, Shape: Support/Query)', fontsize=12)
+                        plt.xlabel('t-SNE Dimension 1')
+                        plt.ylabel('t-SNE Dimension 2')
+                        plt.tight_layout()
+                        plt.savefig(os.path.join(out_dir, 'eval_latent_space_combined_all_encoders_poe.png'), dpi=300, bbox_inches='tight')
+                        plt.close()
+                        
+                        print(f"[OK] Saved combined evaluation t-SNE: {len(combined_support)} support + {len(combined_query)} query samples across all encoders + PoE")
+                        
+                        # Upload to WandB
+                        if wandb_logger:
+                            try:
+                                wandb_logger.log({"evaluation_latent_space_combined": wandb.Image(os.path.join(out_dir, 'eval_latent_space_combined_all_encoders_poe.png'))})
+                                print(f"[OK] Uploaded combined evaluation t-SNE to WandB")
+                            except Exception as e:
+                                print(f"[WARNING] Failed to upload combined evaluation t-SNE to WandB: {e}")
+                
+
+            else:
+                # For single encoder models, create one combined plot with consistent encoding
+                if 'poe' in support_data and 'poe' in query_data:
+                    sup_latents = np.array(support_data['poe'].get('latent_zs', []))
+                    qry_latents = np.array(query_data['poe'].get('latent_zs', []))
+                    sup_keys = support_data['poe'].get('keys', [])
+                    qry_keys = query_data['poe'].get('keys', [])
+                    
+                    if len(sup_latents) > 0 and len(qry_latents) > 0:
+                        combined_latents = np.vstack([sup_latents, qry_latents])
+                        
+                        import matplotlib.pyplot as plt
+                        from sklearn.manifold import TSNE
+                        tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, max(2, min(10, len(combined_latents) - 1))))
+                        coords = tsne.fit_transform(combined_latents)
+                        
+                        plt.figure(figsize=(14, 10))
+                        
+                        # CONSISTENT ENCODING SCHEME: Color by KEY, Shape by SAMPLE TYPE
+                        # Collect all keys
+                        all_keys = sup_keys + qry_keys
+                        unique_keys = sorted(list(set(all_keys)))
+                        
+                        # Create color map for keys (same as train_specialist.py)
+                        if len(unique_keys) <= 400:
+                            colors1 = plt.cm.tab20(np.linspace(0, 1, 20))
+                            colors2 = plt.cm.Set3(np.linspace(0, 1, 12))
+                            colors3 = plt.cm.Pastel1(np.linspace(0, 1, 9))
+                            colors4 = plt.cm.Paired(np.linspace(0, 1, 12))
+                            all_colors = np.vstack([colors1, colors2, colors3, colors4])
+                            while len(all_colors) < len(unique_keys):
+                                all_colors = np.vstack([all_colors, all_colors])
+                            key_colors = {k: all_colors[i % len(all_colors)] for i, k in enumerate(unique_keys)}
+                        else:
+                            key_colors = {k: plt.cm.viridis(i / len(unique_keys)) for i, k in enumerate(unique_keys)}
+                        
+                        # Plot support samples: Color by KEY, Shape by SAMPLE TYPE (circle)
+                        sup_coords = coords[:len(sup_latents)]
+                        for i, coord in enumerate(sup_coords):
+                            sample_key = sup_keys[i] if i < len(sup_keys) else 'unknown'
+                            color = key_colors.get(sample_key, 'gray')
+                            plt.scatter(coord[0], coord[1], color=color, s=60, alpha=0.8,
+                                        marker='o', edgecolors='k', linewidths=0.5)
+                        
+                        # Plot query samples: Color by KEY, Shape by SAMPLE TYPE (square)
+                        qry_coords = coords[len(sup_latents):]
+                        for i, coord in enumerate(qry_coords):
+                            sample_key = qry_keys[i] if i < len(qry_keys) else 'unknown'
+                            color = key_colors.get(sample_key, 'gray')
+                            plt.scatter(coord[0], coord[1], color=color, s=80, alpha=0.9,
+                                        marker='s', edgecolors='k', linewidths=0.5)
+                        
+                        # Create legend: Color by KEY, Shape by SAMPLE TYPE
+                        legend_elements = []
+                        
+                        # Key legend (color)
+                        keys_to_show = unique_keys[:20]  # Show only first 20 keys
+                        for key in keys_to_show:
+                            color = key_colors[key]
+                            legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=color,
+                                                           markersize=8, label=f'Key: {key[:8]}'))
+                        
+                        if len(unique_keys) > 20:
+                            legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
+                                                           markersize=8, label=f'... and {len(unique_keys)-20} more keys'))
+                        
+                        # Sample type legend
+                        legend_elements.append(plt.Line2D([0], [0], marker='o', color='k', linestyle='', markersize=8, label='Support'))
+                        legend_elements.append(plt.Line2D([0], [0], marker='s', color='k', linestyle='', markersize=8, label='Query (Optimized PoE)'))
+                        
+                        plt.legend(handles=legend_elements, loc='upper right', fontsize=8, ncol=2)
+                        plt.title('Evaluation Latent Space - Single Encoder\n(Color: Key, Shape: Support/Query)', fontsize=12)
+                        plt.xlabel('t-SNE Dimension 1')
+                        plt.ylabel('t-SNE Dimension 2')
+                        plt.tight_layout()
+                        plt.savefig(os.path.join(out_dir, 'eval_latent_space_support_vs_query.png'), dpi=300, bbox_inches='tight')
+                        plt.close()
+                        
+                        print(f"[OK] Saved evaluation t-SNE: {len(sup_latents)} support + {len(qry_latents)} query samples")
+                        
+                        # Upload to WandB
+                        if wandb_logger:
+                            try:
+                                wandb_logger.log({"evaluation_latent_space": wandb.Image(os.path.join(out_dir, 'eval_latent_space_support_vs_query.png'))})
+                                print(f"[OK] Uploaded evaluation t-SNE to WandB")
+                            except Exception as e:
+                                print(f"[WARNING] Failed to upload evaluation t-SNE to WandB: {e}")
+        except Exception as e:
+            print(f"[WARNING] Could not create custom evaluation t-SNE: {e}")
+            import traceback
+            traceback.print_exc()
 
     except Exception as e:
         print(f"[WARNING] Section (b) failed: {e}")

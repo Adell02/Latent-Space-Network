@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import json
 import numpy as np
 import os
+from collections import defaultdict
 
 from models.base_model import LatentProgramNetwork, compute_loss, gaussian_poe
 from utils.settings_manager import settings
@@ -234,12 +235,36 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler,
     num_steps = latent_optimization['training']['num_steps']
     lr = latent_optimization['training']['learning_rate']
     
+    # Get per-key latent collection limits from settings
+    _max_latents_per_key = latent_optimization.get('training', {}).get('max_latents_per_key', 100)
+    
     # Calculate max latents to store (for infinite dataloader: batch_size * batches_per_epoch)
     training_settings = settings.get_training_settings()
     batch_size = training_settings.get('batch_size', 4)
     batches_per_epoch = training_settings.get('batches_per_epoch', 10)
     max_latents_to_store = max(batch_size * batches_per_epoch, 1000)
+    
+    # Ensure the per-epoch total cap accommodates per-key limits
+    data_settings = settings.get_data_settings()
+    training_keys = data_settings.get('training_keys', [data_settings.get('key', None)])
+    if isinstance(training_keys, str) and training_keys.lower() == 'all':
+        # For 'all' keys, estimate number of keys (will be capped by n_max_keys)
+        n_max_keys = data_settings.get('n_max_keys', 20)
+        estimated_keys = min(n_max_keys, 20)  # Conservative estimate
+    else:
+        estimated_keys = len(training_keys) if training_keys else 1
+    
+    if estimated_keys > 0:
+        max_latents_to_store = max(max_latents_to_store, _max_latents_per_key * estimated_keys)
+    
     print(f"  [DEBUG] Will store max {max_latents_to_store} latents per encoder (batch_size={batch_size} * batches_per_epoch={batches_per_epoch})")
+    print(f"  [DEBUG] Per-key limit: {_max_latents_per_key}, estimated keys: {estimated_keys}")
+    
+    # Track how many latents we've stored per key within this epoch
+    # Reset the global counter at the start of each epoch to prevent indefinite accumulation
+    if not hasattr(model, '_global_per_key_counts') or current_epoch_num == 1:
+        model._global_per_key_counts = defaultdict(int)
+    _per_key_counts = model._global_per_key_counts
 
     # Zero gradients before epoch
     optimizer.zero_grad()
@@ -315,6 +340,19 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler,
                     for enc_idx in range(model.num_encoders):
                         # Only store latents if we haven't reached the limit
                         if len(optimized_latents) < max_latents_to_store:
+                            # Determine key label for per-key limiting
+                            if batch_keys is not None and i < len(batch_keys):
+                                try:
+                                    _key_label = str(batch_keys[i].item())
+                                except Exception:
+                                    _key_label = str(batch_keys[i])
+                            else:
+                                _key_label = 'unknown'
+                            
+                            # Enforce per-key cap
+                            if _per_key_counts[_key_label] >= _max_latents_per_key:
+                                continue  # Skip if this key has reached its cap
+                            
                             z_optimized, _ = get_optimized_z(
                                 model, input_sample, target_sample,
                                 context='training',
@@ -324,17 +362,26 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler,
                             )
                             
                             optimized_latents.append(z_optimized[0].cpu().numpy())
-                            
-                            if batch_keys is not None and i < len(batch_keys):
-                                optimized_keys.append(batch_keys[i])
-                            else:
-                                optimized_keys.append('unknown')
-                            
+                            optimized_keys.append(_key_label)
                             optimized_encoder_indices.append(enc_idx)
+                            _per_key_counts[_key_label] += 1
                 else:
                     # Single encoder or individual encoder training
                     # Only store latents if we haven't reached the limit
                     if len(optimized_latents) < max_latents_to_store:
+                        # Determine key label for per-key limiting
+                        if batch_keys is not None and i < len(batch_keys):
+                            try:
+                                _key_label = str(batch_keys[i].item())
+                            except Exception:
+                                _key_label = str(batch_keys[i])
+                        else:
+                            _key_label = 'unknown'
+                        
+                        # Enforce per-key cap
+                        if _per_key_counts[_key_label] >= _max_latents_per_key:
+                            continue  # Skip if this key has reached its cap
+                        
                         z_optimized, _ = get_optimized_z(
                             model, input_sample, target_sample,
                             context='training',
@@ -344,16 +391,18 @@ def train_model(model, dataloader, optimizer, run_dir, logger, scaler,
                         )
                         
                         optimized_latents.append(z_optimized[0].cpu().numpy())
-                        
-                        if batch_keys is not None and i < len(batch_keys):
-                            optimized_keys.append(batch_keys[i])
-                        else:
-                            optimized_keys.append('unknown')
-                        
+                        optimized_keys.append(_key_label)
                         optimized_encoder_indices.append(encoder_idx if is_multi_encoder else 0)
+                        _per_key_counts[_key_label] += 1
 
     # Store optimized latents for visualization (only from current epoch)
     print(f"  [DEBUG] Collected {len(optimized_latents)} latents (limit was {max_latents_to_store})")
+    
+    # Debug: Show current per-key counts
+    if _per_key_counts:
+        print(f"  [DEBUG] Current per-key latent counts: {dict(_per_key_counts)}")
+        total_collected = sum(_per_key_counts.values())
+        print(f"  [DEBUG] Total latents collected across all keys: {total_collected}")
     if optimized_latents:
         # For multi-encoder training, accumulate latents from all encoders in current epoch only
         if hasattr(model, 'epoch_optimized_latents') and model.epoch_optimized_latents and encoder_idx is not None and not joint_training:

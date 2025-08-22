@@ -1,0 +1,71 @@
+{
+  "data_settings": {
+    "training_keys": "all",
+    "n_max_keys": 20,
+    "training_seed": 42,
+    "eval_seed": 1,
+    "n": 1,
+    "run_base_dir": "runs_re_arc",
+    "split_across_encoders": true
+  },
+  "training_settings": {
+    "data_source": "synthetic",
+    "use_ood_for_training": false,
+    "num_epochs": 10,
+    "batch_size": 32,
+    "gradient_accumulation_steps": 1,
+    "learning_rate": 0.0004,
+    "optimizer_weight_decay": 0.0,
+    "beta": 0.001,
+    "beta_warmup_epochs": 3,
+    "use_mixed_precision": true,
+    "save_checkpoint_interval": 1,
+    "infinite_dataloader": true,
+    "batches_per_epoch": 10,
+    "return_task_keys": true,
+    "enable_training_latent_tsne_plot": true
+  },
+  "evaluation_settings": {
+    "data_source": "ood_original_arc",
+    "use_ood_for_evaluation": true,
+    "eval_keys": "all",
+    "n_max_eval_keys": 50,
+    "n_max_trajectory_plots": 5,
+    "eval_n_samples": 10,
+    "eval_n_queries": 10,
+    "eval_epoch": "final_phase_b",
+    "visualize_n_values": 1,
+    "enable_evaluation_latent_tsne_plot": true,
+    "trajectory_decoder_type": "shared"
+  },
+  "model_architecture": {
+    "num_encoders": 2,
+    "encoder_layers": 4,
+    "decoder_layers": 3,
+    "encoder_heads": 6,
+    "decoder_heads": 6,
+    "encoder_hidden_dim": 150,
+    "decoder_hidden_dim": 150,
+    "latent_dim": 64,
+    "dropout": 1e-6,
+    "decoder_input_dropout": 0,
+    "max_length": 902,
+    "encoder_max_length": 1805,
+    "decoder_max_length": 902,
+    "use_gradient_checkpointing": true,
+    "use_next_position_embeddings": true
+  },
+  "latent_optimization": {
+    "training": {
+      "enabled": true,
+      "num_steps": 0,
+      "learning_rate": 0.1
+    },
+    "inference": {
+      "enabled": true,
+      "num_steps": 10,
+      "learning_rate": 0.1
+    },
+    "method": "gradient"
+  }
+}

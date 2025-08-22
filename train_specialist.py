@@ -81,6 +81,7 @@ import numpy as np
 import os
 import argparse
 from tqdm import tqdm
+from collections import defaultdict
 
 from models.base_model import LatentProgramNetwork, compute_loss
 from utils.settings_manager import settings
@@ -902,8 +903,24 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
             _lat_cfg = settings.get_latent_optimization()
             _opt_num_steps = _lat_cfg.get('training', {}).get('num_steps', 0)
             _opt_lr = _lat_cfg.get('training', {}).get('learning_rate', 0.0)
+            _max_latents_per_key = _lat_cfg.get('training', {}).get('max_latents_per_key', 100)
             _batches_per_epoch = settings.get_training_settings().get('batches_per_epoch', 10)
             _max_latents_to_store = max(BATCH_SIZE * _batches_per_epoch, 1000)
+            # Ensure the per-epoch total cap is not below the desired per-key target across all keys
+            try:
+                _num_training_keys = len(TRAINING_KEYS) if 'TRAINING_KEYS' in locals() else len(settings.get_data_settings().get('training_keys', []))
+            except Exception:
+                _num_training_keys = 0
+            if _num_training_keys:
+                _max_latents_to_store = max(_max_latents_to_store, _max_latents_per_key * _num_training_keys)
+            
+            print(f"    DEBUG: Latent collection limits - per_key: {_max_latents_per_key}, total: {_max_latents_to_store}, training_keys: {_num_training_keys}")
+            # Track how many latents we've stored per key within this epoch
+            # Use a global counter that persists across encoders to prevent excessive collection
+            # Reset the global counter at the start of each epoch to prevent indefinite accumulation
+            if not hasattr(model, '_global_per_key_counts') or epoch == 0:
+                model._global_per_key_counts = defaultdict(int)
+            _per_key_counts = model._global_per_key_counts
             
             # Progress bar for this encoder's training
             pbar = tqdm(dataloader, desc=f"Encoder {encoder_idx} Epoch {epoch+1}/{phase_epochs}")
@@ -1090,6 +1107,17 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                             try:
                                 _inp = input_seq[i:i+1]
                                 _tgt = target_seq[i:i+1]
+                                # Determine key label for per-key limiting
+                                if batch_keys is not None and i < len(batch_keys):
+                                    try:
+                                        _key_label = str(batch_keys[i].item())
+                                    except Exception:
+                                        _key_label = str(batch_keys[i])
+                                else:
+                                    _key_label = 'unknown'
+                                # Enforce per-key cap
+                                if _per_key_counts[_key_label] >= _max_latents_per_key:
+                                    continue
                                 z_opt, _ = get_optimized_z(
                                     model, _inp, _tgt,
                                     context='training',
@@ -1099,11 +1127,9 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                                     use_independent_decoder=True
                                 )
                                 opt_latents.append(z_opt[0].cpu().numpy())
-                                if batch_keys is not None and i < len(batch_keys):
-                                    opt_keys.append(batch_keys[i])
-                                else:
-                                    opt_keys.append('unknown')
+                                opt_keys.append(_key_label)
                                 opt_enc_indices.append(encoder_idx)
+                                _per_key_counts[_key_label] += 1
                                 print(f"    DEBUG: Phase A latent {i} collected successfully")
                             except Exception as e:
                                 print(f"    DEBUG: Failed to collect latent for sample {i}: {e}")
@@ -1139,6 +1165,12 @@ def train_phase_a_pretraining(model, encoder_datasets, device, logger, wandb_log
                 print(f"    DEBUG: opt_latents collected this epoch: {len(opt_latents) if opt_latents else 0}")
             else:
                 print(f"    DEBUG: opt_latents not initialized this epoch")
+            
+            # Debug: Show current per-key counts
+            if _per_key_counts:
+                print(f"    DEBUG: Current per-key latent counts: {dict(_per_key_counts)}")
+                total_collected = sum(_per_key_counts.values())
+                print(f"    DEBUG: Total latents collected across all keys: {total_collected}")
             
             encoder_losses.append(avg_epoch_loss)
             

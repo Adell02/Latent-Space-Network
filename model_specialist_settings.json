@@ -12,7 +12,7 @@
         "data_source": "synthetic",
         "use_ood_for_training": false,
         "num_epochs": 10,
-        "batch_size": 32,
+        "batch_size": 64,
         "gradient_accumulation_steps": 1,
         "learning_rate": 0.0004,
         "optimizer_weight_decay": 0.0,
@@ -21,7 +21,7 @@
         "use_mixed_precision": true,
         "save_checkpoint_interval": 1,
         "infinite_dataloader": true,
-        "batches_per_epoch": 10,
+        "batches_per_epoch": 20,
         "return_task_keys": true,
         "enable_training_latent_tsne_plot": true,
         "cross_pair_loss": {
@@ -54,7 +54,8 @@
         "training": {
             "enabled": true,
             "num_steps": 0,
-            "learning_rate": 0.1
+            "learning_rate": 0.1,
+            "max_latents_per_key": 100
         },
         "inference": {
             "enabled": true,
@@ -160,13 +161,13 @@
         "log_interval": 1,
         "log_trajectory_plots": true,
         "trajectory_max_samples": 10,
-        "eval_log_interval": 3,
+        "eval_log_interval": 40,
         "log_standalone_trajectory_plots": false,
         "log_main_reconstruction_plots": false
     },
     "specialist_training": {
         "phase_a": {
-            "epochs": 20,
+            "epochs": 40,
             "description": "Encoder pre-training phase",
             "anti_batch_size": 0,
             "anti_batch_description": "Proportion (0-1) of anti-samples (from other encoders) mixed into each encoder's training batch to encourage specialization",
@@ -181,7 +182,7 @@
             }
         },
         "phase_b": {
-            "epochs": 15,
+            "epochs": 40,
             "description": "Decoder training phase",
             "enhanced_training": {
                 "use_cyclical_beta": true,
